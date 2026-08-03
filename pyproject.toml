@@ -1,0 +1,28 @@
+[build-system]
+requires = ["scikit-build-core>=0.9", "nanobind>=2.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "elastiqp"
+dynamic = ["version"]
+description = "An always-feasible QP solver for constrained robot control"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Daniel Morton", email = "danielpmorton@gmail.com" }]
+license = { file = "LICENSE" }
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+jax = ["jax>=0.9.1"]  # minimum version dictated by FFI compatibility
+
+[project.urls]
+Homepage = "https://github.com/StanfordASL/elastiqp"
+
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "package.xml"
+regex = '<version>(?P<value>[0-9.]+)</version>'
+
+[tool.scikit-build]
+minimum-version = "0.9"
+wheel.packages = ["python/elastiqp"]

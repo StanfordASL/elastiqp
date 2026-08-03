@@ -1,0 +1,824 @@
+// Correctness tests for the PDAL backend
+//
+// Checks against
+// (1) PIQP on hard-constrained-yet-feasible problems where the elastic
+// result should coincide with the PIQP result;
+// (2) PIQP on the expanded (n+p) variable form of the elastic problem
+// (3) ElastiQP-IPM on identical problems
+
+#include <cstdio>
+#include <random>
+
+#include "elastiqp/ipm.hpp"
+#include "elastiqp/pdal.hpp"
+#include "piqp/piqp.hpp"
+#include "problem_gen.hpp"
+
+using Eigen::MatrixXd;
+using Eigen::VectorXd;
+using problem_gen::QPData;
+
+// Make sure values for common settings in PDAL and IPM are the same
+static_assert(
+    elastiqp::Settings{}.eps_abs == elastiqp::IpmSettings{}.eps_abs &&
+        elastiqp::Settings{}.eps_rel == elastiqp::IpmSettings{}.eps_rel &&
+        elastiqp::Settings{}.check_duality_gap ==
+            elastiqp::IpmSettings{}.check_duality_gap &&
+        elastiqp::Settings{}.eps_duality_gap_abs ==
+            elastiqp::IpmSettings{}.eps_duality_gap_abs &&
+        elastiqp::Settings{}.eps_duality_gap_rel ==
+            elastiqp::IpmSettings{}.eps_duality_gap_rel &&
+        elastiqp::Settings{}.max_factor_retries ==
+            elastiqp::IpmSettings{}.max_factor_retries &&
+        elastiqp::Settings{}.warm_start == elastiqp::IpmSettings{}.warm_start &&
+        elastiqp::Settings{}.ruiz == elastiqp::IpmSettings{}.ruiz &&
+        elastiqp::Settings{}.ruiz_max_iter ==
+            elastiqp::IpmSettings{}.ruiz_max_iter &&
+        elastiqp::Settings{}.ruiz_tol == elastiqp::IpmSettings{}.ruiz_tol,
+    "the termination/warm-start/ruiz defaults shared by elastiqp::Settings "
+    "and elastiqp::IpmSettings must agree");
+
+namespace {
+
+bool g_all_ok = true;
+
+void Check(const char* name, bool ok, double val, const char* what) {
+  std::printf("  %-38s %s=%9.2e %s\n", name, what, val, ok ? "OK" : "FAIL");
+  g_all_ok &= ok;
+}
+
+// Vanilla piqp on the expanded formulation (equalities carried over as hard
+// constraints on the x block); returns (x, t, y, z_t, z_ineq).
+struct ExpandedSol {
+  VectorXd x, t, y, z_t, z_ineq;
+  piqp::Status status;
+};
+
+ExpandedSol SolveExpanded(const QPData& qp, const VectorXd& penalty,
+                          double eps = 1e-10) {
+  const Eigen::Index n = qp.q.size();
+  const Eigen::Index m = qp.b.size();
+  const Eigen::Index p = qp.h.size();
+  const problem_gen::ExpandedElastic e =
+      problem_gen::MakeExpanded(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
+  piqp::DenseSolver<double> solver;
+  solver.settings().eps_abs = eps;
+  solver.settings().eps_rel = 0;
+  solver.settings().verbose = false;
+  if (m > 0) {
+    solver.setup(e.P, e.c, e.A, e.b, e.Gt, piqp::nullopt, e.h, e.lb,
+                 piqp::nullopt);
+  } else {
+    solver.setup(e.P, e.c, piqp::nullopt, piqp::nullopt, e.Gt, piqp::nullopt,
+                 e.h, e.lb, piqp::nullopt);
+  }
+  ExpandedSol s;
+  s.status = solver.solve();
+  s.x = solver.result().x.head(n);
+  s.t = solver.result().x.tail(p);
+  s.y = solver.result().y;
+  s.z_t = solver.result().z_bl.tail(p);
+  s.z_ineq = solver.result().z_u;
+  return s;
+}
+
+// Vanilla piqp on the ORIGINAL strict problem (hard A, b and hard G, h).
+// z are the inequality duals (used to place penalties relative to the
+// hard problem's dual in the exact-penalty tests).
+struct StrictSol {
+  VectorXd x, z;
+  piqp::Status status;
+};
+
+StrictSol SolveStrictPiqp(const QPData& qp, double eps = 1e-10) {
+  piqp::DenseSolver<double> solver;
+  solver.settings().eps_abs = eps;
+  solver.settings().eps_rel = 0;
+  const bool has_eq = qp.b.size() > 0;
+  solver.setup(qp.Q, qp.q,
+               has_eq ? piqp::optional<piqp::CMatRef<double>>(qp.A)
+                      : piqp::nullopt,
+               has_eq ? piqp::optional<piqp::CVecRef<double>>(qp.b)
+                      : piqp::nullopt,
+               qp.G, piqp::nullopt, qp.h, piqp::nullopt, piqp::nullopt);
+  StrictSol s;
+  s.status = solver.solve();
+  s.x = solver.result().x;
+  s.z = solver.result().z_u;
+  return s;
+}
+
+}  // namespace
+
+int main() {
+  std::mt19937 rng(42);
+
+  std::printf("PDAL: feasible => matches strict QP, t exactly 0\n");
+  for (auto [n, p] : {std::pair{10, 12}, {14, 100}, {58, 500}}) {
+    const QPData qp = problem_gen::Feasible(rng, n, p);
+    const auto esol = elastiqp::Solve(qp.Q, qp.q, qp.G, qp.h, 1e3);
+    const StrictSol ref = SolveStrictPiqp(qp);
+    const double dx = (esol.x - ref.x).lpNorm<Eigen::Infinity>();
+    char name[64];
+    std::snprintf(name, sizeof(name), "n=%d p=%d", n, p);
+    // The l1 penalty is exact (no barrier): below saturation the
+    // reconstructed slack is identically zero, not just ~1e-6.
+    Check(name,
+          esol.converged == 1 && ref.status == piqp::PIQP_SOLVED &&
+              dx < 1e-5 && esol.t.maxCoeff() == 0.0,
+          dx, "|dx|");
+  }
+
+  std::printf("PDAL: KKT residual of the elastic problem\n");
+  for (auto [n, p] : {std::pair{14, 60}, {30, 200}}) {
+    const QPData qp = problem_gen::Infeasible(rng, n, p, p / 4);
+    const VectorXd penalty = VectorXd::Constant(p, 10.0);
+    const auto esol = elastiqp::Solve(qp.Q, qp.q, qp.G, qp.h, penalty);
+    const double res = problem_gen::ElasticKKTResidual(
+        qp.Q, qp.q, qp.G, qp.h, penalty, esol.x, esol.t, esol.z_t, esol.z_ineq);
+    char name[64];
+    std::snprintf(name, sizeof(name), "n=%d p=%d infeasible", n, p);
+    Check(name, esol.converged == 1 && res < 1e-6, res, "kkt");
+  }
+
+  std::printf("PDAL: infeasible => matches vanilla piqp (expanded)\n");
+  for (auto [n, p] : {std::pair{8, 10}, {14, 100}, {58, 300}}) {
+    const QPData qp = problem_gen::Infeasible(rng, n, p, p / 4);
+    const VectorXd penalty = VectorXd::Constant(p, 10.0);
+    const auto esol = elastiqp::Solve(qp.Q, qp.q, qp.G, qp.h, penalty);
+    const ExpandedSol ref = SolveExpanded(qp, penalty);
+    const double dx = (esol.x - ref.x).lpNorm<Eigen::Infinity>();
+    char name[64];
+    std::snprintf(name, sizeof(name), "n=%d p=%d", n, p);
+    Check(name,
+          esol.converged == 1 && ref.status == piqp::PIQP_SOLVED && dx < 1e-5 &&
+              esol.t.maxCoeff() > 0.1,
+          dx, "|dx|");
+  }
+
+  std::printf("PDAL: per-constraint penalty weights\n");
+  {
+    const int n = 10, p = 40;
+    const QPData qp = problem_gen::Infeasible(rng, n, p, p / 4);
+    VectorXd penalty(p);
+    for (int i = 0; i < p; ++i) penalty[i] = (i % 2) ? 100.0 : 5.0;
+    const auto esol = elastiqp::Solve(qp.Q, qp.q, qp.G, qp.h, penalty);
+    const ExpandedSol ref = SolveExpanded(qp, penalty);
+    const double dx = (esol.x - ref.x).lpNorm<Eigen::Infinity>();
+    Check("n=10 p=40 mixed penalty",
+          esol.converged == 1 && ref.status == piqp::PIQP_SOLVED && dx < 1e-5,
+          dx, "|dx|");
+  }
+
+  std::printf("PDAL: PSD-only Q (rank deficient)\n");
+  {
+    const int n = 20, p = 60;
+    QPData qp = problem_gen::Infeasible(rng, n, p, p / 4);
+    const MatrixXd R = problem_gen::Randn(rng, n / 2, n);
+    qp.Q = R.transpose() * R;  // rank n/2
+    const VectorXd penalty = VectorXd::Constant(p, 10.0);
+    const auto esol = elastiqp::Solve(qp.Q, qp.q, qp.G, qp.h, penalty);
+    const ExpandedSol ref = SolveExpanded(qp, penalty);
+    const double dx = (esol.x - ref.x).lpNorm<Eigen::Infinity>();
+    Check("n=20 (rank 10) p=60",
+          esol.converged == 1 && ref.status == piqp::PIQP_SOLVED && dx < 1e-4,
+          dx, "|dx|");
+  }
+
+  std::printf("PDAL: hard equalities, feasible ineqs => matches strict piqp\n");
+  for (auto [n, m, p] :
+       {std::tuple{14, 4, 60}, {30, 8, 200}, {58, 15, 500}}) {
+    const QPData qp = problem_gen::RandomFeasible(rng, n, m, p);
+    const auto esol =
+        elastiqp::Solve(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, 1e3);
+    const StrictSol ref = SolveStrictPiqp(qp);
+    const double dx = (esol.x - ref.x).lpNorm<Eigen::Infinity>();
+    const double eq_res = (qp.A * esol.x - qp.b).lpNorm<Eigen::Infinity>();
+    char name[64];
+    std::snprintf(name, sizeof(name), "n=%d m=%d p=%d", n, m, p);
+    Check(name,
+          esol.converged == 1 && ref.status == piqp::PIQP_SOLVED &&
+              dx < 1e-5 && eq_res < 1e-6 && esol.t.maxCoeff() == 0.0,
+          std::max(dx, eq_res), "|dx|,eq");
+  }
+
+  std::printf("PDAL: equalities hold when inequalities are infeasible\n");
+  for (auto [n, m, p] :
+       {std::tuple{14, 4, 100}, {30, 8, 200}, {58, 15, 400}}) {
+    const QPData qp = problem_gen::InfeasibleEq(rng, n, m, p, p / 4);
+    const VectorXd penalty = VectorXd::Constant(p, 10.0);
+    const auto esol =
+        elastiqp::Solve(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
+    const ExpandedSol ref = SolveExpanded(qp, penalty);
+    const double dx = (esol.x - ref.x).lpNorm<Eigen::Infinity>();
+    const double eq_res = (qp.A * esol.x - qp.b).lpNorm<Eigen::Infinity>();
+    const double kkt = problem_gen::ElasticKKTResidual(
+        qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty, esol.x, esol.t, esol.y,
+        esol.z_t, esol.z_ineq);
+    char name[64];
+    std::snprintf(name, sizeof(name), "n=%d m=%d p=%d eq_res=%.1e", n, m, p,
+                  eq_res);
+    Check(name,
+          esol.converged == 1 && ref.status == piqp::PIQP_SOLVED &&
+              dx < 1e-5 && eq_res < 1e-6 && kkt < 1e-6 &&
+              esol.t.maxCoeff() > 0.1,
+          dx, "|dx|");
+  }
+
+  std::printf("PDAL: agreement with the PIQP-based elastiqp::IpmSolver\n");
+  for (auto [n, m, p] : {std::tuple{12, 3, 80}, {40, 10, 300}}) {
+    const QPData qp = problem_gen::InfeasibleEq(rng, n, m, p, p / 4);
+    const VectorXd penalty = VectorXd::Constant(p, 10.0);
+    const auto ps =
+        elastiqp::Solve(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
+    const auto is =
+        elastiqp::IpmSolve(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
+    const double dx = (ps.x - is.x).lpNorm<Eigen::Infinity>();
+    const double dt = (ps.t - is.t).lpNorm<Eigen::Infinity>();
+    char name[64];
+    std::snprintf(name, sizeof(name), "n=%d m=%d p=%d", n, m, p);
+    Check(name,
+          ps.converged == 1 && is.converged == 1 && dx < 1e-5 && dt < 1e-4,
+          std::max(dx, dt), "|dx|,|dt|");
+  }
+
+  std::printf("PDAL: equality-only edge case (p=0)\n");
+  {
+    const QPData qp = problem_gen::RandomFeasible(rng, 20, 8, 0);
+    const MatrixXd G(0, 20);
+    const VectorXd h(0);
+    const auto esol = elastiqp::Solve(qp.Q, qp.q, qp.A, qp.b, G, h, 10.0);
+    const int n = 20, m = 8;
+    MatrixXd Kf = MatrixXd::Zero(n + m, n + m);
+    Kf.topLeftCorner(n, n) = qp.Q;
+    Kf.topRightCorner(n, m) = qp.A.transpose();
+    Kf.bottomLeftCorner(m, n) = qp.A;
+    VectorXd rhs(n + m);
+    rhs << -qp.q, qp.b;
+    const VectorXd xy = Kf.colPivHouseholderQr().solve(rhs);
+    const double dx = (esol.x - xy.head(n)).lpNorm<Eigen::Infinity>();
+    Check("n=20 m=8 p=0", esol.converged == 1 && dx < 1e-7, dx, "|dx|");
+
+    MatrixXd Ai(2, n);
+    Ai.row(0) = qp.A.row(0);
+    Ai.row(1) = qp.A.row(0);
+    VectorXd bi(2);
+    bi << 0.0, 1.0;
+    const auto bad = elastiqp::Solve(qp.Q, qp.q, Ai, bi, G, h, 10.0);
+    Check("inconsistent A x = b detected",
+          bad.status == elastiqp::Status::kNumerics && bad.converged == 0 &&
+              bad.primal_res > 0.1,
+          bad.primal_res, "primal_res");
+
+    MatrixXd Qs = MatrixXd::Zero(n, n);
+    Qs(0, 0) = 1.0;
+    const auto sing =
+        elastiqp::Solve(Qs, qp.q, MatrixXd(0, n), VectorXd(0), G, h, 10.0);
+    Check("singular unconstrained KKT detected",
+          sing.status == elastiqp::Status::kNumerics && sing.converged == 0,
+          sing.dual_res, "dual_res");
+  }
+
+  std::printf("PDAL: inconsistent equalities with p>0 do not converge\n");
+  {
+    const int n = 10, p = 20;
+    const QPData qp = problem_gen::Feasible(rng, n, p);
+    MatrixXd Ai(2, n);
+    Ai.row(0) = problem_gen::Randn(rng, 1, n);
+    Ai.row(1) = Ai.row(0);
+    VectorXd bi(2);
+    bi << 0.0, 1.0;
+    elastiqp::Solver solver;
+    solver.settings.max_outer_iter = 40;
+    solver.setup(qp.Q, qp.q, Ai, bi, qp.G, qp.h, 10.0);
+    const auto& esol = solver.solve();
+    Check("inconsistent eq (p>0) not kSolved",
+          esol.converged == 0 && esol.primal_res > 0.1, esol.primal_res,
+          "primal_res");
+  }
+
+  std::printf("PDAL: warm start with equalities (drift q, h, b)\n");
+  {
+    const int n = 30, m = 8, p = 200, ticks = 20;
+    const QPData qp0 = problem_gen::InfeasibleEq(rng, n, m, p, p / 4);
+    const VectorXd penalty = VectorXd::Constant(p, 10.0);
+
+    elastiqp::Solver warm;
+    warm.setup(qp0.Q, qp0.q, qp0.A, qp0.b, qp0.G, qp0.h, penalty);
+
+    std::normal_distribution<double> dist;
+    VectorXd q = qp0.q, h = qp0.h, b = qp0.b;
+    int warm_iters = 0, cold_iters = 0;
+    int warm_factors = 0, cold_factors = 0;
+    double worst_dx = 0, worst_eq = 0, worst_kkt = 0;
+    bool all_conv = true;
+    for (int k = 0; k < ticks; ++k) {
+      for (int i = 0; i < n; ++i) q[i] += 0.01 * dist(rng);
+      for (int i = 0; i < p; ++i) h[i] += 0.01 * dist(rng);
+      for (int i = 0; i < m; ++i) b[i] += 0.01 * dist(rng);
+      warm.set_q(q);
+      warm.set_h(h);
+      warm.set_b(b);
+      const auto& ws = warm.solve();
+      warm_factors += warm.factorizations();
+      elastiqp::Solver cold;
+      cold.setup(qp0.Q, q, qp0.A, b, qp0.G, h, penalty);
+      const auto& cs = cold.solve();
+      cold_factors += cold.factorizations();
+      all_conv &= ws.converged == 1 && cs.converged == 1;
+      warm_iters += ws.iters;
+      cold_iters += cs.iters;
+      worst_dx = std::max(worst_dx, (ws.x - cs.x).lpNorm<Eigen::Infinity>());
+      worst_eq = std::max(
+          worst_eq, (qp0.A * ws.x - b).lpNorm<Eigen::Infinity>());
+      worst_kkt = std::max(
+          worst_kkt,
+          problem_gen::ElasticKKTResidual(qp0.Q, q, qp0.A, b, qp0.G, h,
+                                          penalty, ws.x, ws.t, ws.y, ws.z_t,
+                                          ws.z_ineq));
+    }
+    std::printf(
+        "  cold iters=%d warm iters=%d cold factors=%d warm factors=%d\n"
+        "  worst_eq=%9.2e kkt=%9.2e\n",
+        cold_iters, warm_iters, cold_factors, warm_factors, worst_eq,
+        worst_kkt);
+    Check("n=30 m=8 p=200 20 ticks",
+          all_conv && worst_dx < 1e-4 && worst_eq < 1e-6 && worst_kkt < 1e-6 &&
+              warm_iters < cold_iters && warm_factors < cold_factors,
+          worst_dx, "|dx|");
+  }
+
+  std::printf("PDAL: warm start across perturbed problems\n");
+  {
+    const int n = 30, p = 200, ticks = 20;
+    const QPData qp0 = problem_gen::Infeasible(rng, n, p, p / 4);
+    const VectorXd penalty = VectorXd::Constant(p, 10.0);
+
+    elastiqp::Solver warm;
+    warm.setup(qp0.Q, qp0.q, qp0.G, qp0.h, penalty);
+
+    std::normal_distribution<double> dist;
+    VectorXd q = qp0.q, h = qp0.h;
+    int warm_iters = 0, cold_iters = 0;
+    double worst_dx = 0, worst_kkt = 0;
+    bool all_conv = true;
+    for (int k = 0; k < ticks; ++k) {
+      for (int i = 0; i < n; ++i) q[i] += 0.01 * dist(rng);
+      for (int i = 0; i < p; ++i) h[i] += 0.01 * dist(rng);
+      warm.set_q(q);
+      warm.set_h(h);
+      const auto& ws = warm.solve();
+      const auto cs = elastiqp::Solve(qp0.Q, q, qp0.G, h, penalty);
+      all_conv &= ws.converged == 1 && cs.converged == 1;
+      warm_iters += ws.iters;
+      cold_iters += cs.iters;
+      worst_dx = std::max(worst_dx, (ws.x - cs.x).lpNorm<Eigen::Infinity>());
+      worst_kkt = std::max(
+          worst_kkt, problem_gen::ElasticKKTResidual(qp0.Q, q, qp0.G, h,
+                                                     penalty, ws.x, ws.t,
+                                                     ws.z_t, ws.z_ineq));
+    }
+    std::printf("  cold iters=%d warm iters=%d worst_kkt=%9.2e\n", cold_iters,
+                warm_iters, worst_kkt);
+    Check("n=30 p=200 20 ticks",
+          all_conv && worst_dx < 1e-4 && worst_kkt < 1e-6 &&
+              warm_iters < cold_iters,
+          worst_dx, "|dx|");
+  }
+
+  std::printf("PDAL: explicit warm start via set_warm_start\n");
+  {
+    const int n = 30, m = 8, p = 200, ticks = 20;
+    const QPData qp0 = problem_gen::InfeasibleEq(rng, n, m, p, p / 4);
+    const VectorXd penalty = VectorXd::Constant(p, 10.0);
+
+    elastiqp::Solver solver;
+    solver.settings.warm_start = false;
+    solver.setup(qp0.Q, qp0.q, qp0.A, qp0.b, qp0.G, qp0.h, penalty);
+
+    std::normal_distribution<double> dist;
+    VectorXd q = qp0.q, h = qp0.h, b = qp0.b;
+    int explicit_iters = 0, cold_iters = 0;
+    double worst_dx = 0, worst_kkt = 0;
+    bool all_conv = true;
+    for (int k = 0; k < ticks; ++k) {
+      for (int i = 0; i < n; ++i) q[i] += 0.01 * dist(rng);
+      for (int i = 0; i < p; ++i) h[i] += 0.01 * dist(rng);
+      for (int i = 0; i < m; ++i) b[i] += 0.01 * dist(rng);
+      solver.set_q(q);
+      solver.set_h(h);
+      solver.set_b(b);
+      if (k > 0) {
+        const auto& prev = solver.solution();
+        solver.set_warm_start(prev.x, prev.y, prev.z_ineq);
+      }
+      const auto& ws = solver.solve();
+      const auto cs =
+          elastiqp::Solve(qp0.Q, q, qp0.A, b, qp0.G, h, penalty);
+      all_conv &= ws.converged == 1 && cs.converged == 1;
+      explicit_iters += ws.iters;
+      cold_iters += cs.iters;
+      worst_dx = std::max(worst_dx, (ws.x - cs.x).lpNorm<Eigen::Infinity>());
+      worst_kkt = std::max(
+          worst_kkt,
+          problem_gen::ElasticKKTResidual(qp0.Q, q, qp0.A, b, qp0.G, h,
+                                          penalty, ws.x, ws.t, ws.y, ws.z_t,
+                                          ws.z_ineq));
+    }
+    std::printf("  cold iters=%d explicit iters=%d worst_kkt=%9.2e\n",
+                cold_iters, explicit_iters, worst_kkt);
+    Check("n=30 m=8 p=200 20 ticks (explicit)",
+          all_conv && worst_dx < 1e-4 && worst_kkt < 1e-6 &&
+              explicit_iters < cold_iters,
+          worst_dx, "|dx|");
+  }
+
+  std::printf("PDAL: heavy saturation (every row violated)\n");
+  {
+    // All rows conflict pairwise: half the rows saturate at the solution and
+    // drop out of the Newton system; the rho*I prox term carries K.
+    const int n = 12, p = 40;
+    const QPData qp = problem_gen::Infeasible(rng, n, p, p / 2);
+    const VectorXd penalty = VectorXd::Constant(p, 10.0);
+    const auto esol = elastiqp::Solve(qp.Q, qp.q, qp.G, qp.h, penalty);
+    const ExpandedSol ref = SolveExpanded(qp, penalty);
+    const double dx = (esol.x - ref.x).lpNorm<Eigen::Infinity>();
+    Check("n=12 p=40 all-conflict",
+          esol.converged == 1 && ref.status == piqp::PIQP_SOLVED && dx < 1e-5,
+          dx, "|dx|");
+  }
+
+  std::printf("PDAL: Ruiz equilibration on badly row-scaled data\n");
+  {
+    // Row-scaling (G_i, h_i) by s_i with penalty_i / s_i (and (A_j, b_j)
+    // by any s_j) leaves the elastic QP unchanged -- only its conditioning
+    // moves. The reference is the well-scaled problem's solution.
+    const int n = 20, m = 5, p = 80;
+    const QPData qp = problem_gen::InfeasibleEq(rng, n, m, p, p / 4);
+    const auto ref =
+        elastiqp::IpmSolve(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, 10.0);
+    std::uniform_real_distribution<double> unif(-4.0, 4.0);
+    MatrixXd Gs = qp.G, As = qp.A;
+    VectorXd hs = qp.h, bs = qp.b, ws(p);
+    for (int i = 0; i < p; ++i) {
+      const double s = std::pow(10.0, unif(rng));
+      Gs.row(i) *= s;
+      hs[i] *= s;
+      ws[i] = 10.0 / s;
+    }
+    for (int i = 0; i < m; ++i) {
+      const double s = std::pow(10.0, unif(rng));
+      As.row(i) *= s;
+      bs[i] *= s;
+    }
+    elastiqp::Solver off, on;
+    on.settings.ruiz = true;
+    off.setup(qp.Q, qp.q, As, bs, Gs, hs, ws);
+    on.setup(qp.Q, qp.q, As, bs, Gs, hs, ws);
+    const auto soff = off.solve();
+    const auto& son = on.solve();
+    const double dx = (son.x - ref.x).lpNorm<Eigen::Infinity>();
+    const double kkt = problem_gen::ElasticKKTResidual(
+        qp.Q, qp.q, As, bs, Gs, hs, ws, son.x, son.t, son.y, son.z_t, son.z_ineq);
+    std::printf("  ruiz off: converged=%d iters=%d | ruiz on: iters=%d\n",
+                soff.converged, soff.iters, son.iters);
+    Check("n=20 m=5 p=80 rows 10^[-4,4]",
+          son.converged == 1 && dx < 1e-4 && kkt < 1e-5, dx, "|dx|");
+  }
+
+  std::printf("PDAL: Ruiz + warm start (drift q, h, b through setters)\n");
+  {
+    // The setters must rescale updates into the setup()-time scaled frame;
+    // warm starting across drifting data validates the whole chain.
+    const int n = 30, m = 8, p = 200, ticks = 20;
+    QPData qp0 = problem_gen::InfeasibleEq(rng, n, m, p, p / 4);
+    VectorXd penalty(p);
+    std::uniform_real_distribution<double> unif(-3.0, 3.0);
+    for (int i = 0; i < p; ++i) {
+      const double s = std::pow(10.0, unif(rng));
+      qp0.G.row(i) *= s;
+      qp0.h[i] *= s;
+      penalty[i] = 10.0 / s;
+    }
+    elastiqp::Solver warm;
+    warm.settings.ruiz = true;
+    warm.setup(qp0.Q, qp0.q, qp0.A, qp0.b, qp0.G, qp0.h, penalty);
+
+    std::normal_distribution<double> dist;
+    VectorXd q = qp0.q, h = qp0.h, b = qp0.b;
+    int warm_iters = 0, cold_iters = 0;
+    double worst_kkt = 0, worst_dx = 0;
+    bool all_conv = true;
+    for (int k = 0; k < ticks; ++k) {
+      for (int i = 0; i < n; ++i) q[i] += 0.01 * dist(rng);
+      for (int i = 0; i < p; ++i) h[i] += 0.01 * dist(rng) * std::abs(h[i]);
+      for (int i = 0; i < m; ++i) b[i] += 0.01 * dist(rng);
+      warm.set_q(q);
+      warm.set_h(h);
+      warm.set_b(b);
+      const auto& ws = warm.solve();
+      elastiqp::Solver cold;
+      cold.settings.ruiz = true;
+      cold.setup(qp0.Q, q, qp0.A, b, qp0.G, h, penalty);
+      const auto& cs = cold.solve();
+      all_conv &= ws.converged == 1 && cs.converged == 1;
+      warm_iters += ws.iters;
+      cold_iters += cs.iters;
+      worst_dx = std::max(worst_dx, (ws.x - cs.x).lpNorm<Eigen::Infinity>());
+      worst_kkt = std::max(
+          worst_kkt,
+          problem_gen::ElasticKKTResidual(qp0.Q, q, qp0.A, b, qp0.G, h,
+                                          penalty, ws.x, ws.t, ws.y, ws.z_t,
+                                          ws.z_ineq));
+    }
+    std::printf("  cold iters=%d warm iters=%d worst_kkt=%9.2e\n", cold_iters,
+                warm_iters, worst_kkt);
+    Check("n=30 m=8 p=200 ruiz 20 ticks",
+          all_conv && worst_dx < 1e-4 && worst_kkt < 1e-5 &&
+              warm_iters < cold_iters,
+          worst_dx, "|dx|");
+  }
+
+  std::printf("PDAL: exact-penalty threshold (recovery vs saturation)\n");
+  {
+    // p < n so all rows are linearly independent and the hard dual is
+    // unique -- with degenerate active sets (p > n) the dual set is a
+    // polytope and "0.5x the reported dual" can still bound another valid
+    // dual vector, requiring no violation at all.
+    const int n = 16, p = 12;
+    const QPData qp = problem_gen::Feasible(rng, n, p);
+    const StrictSol ref = SolveStrictPiqp(qp);
+    const double zmax = ref.z.maxCoeff();
+    // Penalty above the hard dual: exact recovery, slack identically zero.
+    const auto hi =
+        elastiqp::Solve(qp.Q, qp.q, qp.G, qp.h, 2.0 * zmax + 1.0);
+    const double dx_hi = (hi.x - ref.x).lpNorm<Eigen::Infinity>();
+    Check("penalty > ||z*||: hard recovery, t == 0",
+          hi.converged == 1 && ref.status == piqp::PIQP_SOLVED &&
+              dx_hi < 1e-5 && hi.t.maxCoeff() == 0.0,
+          dx_hi, "|dx|");
+    // Penalty below the largest dual: that row saturates, genuine
+    // violation appears; ground truth is the expanded formulation.
+    const VectorXd pen_lo = VectorXd::Constant(p, 0.5 * zmax);
+    const auto lo = elastiqp::Solve(qp.Q, qp.q, qp.G, qp.h, pen_lo);
+    const ExpandedSol eref = SolveExpanded(qp, pen_lo);
+    const double dx_lo = (lo.x - eref.x).lpNorm<Eigen::Infinity>();
+    Check("penalty < ||z*||: saturates, matches expanded",
+          lo.converged == 1 && eref.status == piqp::PIQP_SOLVED &&
+              dx_lo < 1e-5 && lo.t.maxCoeff() > 1e-6,
+          dx_lo, "|dx|");
+    // Numerically extreme penalty: same recovery, well conditioned.
+    const auto huge = elastiqp::Solve(qp.Q, qp.q, qp.G, qp.h, 1e8);
+    const double dx_huge = (huge.x - ref.x).lpNorm<Eigen::Infinity>();
+    Check("penalty = 1e8: still exact recovery",
+          huge.converged == 1 && dx_huge < 1e-5 && huge.t.maxCoeff() == 0.0,
+          dx_huge, "|dx|");
+  }
+
+  std::printf("PDAL: penalty exactly at the hard dual (degenerate tie)\n");
+  {
+    // The delicate case both frameworks share: with w_i = z*_i the dual is
+    // pinned to the clamp boundary and complementarity is degenerate; x*
+    // stays unique (strictly convex Q) and must still be found.
+    const int n = 14, p = 40;
+    const QPData qp = problem_gen::Feasible(rng, n, p);
+    const StrictSol ref = SolveStrictPiqp(qp);
+    Eigen::Index imax;
+    const double zmax = ref.z.maxCoeff(&imax);
+    VectorXd pen = VectorXd::Constant(p, 2.0 * zmax + 1.0);
+    pen[imax] = ref.z[imax];  // exact tie on the most-active row
+    const auto tie = elastiqp::Solve(qp.Q, qp.q, qp.G, qp.h, pen);
+    const double dx = (tie.x - ref.x).lpNorm<Eigen::Infinity>();
+    Check("tie row still converges to hard x*",
+          tie.converged == 1 && dx < 1e-4, dx, "|dx|");
+  }
+
+  std::printf("PDAL: warm start under penalty drift (weight scheduling)\n");
+  {
+    const int n = 20, m = 5, p = 80, ticks = 12;
+    const QPData qp = problem_gen::InfeasibleEq(rng, n, m, p, p / 4);
+    elastiqp::Solver warm;
+    warm.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, 10.0);
+    std::uniform_real_distribution<double> unif(-1.0, 1.5);
+    double worst_dx = 0;
+    bool all_ok = true;
+    for (int k = 0; k < ticks; ++k) {
+      // Log-uniform weights in [0.1, ~30]: drops below the current duals
+      // exercise the warm-start clamp of z into [0, penalty].
+      VectorXd pen(p);
+      for (int i = 0; i < p; ++i) pen[i] = std::pow(10.0, unif(rng));
+      warm.set_penalty(pen);
+      const auto& ws = warm.solve();
+      const auto cs =
+          elastiqp::Solve(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, pen);
+      all_ok &= ws.converged == 1 && cs.converged == 1 &&
+                ws.z_ineq.minCoeff() >= 0.0 &&
+                (ws.z_ineq - pen).maxCoeff() <= 1e-12;
+      worst_dx = std::max(worst_dx,
+                          (ws.x - cs.x).lpNorm<Eigen::Infinity>());
+    }
+    Check("n=20 m=5 p=80 12 penalty ticks", all_ok && worst_dx < 1e-4,
+          worst_dx, "|dx|");
+  }
+
+  std::printf("PDAL: warm start under matrix drift (Q, A, G)\n");
+  {
+    const int n = 20, m = 5, p = 80, ticks = 10;
+    const QPData qp0 = problem_gen::InfeasibleEq(rng, n, m, p, p / 4);
+    const VectorXd penalty = VectorXd::Constant(p, 10.0);
+    // PSD Hessian drift keeps Q positive definite for every tick.
+    const MatrixXd R = problem_gen::Randn(rng, n, n);
+    const MatrixXd dQ = 0.02 * (R.transpose() * R) / n;
+    const MatrixXd dA = 0.002 * problem_gen::Randn(rng, m, n);
+    const MatrixXd dG = 0.002 * problem_gen::Randn(rng, p, n);
+
+    elastiqp::Solver warm;
+    warm.setup(qp0.Q, qp0.q, qp0.A, qp0.b, qp0.G, qp0.h, penalty);
+    double worst_dx = 0, worst_kkt = 0;
+    bool all_ok = true;
+    int min_factors = 1 << 30;
+    for (int k = 1; k <= ticks; ++k) {
+      const MatrixXd Q = qp0.Q + k * dQ;
+      const MatrixXd A = qp0.A + k * dA;
+      const MatrixXd G = qp0.G + k * dG;
+      warm.set_Q(Q);
+      warm.set_A(A);
+      warm.set_G(G);
+      const auto& ws = warm.solve();
+      min_factors = std::min(min_factors, warm.factorizations());
+      const auto cs =
+          elastiqp::Solve(Q, qp0.q, A, qp0.b, G, qp0.h, penalty);
+      all_ok &= ws.converged == 1 && cs.converged == 1;
+      worst_dx = std::max(worst_dx,
+                          (ws.x - cs.x).lpNorm<Eigen::Infinity>());
+      worst_kkt = std::max(
+          worst_kkt,
+          problem_gen::ElasticKKTResidual(Q, qp0.q, A, qp0.b, G, qp0.h,
+                                          penalty, ws.x, ws.t, ws.y, ws.z_t,
+                                          ws.z_ineq));
+    }
+    // A matrix update must invalidate the cached factorization.
+    Check("n=20 m=5 p=80 10 matrix ticks",
+          all_ok && worst_dx < 1e-4 && worst_kkt < 1e-6 && min_factors >= 1,
+          worst_dx, "|dx|");
+  }
+
+  std::printf("PDAL: status reporting and Solution invariants\n");
+  {
+    const int n = 12, p = 40;
+    const QPData qp = problem_gen::Infeasible(rng, n, p, p / 4);
+    const VectorXd penalty = VectorXd::Constant(p, 10.0);
+
+    elastiqp::Solver capped;
+    capped.settings.max_outer_iter = 1;
+    capped.setup(qp.Q, qp.q, qp.G, qp.h, penalty);
+    const auto& cap = capped.solve();
+    Check("max_outer_iter=1 reports kMaxIter with residuals",
+          cap.status == elastiqp::Status::kMaxIter && cap.converged == 0 &&
+              std::isfinite(cap.primal_res) && cap.primal_res > 0,
+          cap.primal_res, "primal_res");
+
+    const auto sol = elastiqp::Solve(qp.Q, qp.q, qp.G, qp.h, penalty);
+    const VectorXd r = qp.G * sol.x - qp.h;
+    const double e_w = (penalty - sol.z_t - sol.z_ineq).lpNorm<Eigen::Infinity>();
+    const double e_s1 = (sol.s_t - sol.t).lpNorm<Eigen::Infinity>();
+    const double e_s2 =
+        (sol.s_ineq - (sol.t - r).cwiseMax(0.0)).lpNorm<Eigen::Infinity>();
+    const bool boxed = sol.z_ineq.minCoeff() >= 0.0 &&
+                       (sol.z_ineq - penalty).maxCoeff() <= 0.0 &&
+                       sol.t.minCoeff() >= 0.0;
+    Check("z_t+z_ineq==penalty, s_t==t, s_ineq==[t-r]+, box",
+          sol.converged == 1 && e_w < 1e-12 && e_s1 == 0.0 && e_s2 < 1e-8 &&
+              boxed,
+          std::max({e_w, e_s1, e_s2}), "inv");
+  }
+
+  std::printf("PDAL: zero-penalty rows drop out of the problem\n");
+  {
+    const int n = 12, p = 30, k_zero = 5;
+    const QPData qp = problem_gen::Feasible(rng, n, p);
+    VectorXd pen = VectorXd::Constant(p, 10.0);
+    pen.head(k_zero).setZero();  // free rows: no cost for violating them
+    const auto full = elastiqp::Solve(qp.Q, qp.q, qp.G, qp.h, pen);
+    const MatrixXd Gr = qp.G.bottomRows(p - k_zero);
+    const VectorXd hr = qp.h.tail(p - k_zero);
+    const auto reduced = elastiqp::IpmSolve(qp.Q, qp.q, Gr, hr, 10.0);
+    const double dx = (full.x - reduced.x).lpNorm<Eigen::Infinity>();
+    Check("w_i = 0 rows == removed rows",
+          full.converged == 1 && reduced.converged == 1 && dx < 1e-5, dx,
+          "|dx|");
+  }
+
+  std::printf("PDAL: duplicated rows (rank-deficient active set)\n");
+  {
+    // Duplicating a row and splitting its penalty is the same elastic QP;
+    // the duplicated active/saturated rows make G_act rank deficient.
+    const int n = 12, p = 30, k_dup = 5;
+    const QPData qp = problem_gen::Infeasible(rng, n, p, p / 4);
+    MatrixXd G2(p + k_dup, n);
+    VectorXd h2(p + k_dup), pen2(p + k_dup);
+    G2.topRows(p) = qp.G;
+    h2.head(p) = qp.h;
+    pen2.head(p).setConstant(10.0);
+    G2.bottomRows(k_dup) = qp.G.topRows(k_dup);
+    h2.tail(k_dup) = qp.h.head(k_dup);
+    pen2.head(k_dup).setConstant(5.0);
+    pen2.tail(k_dup).setConstant(5.0);
+    const auto dup = elastiqp::Solve(qp.Q, qp.q, G2, h2, pen2);
+    const auto ref = elastiqp::IpmSolve(qp.Q, qp.q, qp.G, qp.h, 10.0);
+    const double dx = (dup.x - ref.x).lpNorm<Eigen::Infinity>();
+    Check("split-penalty duplicates match original",
+          dup.converged == 1 && ref.converged == 1 && dx < 1e-5, dx, "|dx|");
+  }
+
+  std::printf("PDAL: Ruiz + explicit warm start roundtrip\n");
+  {
+    const int n = 14, p = 40;
+    QPData qp = problem_gen::Infeasible(rng, n, p, p / 4);
+    VectorXd pen(p);
+    std::uniform_real_distribution<double> unif(-3.0, 3.0);
+    for (int i = 0; i < p; ++i) {
+      const double s = std::pow(10.0, unif(rng));
+      qp.G.row(i) *= s;
+      qp.h[i] *= s;
+      pen[i] = 10.0 / s;
+    }
+    elastiqp::Solver solver;
+    solver.settings.ruiz = true;
+    solver.settings.warm_start = false;
+    solver.setup(qp.Q, qp.q, qp.G, qp.h, pen);
+    const auto first = solver.solve();
+    // Seeding with the (unscaled) solution must roundtrip through the
+    // scaling and converge immediately.
+    solver.set_warm_start(first.x, VectorXd(0), first.z_ineq);
+    const auto& again = solver.solve();
+    Check("seeded resolve converges immediately",
+          first.converged == 1 && again.converged == 1 && again.iters <= 2,
+          static_cast<double>(again.iters), "iters");
+  }
+
+  std::printf("PDAL: Ruiz leaves near-zero noise rows alone (limit_scaling)\n");
+  {
+    // Rows at the numerical noise floor (constraint and rhs both ~1e-13,
+    // e.g. from a degenerate constraint construction) must not destabilize
+    // equilibration: unguarded Ruiz chases unit row norms, amplifying such
+    // a row by >= 1e6 per sweep and shrinking its scaled penalty toward
+    // zero. PIQP-style limit_scaling leaves rows with norm < 1e-4 unscaled.
+    // The noise rows perturb the objective by O(1e-12), so the solution
+    // must match the problem without them.
+    const int n = 16, p = 60, k_noise = 6;
+    const QPData qp = problem_gen::Infeasible(rng, n, p, p / 4);
+    MatrixXd G2(p + k_noise, n);
+    VectorXd h2(p + k_noise);
+    G2.topRows(p) = qp.G;
+    h2.head(p) = qp.h;
+    std::normal_distribution<double> dist;
+    for (int i = 0; i < k_noise; ++i) {
+      for (int j = 0; j < n; ++j) G2(p + i, j) = 1e-13 * dist(rng);
+      h2[p + i] = 1e-13 * dist(rng);
+    }
+    elastiqp::Solver solver;
+    solver.settings.ruiz = true;
+    solver.setup(qp.Q, qp.q, G2, h2, VectorXd::Constant(p + k_noise, 10.0));
+    const auto sol = solver.solve();
+    const auto ref = elastiqp::IpmSolve(qp.Q, qp.q, qp.G, qp.h, 10.0);
+    const double dx = (sol.x - ref.x).lpNorm<Eigen::Infinity>();
+    std::printf("  iters=%d\n", sol.iters);
+    Check("6 noise rows at 1e-13",
+          sol.converged == 1 && ref.converged == 1 && dx < 1e-4, dx, "|dx|");
+  }
+
+  std::printf("PDAL: fuzz vs IpmSolver over random instances\n");
+  {
+    int fails = 0;
+    double worst_dx = 0;
+    for (int k = 0; k < 20; ++k) {
+      const int n = 5 + k, m = k % 4, p = 10 + 3 * k;
+      const int conflicts = (k % 3 == 0) ? p / 4 : 0;
+      const QPData qp = problem_gen::InfeasibleEq(rng, n, m, p, conflicts);
+      const auto a =
+          elastiqp::Solve(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, 10.0);
+      const auto b =
+          elastiqp::IpmSolve(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, 10.0);
+      fails += a.converged != 1 || b.converged != 1;
+      worst_dx = std::max(worst_dx,
+                          (a.x - b.x).lpNorm<Eigen::Infinity>());
+    }
+    Check("20 random instances agree", fails == 0 && worst_dx < 1e-4,
+          worst_dx, "|dx|");
+  }
+
+  std::printf("PDAL: p=0, m=0 edge case\n");
+  {
+    const QPData qp = problem_gen::Feasible(rng, 15, 4);
+    const MatrixXd G(0, 15);
+    const VectorXd h(0);
+    const auto esol = elastiqp::Solve(qp.Q, qp.q, G, h, 10.0);
+    const double res = (qp.Q * esol.x + qp.q).lpNorm<Eigen::Infinity>();
+    Check("n=15 p=0", esol.converged == 1 && res < 1e-7, res, "res");
+  }
+
+  std::printf(g_all_ok ? "\nAll PDAL backend tests passed.\n"
+                       : "\nFAILURES\n");
+  return g_all_ok ? 0 : 1;
+}

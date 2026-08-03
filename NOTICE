@@ -1,0 +1,86 @@
+ElastiQP is licensed under the Apache License, Version 2.0. 
+It builds on three projects:
+
+  * qpax (https://github.com/qpax-solver/qpax), Apache-2.0 --
+    the elastic QP formulation and the kappa-relaxed smoothed-gradient
+    technique. Portions of this work are derived from qpax.
+  * ProxQP / proxsuite (https://github.com/Simple-Robotics/proxsuite),
+    BSD 2-Clause License -- the primal-dual augmented Lagrangian algorithm
+    that the default backend (elastiqp/pdal.hpp) reimplements for the
+    elastic form. proxsuite's copyright notice and license are reproduced
+    at the end of this file, and apply to the portions derived from it.
+  * PIQP (https://github.com/PREDICT-EPFL/piqp), BSD 2-Clause License --
+    the proximal interior-point algorithm that the IpmSolver backend
+    (elastiqp/ipm.hpp) reimplements for the elastic form. PIQP's copyright
+    notice and license are reproduced at the end of this file, and apply
+    to the portions derived from it.
+
+The repository additionally vendors two sets of third-party headers, both
+outside the installed ElastiQP headers:
+
+  * third_party/xla_ffi -- the XLA FFI API headers (Copyright The OpenXLA
+    Authors, Apache License 2.0; see the header of each file and
+    third_party/xla_ffi/README.md).
+  * third_party/piqp -- PIQP's headers (Copyright EPFL, BSD 2-Clause,
+    reproduced below and in third_party/piqp/LICENSE), used only for
+    cross-solver tests
+
+=======================================================================
+Third-party notice: ProxQP (proxsuite)
+=======================================================================
+
+BSD 2-Clause License
+
+Copyright (c) 2022-2026, Inria
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+    list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+    this list of conditions and the following disclaimer in the documentation
+    and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+=======================================================================
+Third-party notice: PIQP
+=======================================================================
+
+BSD 2-Clause License
+
+Copyright (c) 2023, EPFL
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+    list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+    this list of conditions and the following disclaimer in the documentation
+    and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
