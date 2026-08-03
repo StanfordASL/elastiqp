@@ -45,7 +45,7 @@ For a rough sense of numbers, on a laptop with an Intel i7 CPU, ElastiQP can sol
 
 ### C++
 
-From source:
+#### From source:
 ```
 git clone https://github.com/StanfordASL/elastiqp
 cd elastiqp
@@ -58,14 +58,15 @@ If you've installed with CMake, you can also `find_package(elastiqp)`
 
 ### Python
 
-From PyPI
+#### From PyPI
 ```
 pip install elastiqp
 ```
 
-From source
+#### From source
+
+If installing the Python bindings from source, first make sure that you've run the build described above in the C++ section. You'll need to have `nanobind` (and `jax`, if you want to use the FFI) installed in your current python venv when building. Then, from the top-level of the repo,
 ```
-# navigate to your clone of elastiqp, then
 pip install .
 ```
 
