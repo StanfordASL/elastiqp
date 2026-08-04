@@ -166,7 +166,7 @@ For runnable Python/JAX examples, see the `examples` folder
 ElastiQP builds on the following excellent projects:
 
 - [qpax](https://github.com/qpax-solver/qpax): ElastiQP is inspired by the condensation strategy from their elastic primal-dual interior point method, and builds on their kappa-smoothed derivatives. Apache-2.0
-- [ProxQP](https://github.com/Simple-Robotics/proxsuite): ElastiQP considers an elsatic formulation of their primal-dual augmented Lagrangian method for the default backend. BSD 2-Clause.
+- [ProxQP](https://github.com/Simple-Robotics/proxsuite): ElastiQP considers an elastic formulation of their primal-dual augmented Lagrangian method for the default backend. BSD 2-Clause.
 - [PIQP](https://github.com/PREDICT-EPFL/piqp): ElastiQP's secondary backend considers an elastic formulation of their proximal interior point method. BSD 2-Clause.
 
 ElastiQP is licensed under Apache 2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE) for third-party notices.
