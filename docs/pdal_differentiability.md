@@ -315,11 +315,6 @@ Unchanged from the IPM pattern, now on the default backend:
 
 ## Possible follow-ups
 
-- The warm-start selection forfeits the coin-flip band (`res_warm ~
-  0.1·√κ`). A *transported* warm candidate — the previous relaxed iterate
-  shifted by the tight solution's tick-to-tick displacement,
-  `x° + (x_tight_new - x_tight_old)` etc. — would cancel the O(drift) error
-  that band represents, at the cost of storing the previous tight solution.
 - The retraction Jacobian is bounded (`b' ∈ (0,1)`), which is the property
   the Arrizabalaga et al. single-precision IPM builds on — a float32 relax
   path may be feasible if that ever matters for deployment.
