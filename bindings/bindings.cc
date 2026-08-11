@@ -202,7 +202,9 @@ NB_MODULE(_core, m) {
       .def_rw("warm_start", &Settings::warm_start)
       .def_rw("ruiz", &Settings::ruiz)
       .def_rw("ruiz_max_iter", &Settings::ruiz_max_iter)
-      .def_rw("ruiz_tol", &Settings::ruiz_tol);
+      .def_rw("ruiz_tol", &Settings::ruiz_tol)
+      .def_rw("relax_reg", &Settings::relax_reg)
+      .def_rw("relax_warm_start", &Settings::relax_warm_start);
 
   auto solver_cls =
       nb::class_<Solver>(m, "Solver")

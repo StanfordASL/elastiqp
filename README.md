@@ -36,7 +36,7 @@ It contains two backends, both with a condensed formulation of the elastic slack
 - An elastic Primal-Dual Augmented Lagrangian (PDAL) method, based on [ProxQP](https://github.com/Simple-Robotics/proxsuite)
 - A secondary elastic Proximal Interior Point (IPM) method, based on [PIQP](https://github.com/PREDICT-EPFL/piqp) and [QPAX](https://github.com/qpax-solver/qpax)
 
-The PDAL backend is recommended for most cases, as it will return the fastest solution (particularly with warm-starting). Both backends are *differentiable* with kappa-smoothed gradients: each provides a `relax(kappa)` that walks the solution to the same kappa-relaxed central point (complementarity $s \odot z = \kappa$) for smooth implicit differentiation -- the IPM by walking the central path, the PDAL through a log-barrier retraction (see `log_barrier_admm_note.tex` and `docs/pdal_differentiability.md`). The IPM additionally supports exact (kappa = 0) gradients and can hold equality constraints to tighter tolerances. Both backends support Ruiz equilibration for poorly-conditioned problems (off by default).
+The PDAL backend is recommended for most cases, as it will return the fastest solution (particularly with warm-starting). Both backends are *differentiable* with kappa-smoothed gradients: each provides a `relax(kappa)` that walks the solution to the same kappa-relaxed central point (complementarity $s \odot z = \kappa$) for smooth implicit differentiation -- the IPM by walking the central path, the PDAL through a log-barrier retraction (see `docs/log_barrier_admm_note.tex` and `docs/pdal_differentiability.md`). The IPM additionally supports exact (kappa = 0) gradients and can hold equality constraints to tighter tolerances. Both backends support Ruiz equilibration for poorly-conditioned problems (off by default).
 
 For a rough sense of numbers, on a laptop with an Intel i7 CPU, ElastiQP can solve humanoid-scale whole-body control problems at approximately 32 us with the PDAL backend, and 124 us for the IPM backend. Differentiation with the IPM backend takes ~2x as long as a forward pass.
 
@@ -98,7 +98,8 @@ while (running) {
 }
 
 // When differentiating: relax to the kappa-smoothed differentiation point
-// (does not disturb the solver's warm-start state)
+// (does not disturb the solver's warm-start state). Repeated relax() calls
+// across a control loop warm start from the previous relaxed point
 const elastiqp::Solution relaxed = solver.relax(kappa);
 
 // Or, use the secondary IPM backend

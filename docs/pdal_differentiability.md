@@ -25,7 +25,7 @@ there unchanged, so:
   below) — the IPM, which walks the central path, only lands within its
   tolerance.
 
-The mechanism is the log-barrier trick of `log_barrier_admm_note.tex`,
+The mechanism is the log-barrier trick of `docs/log_barrier_admm_note.tex`,
 adapted to the elastic form: the barrier's closed-form slack prox
 `b_κ(v) = (v + sqrt(v² + 4κ))/2` provides an *implicit-complementarity
 parametrization* of the slack/dual pairs, and a Newton corrector in those
@@ -47,7 +47,7 @@ cost of an O(κ) bias.
 
 ### The log-barrier ADMM note
 
-`log_barrier_admm_note.tex` considers a standard slack-form QP, replaces the
+`docs/log_barrier_admm_note.tex` considers a standard slack-form QP, replaces the
 indicator `I(s ≥ 0)` with the barrier `-κ Σ log s_i`, and applies two-block
 ADMM. Its key observations, all load-bearing here:
 
@@ -155,8 +155,13 @@ on it (`relax()` in `pdal.hpp`):
   Newton iteration.
 - **No boundary safeguards**: since positivity is built into the
   parametrization there is no fraction-to-boundary step limit; the only
-  safeguard is a residual backtracking line search (rarely triggered — the
-  warm start is O(κ) from the answer and convergence is quadratic).
+  safeguard is a backtracking line search. The line search **must accept on
+  the 2-norm merit `½‖F‖₂²`**, not the max-norm: the Newton step is a
+  guaranteed descent direction for the former (slope `-FᵀF < 0` at exact
+  Jacobians) but not the latter, and a max-norm-monotone search measurably
+  stalls (100+ rejected halvings) whenever a full step trades residual
+  between rows — which is exactly what happens when starting anywhere but
+  the tight certificate. Termination stays on the max-norm.
 - **Regularization**: small fixed prox terms (`relax_reg = 1e-9` on the
   primal diagonal and the equality dual, escalated ×100 on factorization
   failure). The prox centers sit at the current iterate, so — as in the
@@ -181,6 +186,60 @@ many conflicting rows, degenerate/weakly-active, m = 0, p ≫ n), where the
 literal ADMM iteration needed hundreds-to-thousands of sweeps or diverged
 when over-scaled.
 
+### Warm starting relax() across control ticks
+
+In a control loop (`solve() → relax() → set_*() → solve() → relax() → …`)
+the previous tick's relaxed iterate is an obvious candidate start for the
+next relaxation: it persists in the relax workspace, and because the
+v-parametrization is kappa-agnostic — *any* v maps onto the current κ
+manifold exactly — a stale iterate is always a *valid* start, even after
+data or κ changes. `Settings::relax_warm_start` (default on) enables this.
+
+Making it *profitable* turned out to be the interesting part. What the
+experiments showed (all measured on drifting control-loop instances,
+n up to 58, p up to 400):
+
+- **The retraction start is a strong incumbent.** Its x, t, y satisfy the
+  new tight KKT to solver tolerance, and its v *sign pattern encodes the
+  new smoothed configuration exactly*, so its (often larger) residual is
+  concentrated in the weakly-active rows where Newton contracts fastest.
+- **Residual norms do not predict the winner.** A stale iterate with a
+  10× smaller residual can still converge slower: its error is spread
+  across every densely-coupled equation, and — the failure mode that
+  matters — rows whose smoothed configuration changed must traverse the
+  curved region of `b_κ` near `v = 0` (curvature scale `√κ`), where full
+  Newton steps stall against the line search. This is the retraction-space
+  version of the classic "IPMs can't warm start across active-set changes"
+  phenomenon.
+- **The winning criterion is dimensional.** The stale iterate is adopted
+  only if its residual is below both `0.1×` the retraction start's residual
+  *and* `0.02·√κ` — i.e. well inside the retraction's curvature basin.
+  Calibration was sharp: residuals under `0.02·√κ` won consistently
+  (2–3× fewer iterations), `~0.1·√κ` was a coin flip, and above that the
+  stale start reliably lost. Selection costs three residual evaluations
+  (a few matvecs), no factorization.
+- **Bounded regret backstop.** If an adopted warm start has not dropped the
+  residual by two orders within 4 iterations, it is abandoned for the
+  retraction start; wasted work is capped and counted in `Solution::iters`.
+  With the selection rule above this rarely fires.
+
+Measured over drifting ticks (κ = 1e-3, tol 1e-10, drift 1e-4 — a typical
+high-rate control loop; "cold" = `relax_warm_start = false`):
+
+| instance | cold relax | warm relax |
+|---|---|---|
+| n=30, m=8, p=200 | 382 µs/tick (10.3 it) | 163 µs/tick (4.1 it) |
+| n=58, m=15, p=400 | 1277 µs/tick (7.8 it) | 540 µs/tick (3.2 it) |
+
+At drift ≥ 1e-2 (or κ = 1e-6, where the basin `√κ = 1e-3` is far tighter
+than any realistic drift) the selection falls back to the retraction start
+and warm behaves identically to cold — across every (instance, κ, drift)
+combination swept, warm start was never worse. Repeated `relax()` on an
+unchanged problem converges in 0 iterations. The relaxed point itself is
+unchanged by warm starting (verified to ~1e-11); only the start moves. The
+JAX FFI path is cold-start-per-call (functional purity) and does not use
+this.
+
 ### Limitation shared with the IPM
 
 Rows with `penalty_i = 0` admit no relaxed point: `z_t + z_ineq = 0` cannot
@@ -199,7 +258,7 @@ with zero-penalty rows in the *tight* solve.
 | Complementarity at result | within solver tolerance | exact to round-off (`z⊙s = κ` by construction) |
 | Positivity | fraction-to-boundary step limiting (`tau`) | automatic (range of `b_κ`) |
 | Cost per iteration | 1 KKT factorization | 1 KKT factorization (same condensed shape) |
-| Typical iterations (warm) | ~2–8 | ~2–9 |
+| Typical iterations (warm) | ~2–8 | ~2–9 (1–4 with tick-to-tick warm start) |
 | Solver state after | iterate moves to relaxed point | tight iterate and factorization cache preserved |
 | Exact gradients (κ = 0) | supported — iterates stay strictly interior | **not defined** — the PDAL certificate sits exactly on the boundary (`s` or `z` exactly 0), so the exact-KKT backward solve divides by zero. `jax.grad` at `target_kappa=0` raises a `TypeError` naming the fix. |
 
@@ -230,7 +289,9 @@ Unchanged from the IPM pattern, now on the default backend:
 - **C++ / Python bindings**: `solver.solve()` for the forward pass;
   `solver.relax(kappa)` only when a differentiation point is needed. The
   returned `Solution` is the relaxed certificate; `solver`'s warm state
-  still holds the tight solution.
+  still holds the tight solution. Across control ticks, repeated `relax()`
+  calls warm start from the previous relaxed iterate automatically (see
+  above; disable with `Settings::relax_warm_start = false`).
 - **JAX**: `elastiqp.jax.solve(..., target_kappa=1e-3)`. The primal path
   always runs the plain tight solve (relaxation skipped); the `custom_vjp`
   fwd runs solve + relax and stashes the relaxed point; the bwd solves the
@@ -243,7 +304,9 @@ Unchanged from the IPM pattern, now on the default backend:
 
 - `tests/test_pdal.cc`: PDAL relax vs IPM relax agreement (κ ∈ {1e-2, 1e-3,
   1e-6}, with equalities and conflicts), round-off-exact complementarity,
-  iterate/warm-start preservation across relax.
+  iterate/warm-start preservation across relax; relax warm start across
+  drifting ticks (fewer iterations, same relaxed point), under a κ change,
+  and graceful fallback after a full problem jump.
 - `tests/test_jax_ffi.py`: PDAL vs IPM smoothed gradients on all seven
   parameters; PDAL gradient vs finite differences of the PDAL relaxed map;
   exactness of `s ⊙ z = κ`; value unchanged by κ on the fwd path; failed
@@ -252,9 +315,11 @@ Unchanged from the IPM pattern, now on the default backend:
 
 ## Possible follow-ups
 
-- Warm-starting `relax` across control ticks (reusing the previous `v`)
-  would cut the 2–9 Newton iterations further; the current implementation
-  re-initializes from the tight certificate every call.
+- The warm-start selection forfeits the coin-flip band (`res_warm ~
+  0.1·√κ`). A *transported* warm candidate — the previous relaxed iterate
+  shifted by the tight solution's tick-to-tick displacement,
+  `x° + (x_tight_new - x_tight_old)` etc. — would cancel the O(drift) error
+  that band represents, at the cost of storing the previous tight solution.
 - The retraction Jacobian is bounded (`b' ∈ (0,1)`), which is the property
   the Arrizabalaga et al. single-precision IPM builds on — a float32 relax
   path may be feasible if that ever matters for deployment.

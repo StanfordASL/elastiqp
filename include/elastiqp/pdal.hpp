@@ -128,6 +128,16 @@ struct Settings {
   // perturb the relaxed point -- and it is escalated x100 on factorization
   // failure like the main loop's rho.
   double relax_reg = 1e-9;
+
+  // Warm-start relax() from the previous relax()'s converged iterate when
+  // one exists. Both candidate starts -- the previous relaxed iterate and
+  // the fresh tight-certificate retraction -- are evaluated under the
+  // CURRENT data and kappa, and the smaller residual wins (a few matvecs,
+  // no factorization), so this can never pick a worse start than
+  // relax_warm_start = false and degrades gracefully when the problem
+  // jumps. Across control ticks with drifting data it removes most of the
+  // relax Newton iterations.
+  bool relax_warm_start = true;
 };
 
 // Reusable ProxQP-style elastic solver. setup() once, then alternate
@@ -153,6 +163,7 @@ class Solver {
     penalty_ = penalty;
     have_warm_ = false;
     explicit_warm_ = false;
+    relax_warm_ = false;
     matrix_dirty_ = true;
     factored_ = false;
     rho_ = 0.0;
@@ -424,7 +435,7 @@ class Solver {
   // solve stays well-conditioned near degenerate (weakly-active)
   // constraints: the complementarity margins are bounded below by ~kappa.
   //
-  // Method (see log_barrier_admm_note.tex): replacing the slack indicator
+  // Method (see docs/log_barrier_admm_note.tex): replacing the slack indicator
   // with the barrier -kappa*sum log(s) turns the slack update into the
   // smooth retraction b_k(v) = (v + sqrt(v^2 + 4 kappa))/2, and the paired
   // update z = b_k(v), s = b_k(-v) satisfies z.s = kappa and z, s > 0
@@ -432,13 +443,16 @@ class Solver {
   // v = z - s). relax() therefore parametrizes each slack/dual pair by its
   // v and Newton-iterates the remaining smooth conditions -- stationarity
   // in x and t, Ax = b, s_t = t, s_ineq = h + t - Gx -- in
-  // (x, t, y, v_t, v_ineq), warm-started from the tight solution through
-  // the same retraction. Complementarity and positivity hold by
-  // construction at every iterate, so there is no fraction-to-boundary
-  // safeguard, just a residual backtracking line search; from the warm
-  // start this typically converges in 2-7 Newton steps (one n x n
-  // factorization each, reusing the solve() condensation shape with
-  // weights Lambda = z1 z2 / (z1 s2 + z2 s1), qpax's elastic weight).
+  // (x, t, y, v_t, v_ineq), started from the tight solution through the
+  // same retraction. Complementarity and positivity hold by construction
+  // at every iterate, so there is no fraction-to-boundary safeguard, just
+  // a residual backtracking line search; from the retraction start this
+  // typically converges in 2-9 Newton steps (one n x n factorization
+  // each, reusing the solve() condensation shape with weights
+  // Lambda = z1 z2 / (z1 s2 + z2 s1), qpax's elastic weight). Repeated
+  // relax() calls across a control loop warm start from the previous
+  // relaxed iterate (see Settings::relax_warm_start), which usually cuts
+  // that to 1-2 steps.
   //
   // Call after solve(); the returned Solution (and solution()) is the
   // RELAXED point, not the optimum, with tol on the unscaled relaxed-KKT
@@ -455,19 +469,38 @@ class Solver {
     // factor under Ruiz (s scales with the row, z against it).
     const double kappa_s = c_s_ * kappa;
 
-    // Initialize from the reconstructed elastic certificate of the tight
-    // iterate through the paired retraction v = z - s: the starting point
-    // already sits on the z.s = kappa manifold.
-    xr_ = x_;
-    if (m_ > 0) yr_ = y_;
-    wGx_.noalias() = G_ * x_;
-    for (Eigen::Index i = 0; i < p_; ++i) {
-      const double r = wGx_[i] - h_[i];
-      const double ti = std::max(r + mu_in_ * (z_[i] - penalty_[i]), 0.0);
-      tr_[i] = ti;
-      v1r_[i] = (penalty_[i] - z_[i]) - ti;         // z_t - s_t
-      v2r_[i] = z_[i] - std::max(ti - r, 0.0);      // z_ineq - s_ineq
+    // Initialization. The baseline start is the retraction of the tight
+    // certificate (relax_init_retraction). When a previous relax() iterate
+    // exists (settings.relax_warm_start), it competes: across control
+    // ticks it is only O(data drift) from the new relaxed point, and
+    // because the v-parametrization is kappa-agnostic -- any v maps onto
+    // the CURRENT kappa manifold -- it stays a valid candidate even if
+    // kappa changed. It is adopted only when its residual clears BOTH
+    //  * kWarmMargin x the retraction start's residual (it must actually
+    //    be closer), and
+    //  * kWarmBasin x sqrt(kappa) -- well inside the curvature scale of
+    //    the retraction b_kappa. Beyond that distance the stale iterate
+    //    sits outside the fast Newton basin (rows must traverse the
+    //    curved region near v = 0, where full steps stall against the
+    //    line search) even when its residual looks better; the retraction
+    //    start, whose v sign pattern encodes the new smoothed
+    //    configuration exactly, is then the reliable choice. Thresholds
+    //    calibrated on drifting control-loop instances
+    //    (docs/pdal_differentiability.md): residuals below 0.02 sqrt(k)
+    //    won consistently, ~0.1 sqrt(k) was a coin flip (excluded), and
+    //    above that the warm start reliably lost.
+    const bool have_prev = settings.relax_warm_start && relax_warm_;
+    bool from_warm = false;
+    if (have_prev) {
+      // Stash the previous relaxed iterate in the step buffers (unused
+      // until the first Newton step; Eigen swap is a pointer exchange).
+      dxr_.swap(xr_);
+      dtr_.swap(tr_);
+      dyr_.swap(yr_);
+      dv1r_.swap(v1r_);
+      dv2r_.swap(v2r_);
     }
+    relax_init_retraction();
 
     double rho = settings.relax_reg;
     double delta = settings.relax_reg;
@@ -475,6 +508,25 @@ class Solver {
     int iter = 0;
     Status status = Status::kMaxIter;
     double res = relax_residual(kappa_s);
+    if (have_prev) {
+      constexpr double kWarmMargin = 0.1;
+      constexpr double kWarmBasin = 0.02;
+      const double res_retraction = res;
+      dxr_.swap(xr_);  // previous relaxed iterate back into place
+      dtr_.swap(tr_);
+      dyr_.swap(yr_);
+      dv1r_.swap(v1r_);
+      dv2r_.swap(v2r_);
+      res = relax_residual(kappa_s);
+      from_warm = res < kWarmMargin * res_retraction &&
+                  res < kWarmBasin * std::sqrt(kappa);
+      if (!from_warm) {
+        relax_init_retraction();  // retraction start wins
+        res = relax_residual(kappa_s);
+      }
+    }
+    relax_warm_ = false;  // re-armed below only on a converged relaxation
+    const double res_start = res;
     while (iter < max_iter) {
       if (!std::isfinite(res)) {
         status = Status::kNumerics;
@@ -483,6 +535,18 @@ class Solver {
       if (res < tol) {
         status = Status::kSolved;
         break;
+      }
+      // Bounded regret for the warm start: healthy Newton drops the
+      // residual by orders of magnitude within a few steps, so a warm
+      // attempt that has not is outside the fast basin after all --
+      // abandon it for the retraction start. The wasted iterations are
+      // capped at kWarmBudget (and counted in Solution::iters).
+      constexpr int kWarmBudget = 4;
+      if (from_warm && iter == kWarmBudget && res > 1e-2 * res_start) {
+        from_warm = false;
+        relax_init_retraction();
+        res = relax_residual(kappa_s);
+        continue;
       }
       iter++;
 
@@ -536,9 +600,13 @@ class Solver {
                    retraction_dcomp(v2r_[i], kappa_s);
       }
 
-      // Full Newton step, then halve until the unscaled residual stops
+      // Full Newton step, then halve until the merit 0.5||F||^2 stops
       // increasing (the retraction keeps every trial point feasible, so
-      // plain backtracking is the only safeguard needed).
+      // plain backtracking is the only safeguard needed). The accept test
+      // MUST use the 2-norm merit, for which the Newton step is a descent
+      // direction -- see relax_residual(); termination stays on the max
+      // norm.
+      const double merit_prev = relax_merit_;
       xr_ += dxr_;
       tr_ += dtr_;
       if (m_ > 0) yr_ += dyr_;
@@ -547,7 +615,9 @@ class Solver {
       double alpha = 1.0;
       double res_new = relax_residual(kappa_s);
       for (int bt = 0;
-           bt < 12 && !(std::isfinite(res_new) && res_new <= res); ++bt) {
+           bt < 12 && !(std::isfinite(relax_merit_) &&
+                        relax_merit_ <= merit_prev);
+           ++bt) {
         alpha *= 0.5;
         xr_ -= alpha * dxr_;
         tr_ -= alpha * dtr_;
@@ -564,6 +634,9 @@ class Solver {
       status = Status::kSolved;
     }
     if (!std::isfinite(res)) status = Status::kNumerics;
+    // A converged iterate (persisting in xr_/tr_/yr_/v1r_/v2r_) seeds the
+    // next relax()'s warm start.
+    relax_warm_ = status == Status::kSolved;
     return relax_finish(status, iter);
   }
 
@@ -974,7 +1047,7 @@ class Solver {
   // Closed-form prox of kappa*(-log): the positive root of
   // s^2 - v s - kappa = 0, i.e. b_k(v) = (v + sqrt(v^2 + 4 kappa))/2, with
   // the cancellation-free branch b_k(v) = 2 kappa / (sqrt(..) - v) for
-  // v < 0 (log_barrier_admm_note.tex).
+  // v < 0 (docs/log_barrier_admm_note.tex).
   static double retraction(double v, double kappa) {
     const double r = std::sqrt(v * v + 4.0 * kappa);
     return v >= 0.0 ? 0.5 * (v + r) : 2.0 * kappa / (r - v);
@@ -995,10 +1068,18 @@ class Solver {
   //   F1 = Q x + q + A'y + G'z2      F2 = penalty - z1 - z2
   //   F3 = A x - b                   F4 = s1 - t     F5 = s2 - (h + t - Gx)
   // Returns the max unscaled norm (termination metric); norms are unscaled
-  // componentwise exactly as in update_residuals().
+  // componentwise exactly as in update_residuals(). Also fills
+  // relax_merit_, the squared 2-norm of the same unscaled residual stack:
+  // the Newton step is a guaranteed descent direction for 0.5||F||_2^2
+  // (grad = J'F, step = -J^{-1}F, slope = -F'F < 0) but NOT for the max
+  // norm, so the line search must accept on the 2-norm merit or it stalls
+  // whenever a full step trades residual between rows.
   double relax_residual(double kappa_s) {
     const auto inf_us = [](const VectorXd& v, const VectorXd& s) {
       return v.size() > 0 ? v.cwiseAbs().cwiseProduct(s).maxCoeff() : 0.0;
+    };
+    const auto ssq_us = [](const VectorXd& v, const VectorXd& s) {
+      return v.size() > 0 ? v.cwiseProduct(s).squaredNorm() : 0.0;
     };
     for (Eigen::Index i = 0; i < p_; ++i) {
       z1r_[i] = retraction(v1r_[i], kappa_s);
@@ -1024,7 +1105,29 @@ class Solver {
     relax_primal_res_ =
         std::max({inf_us(rf4_, inv_di_), inf_us(rf5_, inv_di_),
                   m_ > 0 ? inf_us(rf3_, inv_de_) : 0.0});
+    relax_merit_ = ssq_us(rf1_, inv_cdx_) + ssq_us(rf2_, z_us_) +
+                   ssq_us(rf4_, inv_di_) + ssq_us(rf5_, inv_di_) +
+                   (m_ > 0 ? ssq_us(rf3_, inv_de_) : 0.0);
     return std::max(relax_dual_res_, relax_primal_res_);
+  }
+
+  // Retraction start for relax(): the reconstructed elastic certificate of
+  // the tight iterate mapped through v = z - s. Its x, t, y satisfy the
+  // tight KKT to solver tolerance, so the residual is concentrated in the
+  // rows the smoothing shifts -- and its v sign pattern encodes the
+  // current smoothed configuration exactly, which is what makes it the
+  // robust default start.
+  void relax_init_retraction() {
+    xr_ = x_;
+    if (m_ > 0) yr_ = y_;
+    wGx_.noalias() = G_ * x_;
+    for (Eigen::Index i = 0; i < p_; ++i) {
+      const double r = wGx_[i] - h_[i];
+      const double ti = std::max(r + mu_in_ * (z_[i] - penalty_[i]), 0.0);
+      tr_[i] = ti;
+      v1r_[i] = (penalty_[i] - z_[i]) - ti;         // z_t - s_t
+      v2r_[i] = z_[i] - std::max(ti - r, 0.0);      // z_ineq - s_ineq
+    }
   }
 
   // Factor K = Q + rho I + (1/delta) A'A + G' diag(Lambda) G into llt_r_.
@@ -1224,6 +1327,8 @@ class Solver {
   VectorXd dxr_, dtr_, dyr_, dv1r_, dv2r_;        // Newton step
   Eigen::LLT<MatrixXd, Eigen::Lower> llt_r_;
   double relax_primal_res_ = 0, relax_dual_res_ = 0;
+  double relax_merit_ = 0;   // squared 2-norm of the relaxed-KKT residual
+  bool relax_warm_ = false;  // xr_..v2r_ hold a converged relaxed iterate
 
   Solution sol_;
 };
