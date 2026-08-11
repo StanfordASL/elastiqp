@@ -433,7 +433,192 @@ def main():
         f"info={[int(v) for v in out[10]]} conv={int(conv)}",
     )
 
-    # Smoothed gradient through vmap: the batched _ipm_bwd path (batched
+    print("PDAL backend: log-barrier smoothed gradients")
+
+    # The PDAL relax() targets the same kappa-central point as the IPM's
+    # (via the log-barrier retraction instead of the central path), so the
+    # two backends' smoothed gradients must agree on every parameter.
+    def loss_smooth_pdal(Q, q, A, b, G, h, penalty, kap=kappa):
+        s = elastiqp.jax.solve(
+            Q,
+            q,
+            G,
+            h,
+            penalty,
+            A=A,
+            b=b,
+            backend="pdal",
+            eps_abs=1e-11,
+            max_iter=300,
+            target_kappa=kap,
+        )
+        return w_loss @ s.x + 0.1 * jnp.sum(s.t**2)
+
+    def loss_smooth_ipm(Q, q, A, b, G, h, penalty, kap=kappa):
+        s = elastiqp.jax.solve(
+            Q,
+            q,
+            G,
+            h,
+            penalty,
+            A=A,
+            b=b,
+            backend="ipm",
+            eps_abs=1e-11,
+            max_iter=300,
+            target_kappa=kap,
+        )
+        return w_loss @ s.x + 0.1 * jnp.sum(s.t**2)
+
+    g_pdal = jax.jit(jax.grad(loss_smooth_pdal, argnums=tuple(range(7))))(*args)
+    g_ipm = jax.jit(jax.grad(loss_smooth_ipm, argnums=tuple(range(7))))(*args)
+    for k, name in enumerate(names):
+        dg = float(jnp.abs(g_pdal[k] - g_ipm[k]).max())
+        nz = float(jnp.abs(g_pdal[k]).max())
+        check(
+            f"pdal d/d{name} == ipm d/d{name} (smoothed)",
+            dg < 1e-6 and nz > 1e-4,
+            f"|dg|={dg:.1e}",
+        )
+
+    # ...and, independently of IPM, the pdal smoothed gradient must match
+    # finite differences of pdal's OWN relaxed solution map.
+    def loss_relaxed_pdal(q_):
+        out = elastiqp.jax._ffi_pdal_solve(
+            args[0],
+            q_,
+            args[2],
+            args[3],
+            args[4],
+            args[5],
+            args[6],
+            1e-11,
+            300,
+            False,
+            "sequential",
+            kappa,
+        )
+        return w_loss @ out[5] + 0.1 * jnp.sum(out[6] ** 2)
+
+    g_pq = jax.grad(lambda q_: loss_smooth_pdal(args[0], q_, *args[2:]))(args[1])
+    v = np.asarray(rngd.standard_normal(12))
+    v /= np.linalg.norm(v)
+    fd = (
+        float(loss_relaxed_pdal(args[1] + step * v))
+        - float(loss_relaxed_pdal(args[1] - step * v))
+    ) / (2 * step)
+    an = float(jnp.sum(g_pq * v))
+    check(
+        "pdal smoothed grad == FD of pdal relaxed map",
+        abs(fd - an) / max(1.0, abs(fd)) < 1e-4,
+        f"an={an:+.5f} fd={fd:+.5f}",
+    )
+
+    # The retraction z = b_kappa(v), s = b_kappa(-v) enforces s.z = kappa by
+    # construction, so pdal's relaxed complementarity is exact to round-off
+    # (the IPM walks the central path and lands within its tolerance
+    # instead). s2 is reconstructed from x, so it carries the O(tol) primal
+    # residual.
+    out = elastiqp.jax._ffi_pdal_solve(
+        args[0],
+        args[1],
+        args[2],
+        args[3],
+        args[4],
+        args[5],
+        args[6],
+        1e-11,
+        300,
+        False,
+        "sequential",
+        kappa,
+    )
+    xr, tr, z1r, z2r, info = out[5], out[6], out[8], out[9], out[10]
+    s2r = args[5] + tr - args[4] @ xr
+    comp = max(
+        float(jnp.max(jnp.abs(tr * z1r - kappa))),
+        float(jnp.max(jnp.abs(s2r * z2r - kappa))),
+    )
+    check(
+        "pdal relaxed point satisfies s.z = kappa, and reports so",
+        comp < 1e-13 and int(info[2]) == 1,
+        f"|s.z-k|={comp:.1e}",
+    )
+
+    # Value unchanged by kappa on the differentiation path, as for ipm.
+    vp_smooth, _ = jax.value_and_grad(
+        lambda q_: loss_smooth_pdal(args[0], q_, *args[2:])
+    )(args[1])
+    vp_tight = loss_smooth_pdal(*args, kap=0.0)
+    dvp = abs(float(vp_smooth) - float(vp_tight))
+    check("pdal value unchanged by kappa (fwd path)", dvp == 0.0, f"|dv|={dvp:.1e}")
+
+    # An unreachable relaxation target must not fail silently (mirrors the
+    # ipm check): absurd kappa converges the solve (info[0]) but not the
+    # relaxation (info[2]), and solve() folds that into converged.
+    out = elastiqp.jax._ffi_pdal_solve(
+        args[0],
+        args[1],
+        args[2],
+        args[3],
+        args[4],
+        args[5],
+        args[6],
+        1e-11,
+        300,
+        False,
+        "sequential",
+        1e8,
+    )
+    p_tight_ok = float(out[10][0]) == 1.0
+    p_relax_bad = float(out[10][2]) == 0.0
+
+    def conv_smooth_pdal(q_):
+        s = elastiqp.jax.solve(
+            args[0],
+            q_,
+            args[4],
+            args[5],
+            args[6],
+            A=args[2],
+            b=args[3],
+            backend="pdal",
+            eps_abs=1e-11,
+            max_iter=300,
+            target_kappa=1e8,
+        )
+        return jnp.sum(s.x), s.converged
+
+    (_, conv_p), _ = jax.value_and_grad(conv_smooth_pdal, has_aux=True)(args[1])
+    check(
+        "pdal failed relaxation is reported via converged",
+        p_tight_ok and p_relax_bad and int(conv_p) == 0,
+        f"info={[int(vv) for vv in out[10]]} conv={int(conv_p)}",
+    )
+
+    # Smoothed pdal gradient through vmap.
+    qs_pb = args[1] + batch_dq
+
+    def batched_smooth_pdal(qs):
+        return jnp.sum(
+            jax.vmap(lambda q_: loss_smooth_pdal(args[0], q_, *args[2:]))(qs)
+        )
+
+    g_pb = jax.jit(jax.grad(batched_smooth_pdal))(qs_pb)
+    g_pref = jnp.stack(
+        [
+            jax.grad(lambda q_: loss_smooth_pdal(args[0], q_, *args[2:]))(qs_pb[i])
+            for i in range(4)
+        ]
+    )
+    dpb = float(jnp.abs(g_pb - g_pref).max())
+    check(
+        "pdal smoothed d/dq through vmap matches per-problem",
+        g_pb.shape == (4, 12) and dpb < 1e-9,
+        f"|dg|={dpb:.1e}",
+    )
+
+    # Smoothed gradient through vmap: the batched _kkt_bwd path (batched
     # einsums + batched saddle solve) with a relaxed evaluation point is
     # otherwise never exercised -- the plain vmap-grad test runs at kappa=0
     # and the kappa tests above are unbatched.
@@ -477,7 +662,32 @@ def main():
         f"an={an:+.5f} fd={fd:+.5f}",
     )
 
-    print("backend='pdal' (default): forward-only, and grad says so")
+    # ...and the same m=0 instance through the pdal relaxation, against the
+    # ipm smoothed gradient on identical data.
+    def loss_m0_smooth(q_, bk):
+        s = elastiqp.jax.solve(
+            a0[0],
+            q_,
+            a0[2],
+            a0[3],
+            a0[4],
+            backend=bk,
+            eps_abs=1e-11,
+            max_iter=300,
+            target_kappa=kappa,
+        )
+        return w_loss @ s.x + 0.1 * jnp.sum(s.t**2)
+
+    g_pm0 = jax.jit(jax.grad(lambda q_: loss_m0_smooth(q_, "pdal")))(a0[1])
+    g_im0 = jax.jit(jax.grad(lambda q_: loss_m0_smooth(q_, "ipm")))(a0[1])
+    dm0 = float(jnp.abs(g_pm0 - g_im0).max())
+    check(
+        "pdal smoothed d/dq with no equalities (m=0)",
+        dm0 < 1e-6 and float(jnp.abs(g_pm0).max()) > 1e-4,
+        f"|dg|={dm0:.1e}",
+    )
+
+    print("backend='pdal' (default): fast forward path; grad needs kappa")
     Qx, qx, Ax, bx, Gx, hx, _ = random_qp(21, 14, 4, 60)
     Gx, hx = make_infeasible(Gx, hx, 15)
     ipm_ref = elastiqp.jax.solve(Qx, qx, Gx, hx, 10.0, A=Ax, b=bx, backend="ipm")
@@ -518,8 +728,9 @@ def main():
         f"|dx|={dr:.1e}",
     )
 
-    # The whole point of wrapping the PDAL target in a custom_vjp: grad must
-    # fail with a message that names the fix, not a generic JAX internal.
+    # The exact (kappa=0) KKT derivative is undefined at the PDAL boundary
+    # certificate: grad without target_kappa must fail with a message that
+    # names the fix, not a generic JAX internal.
     try:
         jax.grad(
             lambda q_: jnp.sum(elastiqp.jax.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx).x)
@@ -527,10 +738,10 @@ def main():
         msg = None
     except TypeError as e:
         msg = str(e)
-    check("grad through backend='pdal' raises", msg is not None, "")
+    check("grad through backend='pdal' at kappa=0 raises", msg is not None, "")
     check(
-        "...with a message pointing at backend='ipm'",
-        msg is not None and "backend='ipm'" in msg and "not differentiable" in msg,
+        "...with a message pointing at target_kappa",
+        msg is not None and "target_kappa" in msg and "not differentiable" in msg,
         "",
     )
 
@@ -547,13 +758,6 @@ def main():
         "unknown backend raises",
         raises_value_error(
             lambda: elastiqp.jax.solve(Qx, qx, Gx, hx, 10.0, backend="nope")
-        ),
-        "",
-    )
-    check(
-        "target_kappa with backend='pdal' raises",
-        raises_value_error(
-            lambda: elastiqp.jax.solve(Qx, qx, Gx, hx, 10.0, target_kappa=1e-3)
         ),
         "",
     )
@@ -597,6 +801,27 @@ def main():
     g_rz = jax.grad(loss_rz)(args[1])
     dg = float(jnp.linalg.norm(g_rz - grads[1]))
     check("ipm gradients invariant to ruiz", dg < 1e-5, f"|dg|={dg:.1e}")
+
+    def loss_rz_pdal(q_):
+        s = elastiqp.jax.solve(
+            args[0],
+            q_,
+            args[4],
+            args[5],
+            args[6],
+            A=args[2],
+            b=args[3],
+            backend="pdal",
+            eps_abs=1e-11,
+            max_iter=300,
+            ruiz=True,
+            target_kappa=kappa,
+        )
+        return w_loss @ s.x + 0.1 * jnp.sum(s.t**2)
+
+    g_rzp = jax.grad(loss_rz_pdal)(args[1])
+    dgp = float(jnp.linalg.norm(g_rzp - g_pdal[1]))
+    check("pdal smoothed gradients invariant to ruiz", dgp < 1e-5, f"|dg|={dgp:.1e}")
 
     n_fail = RESULTS.count(False)
     print(f"\n{'All jax ffi tests passed.' if n_fail == 0 else f'{n_fail} FAILURES'}")

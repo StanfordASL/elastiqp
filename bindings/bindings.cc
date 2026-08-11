@@ -214,6 +214,17 @@ NB_MODULE(_core, m) {
           .def("factorizations", &Solver::factorizations,
                "KKT factorizations performed by the last solve()")
           .def(
+              "relax",
+              [](Solver& s, double kappa, double tol, int max_iter)
+                  -> Solution { return s.relax(kappa, tol, max_iter); },
+              nb::arg("kappa"), nb::arg("tol") = 1e-8,
+              nb::arg("max_iter") = 30,
+              "Walk the converged solution to the kappa-relaxed central "
+              "point (s.z = kappa) for smooth differentiation, via the "
+              "log-barrier retraction. Call after solve(); the returned "
+              "Solution is the relaxed point, while the solver's own "
+              "iterate (used for warm starts) stays at the tight solution.")
+          .def(
               "set_warm_start",
               [](Solver& s, const Eigen::VectorXd& x,
                  const Eigen::VectorXd& y, const Eigen::VectorXd& z_ineq,
@@ -319,8 +330,10 @@ NB_MODULE(_core, m) {
       "backend='pdal' (default) uses the primal-dual augmented Lagrangian "
       "solver (elastiqp.Solver); backend='ipm' uses the proximal "
       "interior-point solver (elastiqp.IpmSolver), which is slower but "
-      "holds equalities to ~1e-11 and is the differentiable one. ruiz= "
-      "enables Ruiz equilibration on either backend.\n\n"
+      "holds equalities to ~1e-11. Both backends are differentiable: use "
+      "the Solver/IpmSolver classes and relax(kappa) for the smoothed "
+      "differentiation point. ruiz= enables Ruiz equilibration on either "
+      "backend.\n\n"
       "Returns a Solution (see help(elastiqp.Solution) for the fields).";
 
   m.def(

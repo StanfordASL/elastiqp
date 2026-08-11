@@ -16,7 +16,7 @@
 //   elastiqp/pdal.hpp   Solver, Settings, Solve -- a primal-dual augmented
 //                       Lagrangian method based on ProxQP. (Default backend)
 //   elastiqp/ipm.hpp    IpmSolver, IpmSettings, IpmSolve -- a proximal
-//                       interior-point method based on PIQP. Differentiable.
+//                       interior-point method based on PIQP.
 
 #pragma once
 

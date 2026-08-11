@@ -67,7 +67,10 @@ def main():
 
     print("\nWith jax.grad, we can differentiate scalar losses through the solver")
     print("This uses implicit differentiation of the KKT system (not unrolling)")
-    print("\nNote: differentiation requires backend='ipm'")
+    print("\nBoth backends are differentiable. The default PDAL backend needs")
+    print("target_kappa > 0 (its solution sits exactly on the constraint")
+    print("boundary, so it differentiates at a kappa-relaxed point); the IPM")
+    print("backend also supports exact gradients at target_kappa=0")
 
     def loss(q_):
         sol = elastiqp.jax.solve(Q, q_, G, h, penalty, A=A, b=b, backend="ipm")
@@ -93,19 +96,25 @@ def main():
     print("Setting target_kappa > 0 instead differentiates at a kappa-relaxed central")
     print("point (as in qpax), trading an O(kappa) bias for smoothness")
 
-    def x0(h0, kappa):
+    def x0(h0, kappa, backend="ipm"):
         h_mod = h.at[0].set(h0)
         return elastiqp.jax.solve(
-            Q, q, G, h_mod, penalty, A=A, b=b, backend="ipm", target_kappa=kappa
+            Q, q, G, h_mod, penalty, A=A, b=b, backend=backend, target_kappa=kappa
         ).x[0]
 
     print("\nTo see this, let's compare d(x0)/d(h0): the sensitivity of x0 to its")
     print("upper bound, as that bound sweeps across the point where the constraint")
-    print("deactivates")
+    print("deactivates. Both backends produce the same smoothed gradient: the")
+    print("PDAL backend relaxes to the same central point via its log-barrier")
+    print("retraction")
     for h0 in [0.8, 1.0, 1.2, 1.4, 1.6]:
         g_exact = jax.grad(x0)(h0, 0.0)
         g_smooth = jax.grad(x0)(h0, 1e-3)
-        print(f"h0 = {h0:.1f}:  exact: {g_exact:+.4f}   smoothed: {g_smooth:+.4f}")
+        g_pdal = jax.grad(x0)(h0, 1e-3, "pdal")
+        print(
+            f"h0 = {h0:.1f}:  exact: {g_exact:+.4f}   smoothed (ipm): "
+            f"{g_smooth:+.4f}   smoothed (pdal): {g_pdal:+.4f}"
+        )
 
     print("\nThe exact gradient snaps from 1 to 0 at the activation point, while")
     print("the smoothed gradient transitions continuously between the two regimes")

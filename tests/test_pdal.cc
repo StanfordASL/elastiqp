@@ -693,7 +693,65 @@ int main() {
           std::max({e_w, e_s1, e_s2}), "inv");
   }
 
-  std::printf("PDAL: zero-penalty rows drop out of the problem\n");
+  std::printf("PDAL: relax(kappa) reaches the kappa-relaxed central point\n");
+  {
+    // The relaxed point satisfies the elastic KKT with complementarity
+    // s.z = kappa on both blocks; it is the same point IpmSolver::relax
+    // targets, so the two backends must agree on it. Cover equalities,
+    // conflicts (active elastic slacks), and a range of kappa.
+    for (const double kappa : {1e-2, 1e-3, 1e-6}) {
+      const QPData qp = problem_gen::InfeasibleEq(rng, 14, 4, 60, 15);
+      const VectorXd penalty = VectorXd::Constant(60, 10.0);
+      elastiqp::Solver solver;
+      solver.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
+      const elastiqp::Solution tight = solver.solve();
+      const elastiqp::Solution rel = solver.relax(kappa, 1e-10, 50);
+
+      elastiqp::IpmSolver ipm;
+      ipm.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
+      ipm.solve();
+      const elastiqp::Solution iref = ipm.relax(kappa, 1e-10, 100);
+
+      const double dx = (rel.x - iref.x).lpNorm<Eigen::Infinity>();
+      const double dz = (rel.z_ineq - iref.z_ineq).lpNorm<Eigen::Infinity>();
+      // Complementarity is enforced by the retraction: exact to round-off.
+      double comp = 0;
+      for (int i = 0; i < 60; ++i) {
+        comp = std::max(comp, std::abs(rel.s_t[i] * rel.z_t[i] - kappa));
+        comp = std::max(comp,
+                        std::abs(rel.s_ineq[i] * rel.z_ineq[i] - kappa));
+      }
+      char name[64];
+      std::snprintf(name, sizeof(name), "kappa=%.0e matches IPM relax",
+                    kappa);
+      Check(name,
+            tight.converged == 1 && rel.converged == 1 &&
+                iref.converged == 1 && dx < 1e-7 && dz < 1e-6 &&
+                comp < 1e-14 * std::max(1.0, 1.0 / kappa) &&
+                rel.iters <= 12,
+            std::max(dx, dz), "|dx|,|dz|");
+    }
+  }
+
+  std::printf("PDAL: relax leaves the tight iterate untouched\n");
+  {
+    // relax() must not disturb warm starting: a re-solve after relax should
+    // converge as immediately as one without.
+    const QPData qp = problem_gen::InfeasibleEq(rng, 20, 5, 80, 20);
+    const VectorXd penalty = VectorXd::Constant(80, 10.0);
+    elastiqp::Solver solver;
+    solver.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
+    const elastiqp::Solution tight = solver.solve();
+    const elastiqp::Solution rel = solver.relax(1e-3, 1e-10, 50);
+    const double moved = (rel.x - tight.x).lpNorm<Eigen::Infinity>();
+    const elastiqp::Solution again = solver.solve();
+    const double dx = (again.x - tight.x).lpNorm<Eigen::Infinity>();
+    Check("re-solve after relax converges in place",
+          tight.converged == 1 && rel.converged == 1 && moved > 1e-8 &&
+              again.converged == 1 && again.iters <= 2 && dx < 1e-9,
+          dx, "|dx|");
+  }
+
   {
     const int n = 12, p = 30, k_zero = 5;
     const QPData qp = problem_gen::Feasible(rng, n, p);

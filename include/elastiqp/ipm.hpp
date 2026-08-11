@@ -1,15 +1,7 @@
 // ElastiQP-IPM: a proximal interior-point method for elastic QPs
 //
 // This is the secondary backend. In general, elastiqp/pdal.hpp's Solver
-// will be faster on most robotics tasks. However, the IPM solver adds:
-//
-//   * differentiability -- relax(kappa) walks back to a kappa-relaxed
-//     central point, used for smooth derivatives
-//   * equality residuals near machine precision (tighter than PDAL)
-//
-// You can also combine the two backends. For instance, if you require
-// differentiability, a fast forward-backward path is (1) solve the forward
-// path with PDAL, and (2) differentiate with IPM (see warm_start_from()).
+// will be faster on most robotics tasks.
 //
 // This backend is based on PIQP, with the elastic condensation tricks of
 // qpax, and a few other changes (see notes below). The elastic QP form is

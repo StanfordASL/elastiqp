@@ -42,6 +42,10 @@
 // Omitted from proxsuite: GPDAL merit, incremental LDLT updates + iterative
 // refinement, infeasibility detection, box specialization, nonconvex handling.
 // Equalities hold to solver tolerance (~eps_abs).
+//
+// Differentiability: relax(kappa) walks the converged solution to a
+// kappa-relaxed central point (complementarity s.z = kappa) for smooth
+// implicit differentiation, using a log-barrier retraction
 
 #pragma once
 
@@ -117,6 +121,13 @@ struct Settings {
   bool ruiz = false;
   int ruiz_max_iter = 10;
   double ruiz_tol = 1e-3;
+
+  // Proximal regularization of the relax() Newton system (primal diagonal
+  // and equality dual, mirroring ipm.hpp's rho/delta). The prox centers sit
+  // at the current iterate, so the value only damps the step -- it does not
+  // perturb the relaxed point -- and it is escalated x100 on factorization
+  // failure like the main loop's rho.
+  double relax_reg = 1e-9;
 };
 
 // Reusable ProxQP-style elastic solver. setup() once, then alternate
@@ -187,6 +198,33 @@ class Solver {
     GS_.resize(p_, n_);
     K_.resize(n_, n_);
     llt_ = Eigen::LLT<MatrixXd, Eigen::Lower>(n_);
+
+    xr_.resize(n_);
+    tr_.resize(p_);
+    yr_.resize(m_);
+    v1r_.resize(p_);
+    v2r_.resize(p_);
+    z1r_.resize(p_);
+    z2r_.resize(p_);
+    s1r_.resize(p_);
+    s2r_.resize(p_);
+    rf1_.resize(n_);
+    rf2_.resize(p_);
+    rf3_.resize(m_);
+    rf4_.resize(p_);
+    rf5_.resize(p_);
+    d1r_.resize(p_);
+    d2r_.resize(p_);
+    einvr_.resize(p_);
+    lamr_.resize(p_);
+    wr_.resize(p_);
+    pvr_.resize(p_);
+    dxr_.resize(n_);
+    dtr_.resize(p_);
+    dyr_.resize(m_);
+    dv1r_.resize(p_);
+    dv2r_.resize(p_);
+    llt_r_ = Eigen::LLT<MatrixXd, Eigen::Lower>(n_);
 
     ruiz_ = settings.ruiz && p_ > 0;
     dx_s_ = VectorXd::Ones(n_);
@@ -375,6 +413,158 @@ class Solver {
     }
 
     return finish(Status::kMaxIter);
+  }
+
+  // Re-solve from the converged solution to a kappa-relaxed central point of
+  // the elastic QP: the same KKT conditions, but with the complementarity
+  // pairs relaxed to s_t.z_t = s_ineq.z_ineq = kappa -- the point
+  // elastiqp::IpmSolver::relax also targets, so both backends evaluate
+  // derivatives at the same smoothed point. Differentiating the KKT system
+  // there instead of at the exact solution yields gradients whose backward
+  // solve stays well-conditioned near degenerate (weakly-active)
+  // constraints: the complementarity margins are bounded below by ~kappa.
+  //
+  // Method (see log_barrier_admm_note.tex): replacing the slack indicator
+  // with the barrier -kappa*sum log(s) turns the slack update into the
+  // smooth retraction b_k(v) = (v + sqrt(v^2 + 4 kappa))/2, and the paired
+  // update z = b_k(v), s = b_k(-v) satisfies z.s = kappa and z, s > 0
+  // EXACTLY for any v (the note's ADMM produces exactly this pair with
+  // v = z - s). relax() therefore parametrizes each slack/dual pair by its
+  // v and Newton-iterates the remaining smooth conditions -- stationarity
+  // in x and t, Ax = b, s_t = t, s_ineq = h + t - Gx -- in
+  // (x, t, y, v_t, v_ineq), warm-started from the tight solution through
+  // the same retraction. Complementarity and positivity hold by
+  // construction at every iterate, so there is no fraction-to-boundary
+  // safeguard, just a residual backtracking line search; from the warm
+  // start this typically converges in 2-7 Newton steps (one n x n
+  // factorization each, reusing the solve() condensation shape with
+  // weights Lambda = z1 z2 / (z1 s2 + z2 s1), qpax's elastic weight).
+  //
+  // Call after solve(); the returned Solution (and solution()) is the
+  // RELAXED point, not the optimum, with tol on the unscaled relaxed-KKT
+  // residuals. Unlike IpmSolver::relax, the solver's own iterate and
+  // factorization cache are untouched: a subsequent warm solve() still
+  // starts from the tight solution. No-op when p == 0, kappa <= 0, or the
+  // previous solve ended in kNumerics. Rows with penalty_i = 0 have no
+  // interior (z_t + z_ineq = 0 cannot hold with z > 0), so the relaxation
+  // cannot converge for them -- drop such rows instead (both backends
+  // share this limit).
+  const Solution& relax(double kappa, double tol = 1e-8, int max_iter = 30) {
+    if (p_ == 0 || !have_warm_ || kappa <= 0.0) return sol_;
+    // kappa is in the user's frame; each s.z pair picks up only the cost
+    // factor under Ruiz (s scales with the row, z against it).
+    const double kappa_s = c_s_ * kappa;
+
+    // Initialize from the reconstructed elastic certificate of the tight
+    // iterate through the paired retraction v = z - s: the starting point
+    // already sits on the z.s = kappa manifold.
+    xr_ = x_;
+    if (m_ > 0) yr_ = y_;
+    wGx_.noalias() = G_ * x_;
+    for (Eigen::Index i = 0; i < p_; ++i) {
+      const double r = wGx_[i] - h_[i];
+      const double ti = std::max(r + mu_in_ * (z_[i] - penalty_[i]), 0.0);
+      tr_[i] = ti;
+      v1r_[i] = (penalty_[i] - z_[i]) - ti;         // z_t - s_t
+      v2r_[i] = z_[i] - std::max(ti - r, 0.0);      // z_ineq - s_ineq
+    }
+
+    double rho = settings.relax_reg;
+    double delta = settings.relax_reg;
+    int retries = 0;
+    int iter = 0;
+    Status status = Status::kMaxIter;
+    double res = relax_residual(kappa_s);
+    while (iter < max_iter) {
+      if (!std::isfinite(res)) {
+        status = Status::kNumerics;
+        break;
+      }
+      if (res < tol) {
+        status = Status::kSolved;
+        break;
+      }
+      iter++;
+
+      // Condensed Newton system. Eliminating dv1, dv2 (with b' in (0, 1)
+      // and D = b'(v)/b'(-v) = z/s) and dt gives, per row,
+      //   E = rho + D1 + D2,  Lambda = D2 (rho + D1) / E,
+      //   E dt = D2 G dx - F2 + D1 F4 + D2 F5,
+      // and the n x n SPD system
+      //   [Q + rho I + (1/delta) A'A + G' diag(Lambda) G] dx = rhs.
+      d1r_ = z1r_.cwiseQuotient(s1r_);
+      d2r_ = z2r_.cwiseQuotient(s2r_);
+      einvr_ = ((d1r_ + d2r_).array() + rho).cwiseInverse();
+      lamr_ = d2r_.array() * (d1r_.array() + rho) * einvr_.array();
+      bool ok = true;
+      while (!relax_factor(rho, delta)) {
+        if (retries < settings.max_factor_retries) {
+          rho *= 100;
+          delta *= 100;
+          retries++;
+          einvr_ = ((d1r_ + d2r_).array() + rho).cwiseInverse();
+          lamr_ = d2r_.array() * (d1r_.array() + rho) * einvr_.array();
+        } else {
+          ok = false;
+          break;
+        }
+      }
+      if (!ok) {
+        status = Status::kNumerics;
+        break;
+      }
+      retries = 0;
+
+      wr_ = d1r_.cwiseProduct(rf4_) + d2r_.cwiseProduct(rf5_) - rf2_;
+      pvr_ = d2r_.cwiseProduct(rf5_ - einvr_.cwiseProduct(wr_));
+      rhs_x_ = -rf1_;
+      rhs_x_.noalias() -= G_.transpose() * pvr_;
+      if (m_ > 0) {
+        rhs_x_.noalias() -= (1.0 / delta) * (A_.transpose() * rf3_);
+      }
+      dxr_ = llt_r_.solve(rhs_x_);
+      Gdx_.noalias() = G_ * dxr_;
+      dtr_ = einvr_.cwiseProduct(d2r_.cwiseProduct(Gdx_) + wr_);
+      if (m_ > 0) {
+        dyr_.noalias() = A_ * dxr_;
+        dyr_ += rf3_;
+        dyr_ /= delta;
+      }
+      for (Eigen::Index i = 0; i < p_; ++i) {
+        dv1r_[i] = (rf4_[i] - dtr_[i]) / retraction_dcomp(v1r_[i], kappa_s);
+        dv2r_[i] = (rf5_[i] + Gdx_[i] - dtr_[i]) /
+                   retraction_dcomp(v2r_[i], kappa_s);
+      }
+
+      // Full Newton step, then halve until the unscaled residual stops
+      // increasing (the retraction keeps every trial point feasible, so
+      // plain backtracking is the only safeguard needed).
+      xr_ += dxr_;
+      tr_ += dtr_;
+      if (m_ > 0) yr_ += dyr_;
+      v1r_ += dv1r_;
+      v2r_ += dv2r_;
+      double alpha = 1.0;
+      double res_new = relax_residual(kappa_s);
+      for (int bt = 0;
+           bt < 12 && !(std::isfinite(res_new) && res_new <= res); ++bt) {
+        alpha *= 0.5;
+        xr_ -= alpha * dxr_;
+        tr_ -= alpha * dtr_;
+        if (m_ > 0) yr_ -= alpha * dyr_;
+        v1r_ -= alpha * dv1r_;
+        v2r_ -= alpha * dv2r_;
+        res_new = relax_residual(kappa_s);
+      }
+      res = res_new;
+    }
+    // The loop tests res BEFORE each step; credit a final step that landed
+    // inside tol.
+    if (status == Status::kMaxIter && std::isfinite(res) && res < tol) {
+      status = Status::kSolved;
+    }
+    if (!std::isfinite(res)) status = Status::kNumerics;
+    return relax_finish(status, iter);
   }
 
  private:
@@ -779,6 +969,106 @@ class Solver {
     return true;
   }
 
+  // ---- relax() helpers ----
+
+  // Closed-form prox of kappa*(-log): the positive root of
+  // s^2 - v s - kappa = 0, i.e. b_k(v) = (v + sqrt(v^2 + 4 kappa))/2, with
+  // the cancellation-free branch b_k(v) = 2 kappa / (sqrt(..) - v) for
+  // v < 0 (log_barrier_admm_note.tex).
+  static double retraction(double v, double kappa) {
+    const double r = std::sqrt(v * v + 4.0 * kappa);
+    return v >= 0.0 ? 0.5 * (v + r) : 2.0 * kappa / (r - v);
+  }
+
+  // 1 - b_k'(v) = b_k'(-v) in (0, 1). b_k'(v) = (1 + v/r)/2 cancels for
+  // |v| >> sqrt(kappa); the stable small branch is
+  // (1 - |v|/r)/2 = 2 kappa / (r (r + |v|)).
+  static double retraction_dcomp(double v, double kappa) {
+    const double r = std::sqrt(v * v + 4.0 * kappa);
+    const double small = 2.0 * kappa / (r * (r + std::abs(v)));
+    return v >= 0.0 ? small : 1.0 - small;
+  }
+
+  // Residuals of the kappa-relaxed KKT at (xr, tr, yr, v1r, v2r), with the
+  // slack/dual pairs materialized through the retraction (so z.s = kappa
+  // identically and the complementarity rows never appear):
+  //   F1 = Q x + q + A'y + G'z2      F2 = penalty - z1 - z2
+  //   F3 = A x - b                   F4 = s1 - t     F5 = s2 - (h + t - Gx)
+  // Returns the max unscaled norm (termination metric); norms are unscaled
+  // componentwise exactly as in update_residuals().
+  double relax_residual(double kappa_s) {
+    const auto inf_us = [](const VectorXd& v, const VectorXd& s) {
+      return v.size() > 0 ? v.cwiseAbs().cwiseProduct(s).maxCoeff() : 0.0;
+    };
+    for (Eigen::Index i = 0; i < p_; ++i) {
+      z1r_[i] = retraction(v1r_[i], kappa_s);
+      s1r_[i] = retraction(-v1r_[i], kappa_s);
+      z2r_[i] = retraction(v2r_[i], kappa_s);
+      s2r_[i] = retraction(-v2r_[i], kappa_s);
+    }
+    wQx_.noalias() = Q_ * xr_;
+    wGtz_.noalias() = G_.transpose() * z2r_;
+    rf1_ = wQx_ + q_ + wGtz_;
+    if (m_ > 0) {
+      wAty_.noalias() = A_.transpose() * yr_;
+      rf1_ += wAty_;
+      wAx_.noalias() = A_ * xr_;
+      rf3_ = wAx_ - b_;
+    }
+    rf2_ = penalty_ - z1r_ - z2r_;
+    wGx_.noalias() = G_ * xr_;
+    rf4_ = s1r_ - tr_;
+    rf5_ = s2r_ + wGx_ - h_ - tr_;
+    relax_dual_res_ =
+        std::max(inf_us(rf1_, inv_cdx_), inf_us(rf2_, z_us_));
+    relax_primal_res_ =
+        std::max({inf_us(rf4_, inv_di_), inf_us(rf5_, inv_di_),
+                  m_ > 0 ? inf_us(rf3_, inv_de_) : 0.0});
+    return std::max(relax_dual_res_, relax_primal_res_);
+  }
+
+  // Factor K = Q + rho I + (1/delta) A'A + G' diag(Lambda) G into llt_r_.
+  // Same shape as factor_kkt(), but into a separate factorization (and
+  // reusing the K_/GS_ staging buffers) so the solve() cache stays valid.
+  bool relax_factor(double rho, double delta) {
+    GS_.noalias() = lamr_.cwiseSqrt().asDiagonal() * G_;
+    K_.triangularView<Eigen::Lower>() = Q_;
+    K_.diagonal().array() += rho;
+    if (m_ > 0) {
+      K_.triangularView<Eigen::Lower>() += (1.0 / delta) * AtA_;
+    }
+    K_.selfadjointView<Eigen::Lower>().rankUpdate(GS_.transpose());
+    llt_r_.compute(K_);
+    return llt_r_.info() == Eigen::Success &&
+           std::isfinite(K_.diagonal().sum());
+  }
+
+  // Certificate at the relaxed point (unscaled). Deliberately does NOT
+  // touch the solver iterate, residual scalars, or have_warm_: only sol_
+  // reflects the relaxation. The duality gap converges to ~2 p kappa (each
+  // relaxed pair contributes kappa), not 0.
+  const Solution& relax_finish(Status status, int iters) {
+    sol_.x = xr_.cwiseProduct(dx_s_);
+    sol_.t = tr_.cwiseProduct(inv_di_);
+    sol_.y = yr_.cwiseProduct(y_us_);
+    sol_.s_t = s1r_.cwiseProduct(inv_di_);
+    sol_.s_ineq = s2r_.cwiseProduct(inv_di_);
+    sol_.z_t = z1r_.cwiseProduct(z_us_);
+    sol_.z_ineq = z2r_.cwiseProduct(z_us_);
+    sol_.status = status;
+    sol_.converged = status == Status::kSolved ? 1 : 0;
+    sol_.iters = iters;
+    wQx_.noalias() = Q_ * xr_;
+    const double xQx = xr_.dot(wQx_);
+    sol_.primal_obj = (0.5 * xQx + q_.dot(xr_) + penalty_.dot(tr_)) / c_s_;
+    double dual_obj = (-0.5 * xQx - h_.dot(z2r_)) / c_s_;
+    if (m_ > 0) dual_obj -= b_.dot(yr_) / c_s_;
+    sol_.primal_res = relax_primal_res_;
+    sol_.dual_res = relax_dual_res_;
+    sol_.duality_gap = std::abs(sol_.primal_obj - dual_obj);
+    return sol_;
+  }
+
   // Unscaled residuals of the elastic QP at the reconstructed expanded
   // point (mirrors elastiqp::IpmSolver::update_residuals_nr):
   //   t = [Gx - h + mu_in (z - penalty)]_+   (argmin of the folded slack)
@@ -923,6 +1213,17 @@ class Solver {
   MatrixXd GS_, K_;
   Eigen::LLT<MatrixXd, Eigen::Lower> llt_;
   std::vector<double> bp_;
+
+  // relax() iterate and workspace (allocated in setup). Kept separate from
+  // the solve() state so the relaxation never disturbs warm starting or the
+  // factorization cache.
+  VectorXd xr_, tr_, yr_, v1r_, v2r_;      // iterate (v parametrizes z, s)
+  VectorXd z1r_, z2r_, s1r_, s2r_;         // retraction images of v
+  VectorXd rf1_, rf2_, rf3_, rf4_, rf5_;   // relaxed-KKT residuals
+  VectorXd d1r_, d2r_, einvr_, lamr_, wr_, pvr_;  // condensation scalings
+  VectorXd dxr_, dtr_, dyr_, dv1r_, dv2r_;        // Newton step
+  Eigen::LLT<MatrixXd, Eigen::Lower> llt_r_;
+  double relax_primal_res_ = 0, relax_dual_res_ = 0;
 
   Solution sol_;
 };
