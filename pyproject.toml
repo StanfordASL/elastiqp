@@ -14,6 +14,9 @@ dependencies = ["numpy"]
 
 [project.optional-dependencies]
 jax = ["jax>=0.9.1"]  # minimum version dictated by FFI compatibility
+# Python-side benchmarks (benchmarks/python) and the Maros-Meszaros
+# converter (benchmarks/tools); qpax pulls in jax.
+bench = ["matplotlib", "scipy", "qpax"]
 
 [project.urls]
 Homepage = "https://github.com/StanfordASL/elastiqp"
