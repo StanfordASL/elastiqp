@@ -61,7 +61,7 @@ constexpr Family kFamilies[] = {
 };
 
 constexpr std::pair<int, int> kSizes[] = {
-    {10, 20}, {30, 60}, {100, 200}, {300, 600}};
+    {10, 20}, {30, 60}, {100, 200}};
 
 constexpr double kKappas[] = {1e-2, 1e-4, 1e-6};
 constexpr int kInstances = 5;
