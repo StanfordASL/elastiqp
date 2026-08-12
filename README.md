@@ -51,6 +51,14 @@ cmake --build build --config Release
 # Optional: cmake --install build --config Release
 ```
 
+For best performance (on your own device), you can also build with `-march=native`
+```
+cmake -B build-native . -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-march=native"
+cmake --build build-native --config Release
+```
+
+To build the `benchmarks`, add the following flag: `-DELASTIQP_BUILD_BENCHMARKS=ON`
+
 If you've installed with CMake, you can also `find_package(elastiqp)`
 
 ### Python
