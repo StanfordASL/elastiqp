@@ -1,6 +1,6 @@
-// Correctness tests for the IPM backend
-//
-// Checks against PIQP
+// Correctness tests for the test-only IPM reference implementation
+// (tests/ipm_reference.hpp). The reference cross-validates elastiqp::Solver
+// in test_pdal.cc, so it must itself be validated against vanilla PIQP:
 // (1) on hard-constrained-yet-feasible problems where the elastic
 // result should coincide with the PIQP result;
 // (2) on the expanded (n+p) variable form of the elastic problem
@@ -8,7 +8,7 @@
 #include <cstdio>
 #include <random>
 
-#include "elastiqp/ipm.hpp"
+#include "ipm_reference.hpp"
 #include "piqp/piqp.hpp"
 #include "problem_gen.hpp"
 
@@ -621,6 +621,7 @@ int main() {
     Check("n=15 p=0", esol.converged == 1 && res < 1e-7, res, "res");
   }
 
-  std::printf(g_all_ok ? "\nAll IPM backend tests passed.\n" : "\nFAILURES\n");
+  std::printf(g_all_ok ? "\nAll IPM reference tests passed.\n"
+                       : "\nFAILURES\n");
   return g_all_ok ? 0 : 1;
 }

@@ -1,11 +1,15 @@
 // ElastiQP-IPM: a proximal interior-point method for elastic QPs
 //
-// This is the secondary backend. In general, elastiqp/pdal.hpp's Solver
-// will be faster on most robotics tasks.
+// TEST-ONLY REFERENCE IMPLEMENTATION. This solver is not part of the
+// installed library: it lives in tests/ and exists solely to cross-validate
+// elastiqp::Solver. It reaches the same elastic-QP solution and the same
+// kappa-relaxed central point (relax()) by a completely different method,
+// which makes it an independent check on both the solver and the
+// differentiability machinery.
 //
-// This backend is based on PIQP, with the elastic condensation tricks of
+// The method is based on PIQP, with the elastic condensation tricks of
 // qpax, and a few other changes (see notes below). The elastic QP form is
-// stated in elastiqp.hpp.
+// stated in elastiqp/elastiqp.hpp.
 //
 // Notes:
 //
@@ -46,11 +50,11 @@
 #include <cmath>
 #include <limits>
 
-#include "elastiqp/types.hpp"  // Status, Solution
+#include "elastiqp/elastiqp.hpp"  // Status, Solution
 
 namespace elastiqp {
 
-// Interior-point settings -- every knob this backend has. The termination
+// Interior-point settings -- every knob this solver has. The termination
 // block is field-for-field identical to elastiqp::Settings (tests/test_pdal.cc
 // static_asserts the defaults agree); everything below is specific to this
 // method.
@@ -264,9 +268,8 @@ class IpmSolver {
     explicit_warm_ = true;
   }
 
-  // Seed the next solve() from a Solution produced by either backend --
-  // the handoff for "solve fast with elastiqp::Solver, then differentiate
-  // here". Unlike set_warm_start(), this applies the interior-point
+  // Seed the next solve() from a Solution produced by either solver.
+  // Unlike set_warm_start(), this applies the interior-point
   // boundary floor for you, which a foreign solution needs: a converged
   // PDAL certificate sits exactly on the boundary, and an unfloored
   // interior-point start there collapses the fraction-to-boundary step
@@ -570,8 +573,8 @@ class IpmSolver {
   // Ruiz sweeps on the stacked symmetric structure [Q A' G'; A 0 0; G 0 0],
   // applied in place to the stored data, with the per-sweep cost
   // normalization gamma = 1/max(1, mean |Q| column norm) -- identical to
-  // elastiqp::Solver::equilibrate() (pdal.hpp) so the two backends scale a
-  // given problem the same way.
+  // elastiqp::Solver::equilibrate() so the two solvers scale a given
+  // problem the same way.
   void equilibrate() {
     VectorXd dx(n_), de(m_), di(p_);
     for (int iter = 0; iter < settings.ruiz_max_iter; ++iter) {

@@ -127,25 +127,6 @@ def main():
         and solver2.settings.ruiz is False,
         "",
     )
-    # The C++ static_assert in test_pdal.cc pins these defaults; this checks
-    # the other half -- that the bindings expose the shared block symmetrically,
-    # since each settings class re-declares its fields by hand.
-    shared = (
-        "eps_abs",
-        "eps_rel",
-        "check_duality_gap",
-        "eps_duality_gap_abs",
-        "eps_duality_gap_rel",
-        "max_factor_retries",
-        "warm_start",
-    )
-    pdal_d, ipm_d = elastiqp.Settings(), elastiqp.IpmSettings()
-    check(
-        "shared termination defaults agree across backends",
-        all(getattr(pdal_d, f) == getattr(ipm_d, f) for f in shared),
-        f"{len(shared)} fields",
-    )
-
     print("Solver: warm start across a drifting sequence (q,h,b)")
     rng = np.random.default_rng(7)
     n, m, p, ticks = 30, 8, 100, 10
@@ -314,128 +295,28 @@ def main():
         f"|dx|={dx:.1e}",
     )
 
-    print("solve(backend=): dispatch and validation")
-    ref = elastiqp.solve(Qp, qp_, Gp, hp, 10.0, A=Ap, b=bp, eps_abs=1e-8)
-    ipm = elastiqp.solve(Qp, qp_, Gp, hp, 10.0, A=Ap, b=bp, eps_abs=1e-8, backend="ipm")
-    dx = np.abs(np.asarray(ipm.x) - np.asarray(ref.x)).max()
-    check(
-        "backend='ipm' matches the default backend",
-        ipm.converged == 1 and ref.converged == 1 and dx < 1e-5,
-        f"|dx|={dx:.1e}",
-    )
-    check(
-        "backend='ipm' holds equalities tighter",
-        np.abs(Ap @ np.asarray(ipm.x) - bp).max() < 1e-10,
-        f"eq={np.abs(Ap @ np.asarray(ipm.x) - bp).max():.1e}",
-    )
-    check(
-        "unknown backend raises",
-        raises(
-            ValueError, lambda: elastiqp.solve(Qp, qp_, Gp, hp, 10.0, backend="nope")
-        ),
-        "",
-    )
-    rz_ipm = elastiqp.solve(
-        Qp,
-        qp_,
-        Gp * scale[:, None],
-        hp * scale,
-        10.0 / scale,
-        A=Ap,
-        b=bp,
-        eps_abs=1e-8,
-        backend="ipm",
-        ruiz=True,
-    )
-    dx = np.abs(np.asarray(rz_ipm.x) - np.asarray(seed.x)).max()
-    check(
-        "ruiz=True with backend='ipm' solves the row-rescaled problem",
-        rz_ipm.converged == 1 and dx < 1e-4,
-        f"|dx|={dx:.1e}",
-    )
-
-    print("IpmSolver: settings, warm start, kappa relaxation")
-    ipm_solver = elastiqp.IpmSolver()
-    ipm_solver.settings.eps_abs = 1e-8
-    ipm_solver.settings.eps_duality_gap_abs = 1e-8
-    check(
-        "IpmSettings round-trip",
-        ipm_solver.settings.eps_abs == 1e-8
-        and ipm_solver.settings.max_iter == 250
-        and ipm_solver.settings.warm_start is True
-        and ipm_solver.settings.warm_start_fraction == 0.1,
-        "",
-    )
-    ipm_solver.setup(Qp, qp_, Gp, hp, 10.0, A=Ap, b=bp)
-    q_d, h_d, b_d = qp_.copy(), hp.copy(), bp.copy()
-    warm_iters = cold_iters = 0
-    worst = 0.0
-    all_ok = True
-    for _ in range(10):
-        q_d = q_d + 0.01 * rng.standard_normal(20)
-        h_d = h_d + 0.01 * rng.standard_normal(60)
-        b_d = b_d + 0.01 * rng.standard_normal(5)
-        ipm_solver.update(q=q_d, h=h_d, b=b_d)
-        ws = ipm_solver.solve()
-        cs = elastiqp.solve(
-            Qp, q_d, Gp, h_d, 10.0, A=Ap, b=b_d, eps_abs=1e-8, backend="ipm"
-        )
-        all_ok &= ws.converged == 1 and cs.converged == 1
-        warm_iters += ws.iters
-        cold_iters += cs.iters
-        worst = max(worst, np.abs(np.asarray(ws.x) - np.asarray(cs.x)).max())
-    check(
-        "warm beats cold and matches",
-        all_ok and worst < 1e-4 and warm_iters < cold_iters,
-        f"iters {warm_iters} vs {cold_iters}",
-    )
+    print("Solver.relax: kappa relaxation (smoothed differentiation point)")
     kappa = 1e-3
-    rsol = ipm_solver.relax(kappa)
+    tight = pdal.solution()
+    rsol = pdal.relax(kappa)
     comp = np.concatenate(
         [
             np.asarray(rsol.s_t) * np.asarray(rsol.z_t),
             np.asarray(rsol.s_ineq) * np.asarray(rsol.z_ineq),
         ]
     )
+    moved = np.abs(np.asarray(rsol.x) - np.asarray(tight.x)).max()
     check(
         "relaxed point on s.z = kappa hyperbola",
-        rsol.converged == 1 and np.abs(comp - kappa).max() < 1e-8,
+        rsol.converged == 1 and np.abs(comp - kappa).max() < 1e-10 and moved > 0.0,
         f"comp_err={np.abs(comp - kappa).max():.1e}",
     )
-
-    print("IpmSolver.warm_start_from: cross-backend handoff")
-    fast = elastiqp.Solver()
-    fast.setup(Qp, q_d, Gp, h_d, 10.0, A=Ap, b=b_d)
-    fast_sol = fast.solve()
-    hand = elastiqp.IpmSolver()
-    hand.setup(Qp, q_d, Gp, h_d, 10.0, A=Ap, b=b_d)
-    hand.warm_start_from(fast_sol)
-    hs = hand.solve()
-    fresh = elastiqp.solve(
-        Qp, q_d, Gp, h_d, 10.0, A=Ap, b=b_d, eps_abs=1e-8, backend="ipm"
-    )
-    dx = np.abs(np.asarray(hs.x) - np.asarray(fresh.x)).max()
+    pdal.settings.warm_start = True  # warm re-solve from the tight iterate
+    again = pdal.solve()
     check(
-        "seeded IPM solve matches a cold one, in fewer iterations",
-        hs.converged == 1 and dx < 1e-6 and hs.iters < fresh.iters,
-        f"|dx|={dx:.1e} iters {hs.iters} vs {fresh.iters}",
-    )
-    kr = hand.relax(kappa)
-    comp = np.concatenate(
-        [
-            np.asarray(kr.s_t) * np.asarray(kr.z_t),
-            np.asarray(kr.s_ineq) * np.asarray(kr.z_ineq),
-        ]
-    )
-    check(
-        "relax() works off the handed-off solution",
-        kr.converged == 1 and np.abs(comp - kappa).max() < 1e-8,
-        f"comp_err={np.abs(comp - kappa).max():.1e}",
-    )
-    check(
-        "dimension mismatch raises",
-        raises(ValueError, lambda: elastiqp.IpmSolver().warm_start_from(fast_sol)),
-        "",
+        "relax leaves the tight iterate untouched",
+        again.converged == 1 and again.iters <= 2,
+        f"iters={again.iters}",
     )
 
     print("Return types and shapes")

@@ -46,8 +46,6 @@ def _import_core():  # compiled nanobind core
 
 _core = _import_core()
 
-IpmSettings = _core.IpmSettings
-IpmSolver = _core.IpmSolver
 Settings = _core.Settings
 Solution = _core.Solution
 Solver = _core.Solver
@@ -55,8 +53,6 @@ Status = _core.Status
 solve = _core.solve
 
 __all__ = [
-    "IpmSettings",
-    "IpmSolver",
     "Settings",
     "Solution",
     "Solver",

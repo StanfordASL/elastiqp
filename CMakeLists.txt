@@ -22,21 +22,24 @@ target_include_directories(elastiqp INTERFACE
 target_link_libraries(elastiqp INTERFACE Eigen3::Eigen)
 target_compile_features(elastiqp INTERFACE cxx_std_17)
 
-# Build tests. Skip inside a pip wheel build (scikit)
+# Build tests. Skip inside a pip wheel build (scikit). The tests
+# cross-validate the solver against vendored PIQP (third_party/piqp) and a
+# test-only IPM reference implementation (tests/ipm_reference.hpp); neither
+# is installed or distributed.
 if(NOT SKBUILD)
-  add_executable(test_ipm tests/test_ipm.cc)
-  target_include_directories(test_ipm PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/tests
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/piqp/include)
-  target_link_libraries(test_ipm PRIVATE elastiqp::elastiqp)
-  add_test(NAME elastiqp.ipm_cross_validation COMMAND test_ipm)
-
   add_executable(test_pdal tests/test_pdal.cc)
   target_include_directories(test_pdal PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/tests
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/piqp/include)
   target_link_libraries(test_pdal PRIVATE elastiqp::elastiqp)
   add_test(NAME elastiqp.pdal_cross_validation COMMAND test_pdal)
+
+  add_executable(test_ipm_reference tests/test_ipm_reference.cc)
+  target_include_directories(test_ipm_reference PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/piqp/include)
+  target_link_libraries(test_ipm_reference PRIVATE elastiqp::elastiqp)
+  add_test(NAME elastiqp.ipm_reference_validation COMMAND test_ipm_reference)
 endif()
 
 # Build benchmarks if flag provided and submodule is cloned

@@ -31,14 +31,11 @@ Given this, in the case of infeasibility, ElastiQP naturally relaxes the inequal
 
 ElastiQP is a C++/Eigen header-only library with Python bindings and a JAX foreign function interface (FFI). 
 
-It contains two backends, both with a condensed formulation of the elastic slacks:
+The solver is an elastic Primal-Dual Augmented Lagrangian (PDAL) method based on [ProxQP](https://github.com/Simple-Robotics/proxsuite), with a condensed formulation of the elastic slacks.
 
-- An elastic Primal-Dual Augmented Lagrangian (PDAL) method, based on [ProxQP](https://github.com/Simple-Robotics/proxsuite)
-- A secondary elastic Proximal Interior Point (IPM) method, based on [PIQP](https://github.com/PREDICT-EPFL/piqp) and [QPAX](https://github.com/qpax-solver/qpax)
+The solver is fast (particularly with warm-starting), and it is *differentiable* with kappa-smoothed gradients: `relax(kappa)` walks the solution to the kappa-relaxed central point (complementarity $s \odot z = \kappa$) through a log-barrier retraction, for smooth implicit differentiation (see `docs/log_barrier_admm_note.tex` and `docs/pdal_differentiability.md`). Ruiz equilibration is available for poorly-conditioned problems (off by default).
 
-The PDAL backend is recommended for most cases, as it will return the fastest solution (particularly with warm-starting). Both backends are *differentiable* with kappa-smoothed gradients: each provides a `relax(kappa)` that walks the solution to the same kappa-relaxed central point (complementarity $s \odot z = \kappa$) for smooth implicit differentiation -- the IPM by walking the central path, the PDAL through a log-barrier retraction (see `docs/log_barrier_admm_note.tex` and `docs/pdal_differentiability.md`). The IPM additionally supports exact (kappa = 0) gradients and can hold equality constraints to tighter tolerances. Both backends support Ruiz equilibration for poorly-conditioned problems (off by default).
-
-For a rough sense of numbers, on a laptop with an Intel i7 CPU, ElastiQP can solve humanoid-scale whole-body control problems at approximately 32 us with the PDAL backend, and 124 us for the IPM backend. Differentiation with the IPM backend takes ~2x as long as a forward pass.
+For a rough sense of numbers, on a laptop with an Intel i7 CPU, ElastiQP can solve humanoid-scale whole-body control problems at approximately 32 us.
 
 
 ## Installation
@@ -101,13 +98,6 @@ while (running) {
 // (does not disturb the solver's warm-start state). Repeated relax() calls
 // across a control loop warm start from the previous relaxed point
 const elastiqp::Solution relaxed = solver.relax(kappa);
-
-// Or, use the secondary IPM backend
-elastiqp::IpmSolver ipm_solver;
-ipm_solver.setup(Q, q, A, b, G, h, penalty);
-ipm_solver.warm_start_from(solver.solution());
-ipm_solver.solve();
-ipm_solver.relax(kappa); // same kappa-smoothed point as solver.relax(kappa)
 ```
 
 ### Python
@@ -125,15 +115,6 @@ solver.setup(Q, q, G, h, penalty, A=A, b=b)
 sol = solver.solve()
 solver.update(q=q_k, h=h_k, b=b_k)
 sol = solver.solve()
-
-# Or, use the secondary IPM backend
-# Single solve
-sol = elastiqp.solve(Q, q, G, h, penalty, A=A, b=b, backend="ipm")
-# Or set up for multiple solves
-ipm_solver = elastiqp.IpmSolver()
-ipm_solver.setup(Q, q, G, h, penalty, A=A, b=b)
-ipm_solver.warm_start_from(solver.solution())
-ipm_solver.solve()
 ```
 
 ### JAX
@@ -170,7 +151,7 @@ For runnable Python/JAX examples, see the `examples` folder
 ElastiQP builds on the following excellent projects:
 
 - [qpax](https://github.com/qpax-solver/qpax): ElastiQP is inspired by the condensation strategy from their elastic primal-dual interior point method, and builds on their kappa-smoothed derivatives. Apache-2.0
-- [ProxQP](https://github.com/Simple-Robotics/proxsuite): ElastiQP considers an elastic formulation of their primal-dual augmented Lagrangian method for the default backend. BSD 2-Clause.
-- [PIQP](https://github.com/PREDICT-EPFL/piqp): ElastiQP's secondary backend considers an elastic formulation of their proximal interior point method. BSD 2-Clause.
+- [ProxQP](https://github.com/Simple-Robotics/proxsuite): ElastiQP considers an elastic formulation of their primal-dual augmented Lagrangian method. BSD 2-Clause.
+- [PIQP](https://github.com/PREDICT-EPFL/piqp): used (vendored, test-only) as an independent reference solver in ElastiQP's test suite, alongside a test-only elastic interior-point reference implementation based on it. BSD 2-Clause.
 
 ElastiQP is licensed under Apache 2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE) for third-party notices.

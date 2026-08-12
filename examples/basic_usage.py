@@ -85,9 +85,6 @@ def main():
 
     print("\nEven with infeasible inequalities, the hard equalities always hold")
     print(f"|Ax - b| = {abs(A @ sol.x - b).max():.2e}")
-    print("And with the ipm backend, equalities hold to near machine precision")
-    ipm_sol = elastiqp.solve(Q, q, G2, h2, penalty2, A=A, b=b, backend="ipm")
-    print(f"|Ax - b| (IPM) = {abs(A @ ipm_sol.x - b).max():.2e}")
 
     print(
         "\nNote that a hard-constrained solver would return 'infeasible' on this problem"

@@ -1,19 +1,10 @@
 """ElastiQP JAX FFI wrapper
 
-ElastiQP has two backends which have different considerations for working
-with JAX.
+Solves are differentiable with ``target_kappa > 0`` (log-barrier smoothed
+gradients, evaluated at the kappa-relaxed central point with
+complementarity s.z = kappa).
 
-``backend="pdal"``: (default) primal-dual augmented Lagrangian. Fastest.
-                    Differentiable with target_kappa > 0 (log-barrier
-                    smoothed gradients).
-``backend="ipm"``:  proximal interior point. Slower. Differentiable with
-                    exact gradients (target_kappa=0) or smoothed gradients
-                    (target_kappa > 0).
-
-Both backends evaluate smoothed gradients at the same kappa-relaxed
-central point (complementarity s.z = kappa), so their gradients agree.
-
-Set ruiz=True for badly-scaled data (either backend).
+Set ruiz=True for badly-scaled data.
 
 Supports JIT and vmap (under "sequential" mode, which performs one solve
 per entry in the batch). Requires float64 (JAX_ENABLE_X64).
@@ -36,8 +27,6 @@ import jax.numpy as jnp
 import numpy as np
 
 __all__ = ["solve", "Result"]
-
-_BACKENDS = ("pdal", "ipm")
 
 
 def _find_library():
@@ -71,9 +60,6 @@ def _find_library():
 
 _lib = ctypes.cdll.LoadLibrary(str(_find_library()))
 jax.ffi.register_ffi_target(
-    "elastiqp_ipm_solve", jax.ffi.pycapsule(_lib.ElastiqpIpmSolve), platform="cpu"
-)
-jax.ffi.register_ffi_target(
     "elastiqp_pdal_solve", jax.ffi.pycapsule(_lib.ElastiqpPdalSolve), platform="cpu"
 )
 
@@ -88,20 +74,8 @@ class Result(NamedTuple):
     iters: jax.Array
 
 
-def _ffi_solve(
-    target,
-    Q,
-    q,
-    A,
-    b,
-    G,
-    h,
-    penalty,
-    eps_abs,
-    max_iter,
-    ruiz,
-    vmap_method,
-    target_kappa,
+def _ffi_pdal_solve(
+    Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, vmap_method, target_kappa
 ):
     n = Q.shape[-1]
     m = b.shape[-1]
@@ -110,8 +84,7 @@ def _ffi_solve(
     vec = lambda d: jax.ShapeDtypeStruct(batch + (d,), jnp.float64)
     # (x, t, y, z_t, z_ineq) tight solution, then the kappa-relaxed central
     # point (identical to the tight block when target_kappa <= 0), then
-    # info = [converged, iters, relax_converged]. Both backends share this
-    # signature.
+    # info = [converged, iters, relax_converged].
     out_types = [
         vec(n),
         vec(p),
@@ -125,7 +98,7 @@ def _ffi_solve(
         vec(p),
         vec(3),
     ]
-    call = jax.ffi.ffi_call(target, out_types, vmap_method=vmap_method)
+    call = jax.ffi.ffi_call("elastiqp_pdal_solve", out_types, vmap_method=vmap_method)
     return call(
         Q,
         q,
@@ -138,46 +111,6 @@ def _ffi_solve(
         max_iter=np.int64(max_iter),
         ruiz=np.int64(bool(ruiz)),
         target_kappa=np.float64(target_kappa),
-    )
-
-
-def _ffi_ipm_solve(
-    Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, vmap_method, target_kappa
-):
-    return _ffi_solve(
-        "elastiqp_ipm_solve",
-        Q,
-        q,
-        A,
-        b,
-        G,
-        h,
-        penalty,
-        eps_abs,
-        max_iter,
-        ruiz,
-        vmap_method,
-        target_kappa,
-    )
-
-
-def _ffi_pdal_solve(
-    Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, vmap_method, target_kappa
-):
-    return _ffi_solve(
-        "elastiqp_pdal_solve",
-        Q,
-        q,
-        A,
-        b,
-        G,
-        h,
-        penalty,
-        eps_abs,
-        max_iter,
-        ruiz,
-        vmap_method,
-        target_kappa,
     )
 
 
@@ -220,9 +153,6 @@ def _kkt_bwd(res, ct):
     (the relaxed solution stored in res) moves. At that point every
     complementarity pair has margin ~kappa, which bounds the conditioning
     near degenerate active sets.
-
-    This pass is backend-agnostic: both backends relax to the same
-    kappa-central point, so the same formulas serve pdal and ipm.
     """
     Q, A, G, h, x, t, y, z1, z2 = res  # (x..z2) = relaxed point if kappa > 0
     xb, tb, yb, z1b, z2b, _ = ct
@@ -272,69 +202,60 @@ def _kkt_bwd(res, ct):
     return Qb, qb, Ab, bb, Gb, hb, penalty_b
 
 
-def _make_solve(ffi_solve, kappa_required):
-    """custom_vjp-wrapped solve for one backend.
+# custom_vjp-wrapped solve.
+#
+# The primal path always runs the plain (tight) solve; only the
+# differentiation path (fwd) pays for the kappa relaxation, and the bwd
+# differentiates the KKT system at the relaxed point via _kkt_bwd. fwd
+# raises unless target_kappa > 0: the solver's certificate sits exactly on
+# the constraint boundary, where the exact KKT derivative is undefined
+# (division by zero complementarity margins).
+@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11))
+def _solve(
+    Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, vmap_method, target_kappa
+):
+    # Tight solution when not differentiating: no relaxation runs.
+    out = _ffi_pdal_solve(
+        Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, vmap_method, 0.0
+    )
+    return tuple(out[:5]) + (out[10],)  # solution + info
 
-    The primal path always runs the plain (tight) solve; only the
-    differentiation path (fwd) pays for the kappa relaxation, and the bwd
-    differentiates the KKT system at the relaxed point via _kkt_bwd. With
-    kappa_required (the pdal backend), fwd raises unless target_kappa > 0:
-    the PDAL certificate sits exactly on the constraint boundary, where the
-    exact KKT derivative is undefined (division by zero complementarity
-    margins) -- unlike the interior-point solution, which stays ~eps off
-    the boundary and admits target_kappa=0 exact differentiation.
-    """
 
-    @partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11))
-    def _solve(
-        Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, vmap_method, target_kappa
-    ):
-        # Tight solution when not differentiating: no relaxation runs.
-        out = ffi_solve(
-            Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, vmap_method, 0.0
+def _solve_fwd(
+    Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, vmap_method, target_kappa
+):
+    if not target_kappa > 0:
+        raise TypeError(
+            "elastiqp.jax.solve is not differentiable with target_kappa=0: "
+            "the solution sits exactly on the constraint boundary, where "
+            "the exact KKT derivative is undefined. Set target_kappa > 0 "
+            "(e.g. 1e-3) for log-barrier smoothed gradients"
         )
-        return tuple(out[:5]) + (out[10],)  # solution + info
-
-    def _fwd(
-        Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, vmap_method, target_kappa
-    ):
-        if kappa_required and not target_kappa > 0:
-            raise TypeError(
-                "elastiqp.jax.solve(backend='pdal') is not differentiable "
-                "with target_kappa=0: the PDAL solution sits exactly on the "
-                "constraint boundary, where the exact KKT derivative is "
-                "undefined. Set target_kappa > 0 (e.g. 1e-3) for log-barrier "
-                "smoothed gradients, or use backend='ipm' for exact "
-                "gradients at kappa=0"
-            )
-        out = ffi_solve(
-            Q,
-            q,
-            A,
-            b,
-            G,
-            h,
-            penalty,
-            eps_abs,
-            max_iter,
-            ruiz,
-            vmap_method,
-            target_kappa,
-        )
-        x, t, y, z1, z2, xr, tr, yr, z1r, z2r, info = out
-        # Differentiate at the kappa-relaxed point (== tight point for
-        # kappa <= 0); the returned VALUE is always the tight solution.
-        return (x, t, y, z1, z2, info), (Q, A, G, h, xr, tr, yr, z1r, z2r)
-
-    def _bwd(eps_abs, max_iter, ruiz, vmap_method, target_kappa, res, ct):
-        return _kkt_bwd(res, ct)
-
-    _solve.defvjp(_fwd, _bwd)
-    return _solve
+    out = _ffi_pdal_solve(
+        Q,
+        q,
+        A,
+        b,
+        G,
+        h,
+        penalty,
+        eps_abs,
+        max_iter,
+        ruiz,
+        vmap_method,
+        target_kappa,
+    )
+    x, t, y, z1, z2, xr, tr, yr, z1r, z2r, info = out
+    # Differentiate at the kappa-relaxed point; the returned VALUE is
+    # always the tight solution.
+    return (x, t, y, z1, z2, info), (Q, A, G, h, xr, tr, yr, z1r, z2r)
 
 
-_solve_pdal = _make_solve(_ffi_pdal_solve, kappa_required=True)
-_solve_ipm = _make_solve(_ffi_ipm_solve, kappa_required=False)
+def _solve_bwd(eps_abs, max_iter, ruiz, vmap_method, target_kappa, res, ct):
+    return _kkt_bwd(res, ct)
+
+
+_solve.defvjp(_solve_fwd, _solve_bwd)
 
 
 def solve(
@@ -346,7 +267,6 @@ def solve(
     *,
     A=None,
     b=None,
-    backend="pdal",
     eps_abs=1e-8,
     max_iter=250,
     ruiz=False,
@@ -359,42 +279,30 @@ def solve(
         s.t. A x == b (hard, optional), G x - t <= h, t >= 0
 
     `penalty` may be a scalar or a per-constraint vector of length p.
-    `backend`, `eps_abs`, `max_iter`, `ruiz` and `target_kappa` are static
+    `eps_abs`, `max_iter`, `ruiz` and `target_kappa` are static
     (compile-time) options.
 
-    backend="pdal" (default) uses the primal-dual augmented Lagrangian
-    solver: the fastest forward solve, and every call here is a cold solve.
-    It is differentiable in reverse mode w.r.t. all array arguments when
-    target_kappa > 0; jax.grad with target_kappa=0 raises at trace time
-    (the PDAL certificate sits exactly on the constraint boundary, where
-    the exact KKT derivative is undefined). `ruiz=True` enables Ruiz
-    equilibration for badly-scaled data on either backend; both solvers
-    terminate on and return unscaled quantities, so it does not affect
-    gradients.
-
-    backend="ipm" uses the proximal interior-point solver: slower, but it
-    holds equalities to ~1e-11 and additionally supports exact (kappa=0)
-    gradients, since its iterates stay strictly interior.
+    Every call here is a cold solve. It is differentiable in reverse mode
+    w.r.t. all array arguments when target_kappa > 0; jax.grad with
+    target_kappa=0 raises at trace time (the certificate sits exactly on
+    the constraint boundary, where the exact KKT derivative is undefined).
+    `ruiz=True` enables Ruiz equilibration for badly-scaled data; the
+    solver terminates on and returns unscaled quantities, so it does not
+    affect gradients.
 
     `target_kappa` controls gradient smoothing (qpax-style): kappa > 0
     (qpax uses 1e-3) differentiates at a kappa-relaxed central point with
     complementarity s.z = kappa, giving smoothed, well-conditioned
     gradients near active-set changes at the cost of an O(kappa) bias.
-    Both backends relax to the same central point -- the IPM by walking
-    the central path, the PDAL by a Newton corrector in the log-barrier
-    retraction coordinates z = b_kappa(v), s = b_kappa(-v) -- so their
-    smoothed gradients agree. With backend="ipm", target_kappa=0.0
-    (default) instead differentiates the exact KKT conditions at the
-    solution. The relaxation only runs on the differentiation path: a
-    plain (undifferentiated) solve never pays for it, and the returned
-    solution is always the tight (unrelaxed) optimum. `converged` covers
-    everything the call computed: when differentiating with kappa > 0 it
-    is 0 if either the solve or the relaxation failed, so a bad gradient
-    evaluation point is never silent.
+    The relaxed point is reached by a Newton corrector in the log-barrier
+    retraction coordinates z = b_kappa(v), s = b_kappa(-v). The relaxation
+    only runs on the differentiation path: a plain (undifferentiated)
+    solve never pays for it, and the returned solution is always the
+    tight (unrelaxed) optimum. `converged` covers everything the call
+    computed: when differentiating with kappa > 0 it is 0 if either the
+    solve or the relaxation failed, so a bad gradient evaluation point is
+    never silent.
     """
-    if backend not in _BACKENDS:
-        raise ValueError(f"unknown backend {backend!r}: expected one of {_BACKENDS}")
-
     Q = jnp.asarray(Q)
     q = jnp.asarray(q)
     G = jnp.asarray(G)
@@ -413,8 +321,7 @@ def solve(
     # penalty may be a scalar or a per-constraint vector of length p
     penalty = jnp.broadcast_to(jnp.asarray(penalty, dtype=jnp.float64), h.shape)
 
-    solve_fn = _solve_pdal if backend == "pdal" else _solve_ipm
-    x, t, y, z_t, z_ineq, info = solve_fn(
+    x, t, y, z_t, z_ineq, info = _solve(
         Q,
         q,
         A,

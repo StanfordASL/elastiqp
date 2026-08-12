@@ -1,11 +1,20 @@
-# Differentiability of the PDAL backend via log-barrier smoothing
+# Differentiability of ElastiQP's PDAL method via log-barrier smoothing
 
 *Notes on the implementation of `elastiqp::Solver::relax()` and the
-differentiable JAX path for `backend="pdal"`.*
+differentiable JAX path (`target_kappa > 0`).*
+
+*Historical note: when this work was done, ElastiQP shipped a secondary
+proximal interior-point (IPM) backend, and the IPM's `relax()` was the
+existing differentiability path this work replaces. This result made the
+IPM backend redundant, and it has since been removed from the library; it
+survives as a test-only reference implementation
+(`tests/ipm_reference.hpp`, not installed or distributed) that
+cross-validates both the solver and the relaxed point. References to "the
+IPM" below mean that reference implementation.*
 
 ## Summary
 
-The PDAL backend is now differentiable. `Solver::relax(kappa)` walks the
+The PDAL solver is now differentiable. `Solver::relax(kappa)` walks the
 converged solution to the **kappa-relaxed central point** of the elastic QP
 — the point satisfying the elastic KKT conditions with complementarity
 `s_t ⊙ z_t = s_ineq ⊙ z_ineq = kappa` — which is *the same point*
@@ -13,8 +22,8 @@ converged solution to the **kappa-relaxed central point** of the elastic QP
 (`_kkt_bwd` in `python/elastiqp/jax.py`, formerly `_ipm_bwd`) is evaluated
 there unchanged, so:
 
-- `elastiqp.jax.solve(..., target_kappa=1e-3)` (the default `pdal` backend)
-  is now compatible with `jax.grad` / `jax.vjp`, under `jit` and `vmap`.
+- `elastiqp.jax.solve(..., target_kappa=1e-3)` is now compatible with
+  `jax.grad` / `jax.vjp`, under `jit` and `vmap`.
 - PDAL and IPM smoothed gradients agree to ~1e-7 on every parameter
   (`Q, q, A, b, G, h, penalty`), and both match finite differences of their
   relaxed solution maps.
@@ -35,7 +44,8 @@ coordinates converges from the PDAL warm start in a handful of iterations.
 
 ### The IPM's existing differentiability
 
-`ipm.hpp` follows qpax: after `solve()`, `relax(kappa)` re-solves from the
+The IPM (`tests/ipm_reference.hpp`) follows qpax: after `solve()`,
+`relax(kappa)` re-solves from the
 optimum toward the same KKT system with complementarity `s ⊙ z = κ` (Newton
 steps toward the kappa-hyperbola with fraction-to-boundary step limiting,
 one KKT factorization per step). The Python backward pass then implicitly
@@ -135,7 +145,7 @@ Then `z ⊙ s = κ` and `z, s > 0` hold **identically for every v** (note
 identity `b_κ(v)·b_κ(-v) = κ`), the complementarity rows disappear from the
 system, and what remains — F1–F5 above in the unknowns
 `(x, t, y, v_t, v_ineq)` — is smooth and unconstrained. We run plain Newton
-on it (`relax()` in `pdal.hpp`):
+on it (`relax()` in `elastiqp.hpp`):
 
 - **Warm start**: from the tight PDAL certificate through the same
   retraction, `v_t = z_t - s_t`, `v_ineq = z_ineq - s_ineq`. The starting
@@ -143,7 +153,7 @@ on it (`relax()` in `pdal.hpp`):
   residuals (size O(κ)) remain.
 - **Condensation**: with `D = b'(v)/b'(-v) = z/s` per row, eliminating
   `dv_t, dv_ineq, dt` collapses each Newton step onto the same n×n SPD
-  shape both backends already use,
+  shape both solvers already use,
 
   ```
   K = Q + ρI + (1/δ)AᵀA + Gᵀ diag(Λ) G,
@@ -262,7 +272,7 @@ with zero-penalty rows in the *tight* solve.
 | Solver state after | iterate moves to relaxed point | tight iterate and factorization cache preserved |
 | Exact gradients (κ = 0) | supported — iterates stay strictly interior | **not defined** — the PDAL certificate sits exactly on the boundary (`s` or `z` exactly 0), so the exact-KKT backward solve divides by zero. `jax.grad` at `target_kappa=0` raises a `TypeError` naming the fix. |
 
-Since both backends produce the same relaxed point, the gradients agree to
+Since both solvers produce the same relaxed point, the gradients agree to
 the tolerance of the relax solves; we measure ≤1.5e-7 max elementwise
 difference across all seven parameters at κ = 1e-3, and ~1e-10 agreement of
 the relaxed points themselves in the C++ cross-checks.
@@ -278,13 +288,14 @@ Timing on random dense instances (i7 laptop, cold solves, κ = 1e-3, tol
 (The PDAL's advantage is warm-started re-solves in control loops — ~5–15 µs
 on these sizes — which the cold-start JAX FFI does not exercise; cold,
 heavily-conflicted instances can favor the IPM as above.) The relaxation
-overhead is comparable between backends, so the practical win is that the
-IPM backend is no longer *required* for anything but κ = 0 exact gradients
-or tighter equality residuals.
+overhead is comparable between the two methods, so the practical win is
+that the IPM stopped being *required* for anything but κ = 0 exact
+gradients or tighter equality residuals — which is what let us remove it
+from the library entirely and keep it only as the test-suite reference.
 
 ## Workflow
 
-Unchanged from the IPM pattern, now on the default backend:
+Unchanged from the IPM pattern, now on `elastiqp::Solver`:
 
 - **C++ / Python bindings**: `solver.solve()` for the forward pass;
   `solver.relax(kappa)` only when a differentiation point is needed. The
@@ -297,21 +308,22 @@ Unchanged from the IPM pattern, now on the default backend:
   fwd runs solve + relax and stashes the relaxed point; the bwd solves the
   transposed KKT system there. `Result.converged` folds in the relaxation
   status on the differentiated path, so a failed relaxation (e.g. an
-  unreachable κ) is never silent. Both FFI handlers now share one signature
-  (`..., target_kappa) -> (tight block, relaxed block, info[3])`).
+  unreachable κ) is never silent. The FFI handler signature is
+  `(..., target_kappa) -> (tight block, relaxed block, info[3])`.
 
 ## Validation
 
-- `tests/test_pdal.cc`: PDAL relax vs IPM relax agreement (κ ∈ {1e-2, 1e-3,
-  1e-6}, with equalities and conflicts), round-off-exact complementarity,
-  iterate/warm-start preservation across relax; relax warm start across
-  drifting ticks (fewer iterations, same relaxed point), under a κ change,
-  and graceful fallback after a full problem jump.
-- `tests/test_jax_ffi.py`: PDAL vs IPM smoothed gradients on all seven
-  parameters; PDAL gradient vs finite differences of the PDAL relaxed map;
-  exactness of `s ⊙ z = κ`; value unchanged by κ on the fwd path; failed
-  relaxation reported through `converged`; grads under `jit`, `vmap`, with
-  m = 0, and invariant to Ruiz; `TypeError` at `target_kappa=0`.
+- `tests/test_pdal.cc`: PDAL relax vs the IPM reference's relax agreement
+  (κ ∈ {1e-2, 1e-3, 1e-6}, with equalities and conflicts), round-off-exact
+  complementarity, iterate/warm-start preservation across relax; relax warm
+  start across drifting ticks (fewer iterations, same relaxed point), under
+  a κ change, and graceful fallback after a full problem jump.
+- `tests/test_jax_ffi.py`: smoothed gradients vs central finite differences
+  of the relaxed solution map on all seven parameters (plus degenerate,
+  m = 0, and batched instances); κ → 0 convergence to the tight
+  derivative; exactness of `s ⊙ z = κ`; value unchanged by κ on the fwd
+  path; failed relaxation reported through `converged`; grads under `jit`,
+  `vmap`, and invariant to Ruiz; `TypeError` at `target_kappa=0`.
 
 ## Possible follow-ups
 

@@ -6,14 +6,15 @@ It builds on three projects:
     technique. Portions of this work are derived from qpax.
   * ProxQP / proxsuite (https://github.com/Simple-Robotics/proxsuite),
     BSD 2-Clause License -- the primal-dual augmented Lagrangian algorithm
-    that the default backend (elastiqp/pdal.hpp) reimplements for the
+    that the solver (elastiqp/elastiqp.hpp) reimplements for the
     elastic form. proxsuite's copyright notice and license are reproduced
     at the end of this file, and apply to the portions derived from it.
   * PIQP (https://github.com/PREDICT-EPFL/piqp), BSD 2-Clause License --
-    the proximal interior-point algorithm that the IpmSolver backend
-    (elastiqp/ipm.hpp) reimplements for the elastic form. PIQP's copyright
-    notice and license are reproduced at the end of this file, and apply
-    to the portions derived from it.
+    the proximal interior-point algorithm that the test-only reference
+    solver (tests/ipm_reference.hpp, not installed or distributed)
+    reimplements for the elastic form. PIQP's copyright notice and license
+    are reproduced at the end of this file, and apply to the portions
+    derived from it.
 
 The repository additionally vendors two sets of third-party headers, both
 outside the installed ElastiQP headers:

@@ -3,7 +3,6 @@
 #include <nanobind/eigen/dense.h>
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
-#include <nanobind/stl/string.h>
 #include <nanobind/stl/variant.h>
 
 #include <optional>
@@ -11,18 +10,14 @@
 #include <string>
 #include <variant>
 
-#include "elastiqp/ipm.hpp"
-#include "elastiqp/pdal.hpp"
+#include "elastiqp/elastiqp.hpp"
 
 namespace nb = nanobind;
-using elastiqp::IpmSettings;
-using elastiqp::IpmSolver;
 using elastiqp::Settings;
 using elastiqp::Solution;
 using elastiqp::Solver;
 using elastiqp::Status;
 
-// Shared by Solver and IpmSolver
 template <typename SolverT>
 void def_update(nb::class_<SolverT>& cls) {
   cls.def(
@@ -172,9 +167,8 @@ NB_MODULE(_core, m) {
       .def_ro("converged", &Solution::converged,
               "1 iff status == Status.Solved")
       .def_ro("iters", &Solution::iters,
-              "interior-point iterations (IpmSolver) or inner semismooth "
-              "Newton steps (Solver, whose budget is max_outer_iter x "
-              "max_iter_in)")
+              "total inner semismooth Newton steps (budget is "
+              "max_outer_iter x max_iter_in)")
       .def_ro("primal_obj", &Solution::primal_obj)
       .def_ro("primal_res", &Solution::primal_res)
       .def_ro("dual_res", &Solution::dual_res)
@@ -241,101 +235,30 @@ NB_MODULE(_core, m) {
   def_setup(solver_cls);
   def_update(solver_cls);
 
-  nb::class_<IpmSettings>(m, "IpmSettings")
-      .def(nb::init<>())
-      .def_rw("rho_init", &IpmSettings::rho_init)
-      .def_rw("delta_init", &IpmSettings::delta_init)
-      .def_rw("eps_abs", &IpmSettings::eps_abs)
-      .def_rw("eps_rel", &IpmSettings::eps_rel)
-      .def_rw("check_duality_gap", &IpmSettings::check_duality_gap)
-      .def_rw("eps_duality_gap_abs", &IpmSettings::eps_duality_gap_abs)
-      .def_rw("eps_duality_gap_rel", &IpmSettings::eps_duality_gap_rel)
-      .def_rw("max_iter", &IpmSettings::max_iter)
-      .def_rw("max_factor_retries", &IpmSettings::max_factor_retries)
-      .def_rw("tau", &IpmSettings::tau)
-      .def_rw("warm_start", &IpmSettings::warm_start)
-      .def_rw("warm_start_fraction", &IpmSettings::warm_start_fraction)
-      .def_rw("warm_start_min_floor", &IpmSettings::warm_start_min_floor)
-      .def_rw("warm_start_max_floor", &IpmSettings::warm_start_max_floor)
-      .def_rw("ruiz", &IpmSettings::ruiz)
-      .def_rw("ruiz_max_iter", &IpmSettings::ruiz_max_iter)
-      .def_rw("ruiz_tol", &IpmSettings::ruiz_tol);
-
-  auto ipm_cls =
-      nb::class_<IpmSolver>(m, "IpmSolver")
-          .def(nb::init<>())
-          .def_rw("settings", &IpmSolver::settings)
-          .def("solve", [](IpmSolver& s) -> Solution { return s.solve(); })
-          .def(
-              "relax",
-              [](IpmSolver& s, double kappa, double tol,
-                 int max_iter) -> Solution {
-                return s.relax(kappa, tol, max_iter);
-              },
-              nb::arg("kappa"), nb::arg("tol") = 1e-8,
-              nb::arg("max_iter") = 30)
-          .def("solution",
-               [](const IpmSolver& s) -> Solution { return s.solution(); })
-          .def(
-              "warm_start_from",
-              [](IpmSolver& s, const Solution& sol) {
-                if (sol.x.size() != s.n() || sol.t.size() != s.p() ||
-                    sol.s_t.size() != s.p() || sol.s_ineq.size() != s.p() ||
-                    sol.z_t.size() != s.p() || sol.z_ineq.size() != s.p() ||
-                    (s.m() > 0 && sol.y.size() != s.m())) {
-                  throw std::invalid_argument(
-                      "solution dimensions do not match setup()");
-                }
-                s.warm_start_from(sol);
-              },
-              nb::arg("solution"),
-              "Seed the next solve() from a Solution produced by either "
-              "backend");
-  def_setup(ipm_cls);
-  def_update(ipm_cls);
-
   auto solve_py = [](const Eigen::MatrixXd& Q, const Eigen::VectorXd& q,
                      const Eigen::MatrixXd& G, const Eigen::VectorXd& h,
                      const Eigen::VectorXd& penalty,
                      const std::optional<Eigen::MatrixXd>& A,
-                     const std::optional<Eigen::VectorXd>& b,
-                     const std::string& backend, double eps_abs, int max_iter,
-                     bool ruiz) {
+                     const std::optional<Eigen::VectorXd>& b, double eps_abs,
+                     int max_iter, bool ruiz) {
     if (A.has_value() != b.has_value()) {
       throw std::invalid_argument("A and b must be provided together");
     }
-    if (backend == "pdal") {
-      Settings settings;
-      settings.eps_abs = eps_abs;
-      settings.eps_duality_gap_abs = eps_abs;
-      settings.max_outer_iter = max_iter;  // BCL rounds on this backend
-      settings.ruiz = ruiz;
-      return A ? elastiqp::Solve(Q, q, *A, *b, G, h, penalty, settings)
-               : elastiqp::Solve(Q, q, G, h, penalty, settings);
-    }
-    if (backend == "ipm") {
-      elastiqp::IpmSettings settings;
-      settings.eps_abs = eps_abs;
-      settings.eps_duality_gap_abs = eps_abs;
-      settings.max_iter = max_iter;
-      settings.ruiz = ruiz;
-      return A ? elastiqp::IpmSolve(Q, q, *A, *b, G, h, penalty, settings)
-               : elastiqp::IpmSolve(Q, q, G, h, penalty, settings);
-    }
-    throw std::invalid_argument("unknown backend '" + backend +
-                                "': expected 'pdal' or 'ipm'");
+    Settings settings;
+    settings.eps_abs = eps_abs;
+    settings.eps_duality_gap_abs = eps_abs;
+    settings.max_outer_iter = max_iter;  // BCL rounds
+    settings.ruiz = ruiz;
+    return A ? elastiqp::Solve(Q, q, *A, *b, G, h, penalty, settings)
+             : elastiqp::Solve(Q, q, G, h, penalty, settings);
   };
 
   const char* solve_doc =
       "Solve the elastic QP  min 0.5 x'Qx + q'x + penalty't  s.t. "
       "A x == b (hard, optional), G x - t <= h, t >= 0 (elastic).\n\n"
-      "backend='pdal' (default) uses the primal-dual augmented Lagrangian "
-      "solver (elastiqp.Solver); backend='ipm' uses the proximal "
-      "interior-point solver (elastiqp.IpmSolver), which is slower but "
-      "holds equalities to ~1e-11. Both backends are differentiable: use "
-      "the Solver/IpmSolver classes and relax(kappa) for the smoothed "
-      "differentiation point. ruiz= enables Ruiz equilibration on either "
-      "backend.\n\n"
+      "For differentiation, use the Solver class and relax(kappa) for the "
+      "smoothed differentiation point. ruiz= enables Ruiz equilibration "
+      "for badly-scaled data.\n\n"
       "Returns a Solution (see help(elastiqp.Solution) for the fields).";
 
   m.def(
@@ -344,33 +267,28 @@ NB_MODULE(_core, m) {
                  const Eigen::MatrixXd& G, const Eigen::VectorXd& h,
                  const Eigen::VectorXd& penalty,
                  const std::optional<Eigen::MatrixXd>& A,
-                 const std::optional<Eigen::VectorXd>& b,
-                 const std::string& backend, double eps_abs, int max_iter,
-                 bool ruiz) {
-        return solve_py(Q, q, G, h, penalty, A, b, backend, eps_abs, max_iter,
-                        ruiz);
+                 const std::optional<Eigen::VectorXd>& b, double eps_abs,
+                 int max_iter, bool ruiz) {
+        return solve_py(Q, q, G, h, penalty, A, b, eps_abs, max_iter, ruiz);
       },
       nb::arg("Q"), nb::arg("q"), nb::arg("G"), nb::arg("h"),
       nb::arg("penalty"), nb::kw_only(), nb::arg("A") = nb::none(),
-      nb::arg("b") = nb::none(), nb::arg("backend") = "pdal",
-      nb::arg("eps_abs") = 1e-8, nb::arg("max_iter") = 250,
-      nb::arg("ruiz") = false, solve_doc);
+      nb::arg("b") = nb::none(), nb::arg("eps_abs") = 1e-8,
+      nb::arg("max_iter") = 250, nb::arg("ruiz") = false, solve_doc);
 
   m.def(
       "solve",
       [solve_py](const Eigen::MatrixXd& Q, const Eigen::VectorXd& q,
                  const Eigen::MatrixXd& G, const Eigen::VectorXd& h,
                  double penalty, const std::optional<Eigen::MatrixXd>& A,
-                 const std::optional<Eigen::VectorXd>& b,
-                 const std::string& backend, double eps_abs, int max_iter,
-                 bool ruiz) {
+                 const std::optional<Eigen::VectorXd>& b, double eps_abs,
+                 int max_iter, bool ruiz) {
         return solve_py(Q, q, G, h,
                         Eigen::VectorXd::Constant(h.size(), penalty), A, b,
-                        backend, eps_abs, max_iter, ruiz);
+                        eps_abs, max_iter, ruiz);
       },
       nb::arg("Q"), nb::arg("q"), nb::arg("G"), nb::arg("h"),
       nb::arg("penalty"), nb::kw_only(), nb::arg("A") = nb::none(),
-      nb::arg("b") = nb::none(), nb::arg("backend") = "pdal",
-      nb::arg("eps_abs") = 1e-8, nb::arg("max_iter") = 250,
-      nb::arg("ruiz") = false, solve_doc);
+      nb::arg("b") = nb::none(), nb::arg("eps_abs") = 1e-8,
+      nb::arg("max_iter") = 250, nb::arg("ruiz") = false, solve_doc);
 }

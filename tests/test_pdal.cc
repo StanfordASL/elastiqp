@@ -1,16 +1,18 @@
-// Correctness tests for the PDAL backend
+// Correctness tests for elastiqp::Solver
 //
 // Checks against
 // (1) PIQP on hard-constrained-yet-feasible problems where the elastic
 // result should coincide with the PIQP result;
 // (2) PIQP on the expanded (n+p) variable form of the elastic problem
-// (3) ElastiQP-IPM on identical problems
+// (3) the test-only IPM reference (ipm_reference.hpp) on identical
+// problems, including the kappa-relaxed central point that relax()
+// targets for differentiation
 
 #include <cstdio>
 #include <random>
 
-#include "elastiqp/ipm.hpp"
-#include "elastiqp/pdal.hpp"
+#include "elastiqp/elastiqp.hpp"
+#include "ipm_reference.hpp"
 #include "piqp/piqp.hpp"
 #include "problem_gen.hpp"
 
@@ -225,7 +227,7 @@ int main() {
           dx, "|dx|");
   }
 
-  std::printf("PDAL: agreement with the PIQP-based elastiqp::IpmSolver\n");
+  std::printf("PDAL: agreement with the IPM reference solver\n");
   for (auto [n, m, p] : {std::tuple{12, 3, 80}, {40, 10, 300}}) {
     const QPData qp = problem_gen::InfeasibleEq(rng, n, m, p, p / 4);
     const VectorXd penalty = VectorXd::Constant(p, 10.0);
@@ -697,8 +699,9 @@ int main() {
   {
     // The relaxed point satisfies the elastic KKT with complementarity
     // s.z = kappa on both blocks; it is the same point IpmSolver::relax
-    // targets, so the two backends must agree on it. Cover equalities,
-    // conflicts (active elastic slacks), and a range of kappa.
+    // targets, so the two solvers must agree on it. This is the key
+    // independent check of the differentiability machinery. Cover
+    // equalities, conflicts (active elastic slacks), and a range of kappa.
     for (const double kappa : {1e-2, 1e-3, 1e-6}) {
       const QPData qp = problem_gen::InfeasibleEq(rng, 14, 4, 60, 15);
       const VectorXd penalty = VectorXd::Constant(60, 10.0);
@@ -980,7 +983,6 @@ int main() {
     Check("n=15 p=0", esol.converged == 1 && res < 1e-7, res, "res");
   }
 
-  std::printf(g_all_ok ? "\nAll PDAL backend tests passed.\n"
-                       : "\nFAILURES\n");
+  std::printf(g_all_ok ? "\nAll PDAL tests passed.\n" : "\nFAILURES\n");
   return g_all_ok ? 0 : 1;
 }
