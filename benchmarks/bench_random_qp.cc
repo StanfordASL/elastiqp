@@ -6,7 +6,7 @@
 //   * cold solve() wall time, inner iterations, KKT factorizations
 //   * relax(kappa) wall time and Newton iterations for several kappa
 //     (cold: retraction start from the tight solution, no warm start)
-//   * one KKT vjp (backward pass, common/kkt_vjp.hpp) wall time
+//   * one KKT vjp (backward pass, elastiqp/kkt_vjp.hpp) wall time
 // so "cost of differentiability" = relax + vjp, comparable to the
 // forward solve on the same instance.
 //
@@ -23,7 +23,7 @@
 #include <vector>
 
 #include "elastiqp/elastiqp.hpp"
-#include "kkt_vjp.hpp"
+#include "elastiqp/kkt_vjp.hpp"
 #include "problem_gen.hpp"
 
 namespace {
@@ -94,6 +94,8 @@ int main() {
       std::mt19937 rng(1234u + static_cast<unsigned>(n));
       const int m = fam.equalities ? std::max(1, n / 5) : 0;
       const VectorXd penalty = VectorXd::Constant(p, fam.penalty);
+      elastiqp::KktVjp vjp;
+      vjp.setup(n, m, p);  // compute() below is then allocation-free
 
       std::vector<double> t_solve, t_vjp;
       std::vector<double> t_relax[3];
@@ -140,14 +142,14 @@ int main() {
 
         // Backward pass at the last relaxed point (cost is
         // kappa-independent), cotangent on x only, as for a loss(x).
-        kkt_vjp::Cotangents ct;
+        elastiqp::Cotangents ct;
         ct.x = problem_gen::Randn(rng, n, 1);
         const elastiqp::Solution rsol = solver.solution();
         double best_vjp = 0.0;
         for (int rep = 0; rep < kReps; ++rep) {
           const auto t0 = Clock::now();
-          const kkt_vjp::DataGrads g =
-              kkt_vjp::Vjp(qp.Q, qp.A, qp.G, qp.h, rsol, ct);
+          const elastiqp::DataGrads& g =
+              vjp.compute(qp.Q, qp.A, qp.G, qp.h, rsol, ct);
           const double us = UsSince(t0);
           if (rep == 0 || us < best_vjp) best_vjp = us;
           if (!std::isfinite(g.q.sum())) ok = false;

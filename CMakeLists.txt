@@ -26,7 +26,7 @@ target_compile_features(elastiqp INTERFACE cxx_std_17)
 # cross-validate the solver against vendored PIQP (third_party/piqp) and a
 # test-only IPM reference implementation (tests/ipm_reference.hpp); neither
 # is installed or distributed. common/ holds dev-only headers (problem
-# generators, KKT vjp) shared by the tests and benchmarks.
+# generators) shared by the tests and benchmarks.
 if(NOT SKBUILD)
   add_executable(test_pdal tests/test_pdal.cc)
   target_include_directories(test_pdal PRIVATE

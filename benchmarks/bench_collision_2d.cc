@@ -1,6 +1,6 @@
 // Differentiable collision detection between two 2D squares across
 // consecutive timesteps (self-contained: Eigen + ElastiQP +
-// common/kkt_vjp.hpp).
+// elastiqp/kkt_vjp.hpp).
 //
 // Closest-point formulation (qpax "Collision Detection" section): with
 // points p1, p2 constrained to polytopes A_i p_i <= b_i,
@@ -48,7 +48,7 @@
 #include <vector>
 
 #include "elastiqp/elastiqp.hpp"
-#include "kkt_vjp.hpp"
+#include "elastiqp/kkt_vjp.hpp"
 
 namespace {
 
@@ -133,19 +133,22 @@ struct TickResult {
 // Distance value at the tight solution, gradient via the vjp at the
 // relaxed point (mirrors the JAX wrapper: value tight, derivative path
 // relaxed), chained through dG/dth, dh/dc, dh/dth of the moving rows.
+// The KktVjp workspace is set up once by the caller (control-loop
+// pattern: compute() does not allocate).
 TickResult Gradients(const TickProblem& tp, const MatrixXd& Q,
                      const elastiqp::Solution& tight,
-                     const elastiqp::Solution& relaxed) {
+                     const elastiqp::Solution& relaxed,
+                     elastiqp::KktVjp& vjp) {
   const Vector2d d =
       tight.x.head<2>() - tight.x.tail<2>();
   TickResult r;
   r.dist = d.norm();
 
-  kkt_vjp::Cotangents ct;
+  elastiqp::Cotangents ct;
   ct.x.resize(4);
   ct.x << d / r.dist, -d / r.dist;
-  const kkt_vjp::DataGrads g =
-      kkt_vjp::Vjp(Q, MatrixXd(0, 4), tp.G, tp.h, relaxed, ct);
+  const elastiqp::DataGrads& g =
+      vjp.compute(Q, MatrixXd(0, 4), tp.G, tp.h, relaxed, ct);
 
   const VectorXd hb = g.h.tail(4);
   const Vector2d gc = tp.A2.transpose() * hb;  // dh/dc = A2
@@ -172,6 +175,8 @@ int main() {
     const TickProblem tp = MakeTick(0);
     warm.setup(Q, q, tp.G, tp.h, kPenalty);
   }
+  elastiqp::KktVjp vjp;
+  vjp.setup(4, 0, 8);
 
   std::vector<double> t_cold_setup, t_cold_solve, t_cold_relax;
   std::vector<double> t_warm_update, t_warm_solve, t_warm_relax, t_vjp;
@@ -213,7 +218,7 @@ int main() {
 
       // ---- gradient (identical for both paths; timed once) ----
       t0 = Clock::now();
-      const TickResult tr = Gradients(tp, Q, wsol, wrel);
+      const TickResult tr = Gradients(tp, Q, wsol, wrel, vjp);
       const double us_vjp = UsSince(t0);
 
       if (record) {

@@ -12,6 +12,7 @@
 #include <random>
 
 #include "elastiqp/elastiqp.hpp"
+#include "elastiqp/kkt_vjp.hpp"
 #include "ipm_reference.hpp"
 #include "piqp/piqp.hpp"
 #include "problem_gen.hpp"
@@ -981,6 +982,102 @@ int main() {
     const auto esol = elastiqp::Solve(qp.Q, qp.q, G, h, 10.0);
     const double res = (qp.Q * esol.x + qp.q).lpNorm<Eigen::Infinity>();
     Check("n=15 p=0", esol.converged == 1 && res < 1e-7, res, "res");
+  }
+
+  std::printf("PDAL: KktVjp vs finite differences of the relaxed map\n");
+  {
+    // Directional central-difference check of the implicit-KKT backward
+    // pass (elastiqp/kkt_vjp.hpp, the C++ mirror of _kkt_bwd in
+    // python/elastiqp/jax.py) against the kappa-relaxed solution map,
+    // with a random LINEAR loss on the full relaxed certificate
+    // (x, t, y, z_t, z_ineq). Linear matters: vjp and FD then both
+    // differentiate the same (relaxed) map exactly, with no O(kappa)
+    // curvature term (see docs/pdal_differentiability.md). Each
+    // direction perturbs ALL data (Q, q, A, b, G, h, penalty) at once,
+    // so any wrong term/sign in any gradient block shows up as an O(1)
+    // mismatch.
+    const double kappa = 1e-3;
+    // eps balances FD truncation (third derivatives of the relaxed map
+    // scale like 1/kappa^2, giving ~eps^2/kappa^2) against relax_tol
+    // solution noise (~relax_tol/eps); measured agreement here is ~5e-6,
+    // and any wrong term would be O(1), so the 1e-4 gate has margin on
+    // both sides.
+    const double eps = 3e-6;
+    const double relax_tol = 1e-11;
+    for (const bool with_eq : {false, true}) {
+      const int n = 8, m = with_eq ? 3 : 0, p = 20;
+      const QPData qp = with_eq
+                            ? problem_gen::RandomFeasible(rng, n, m, p)
+                            : problem_gen::Infeasible(rng, n, p, p / 4);
+      const VectorXd pen = VectorXd::Constant(p, 10.0);
+
+      elastiqp::Cotangents ct;
+      ct.x = problem_gen::Randn(rng, n, 1);
+      ct.t = problem_gen::Randn(rng, p, 1);
+      ct.y = problem_gen::Randn(rng, m, 1);
+      ct.z_t = problem_gen::Randn(rng, p, 1);
+      ct.z_ineq = problem_gen::Randn(rng, p, 1);
+
+      const auto loss = [&](const MatrixXd& Q, const VectorXd& q,
+                            const MatrixXd& A, const VectorXd& b,
+                            const MatrixXd& G, const VectorXd& h,
+                            const VectorXd& w, elastiqp::Solution* out) {
+        elastiqp::Solver s;
+        s.settings.relax_warm_start = false;
+        s.setup(Q, q, A, b, G, h, w);
+        const bool ok = s.solve().converged == 1;
+        const elastiqp::Solution& r = s.relax(kappa, relax_tol, 100);
+        if (!ok || r.converged != 1) {
+          return std::numeric_limits<double>::quiet_NaN();
+        }
+        if (out != nullptr) *out = r;
+        double L = ct.x.dot(r.x) + ct.t.dot(r.t) + ct.z_t.dot(r.z_t) +
+                   ct.z_ineq.dot(r.z_ineq);
+        if (m > 0) L += ct.y.dot(r.y);
+        return L;
+      };
+
+      elastiqp::Solution rsol;
+      loss(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, pen, &rsol);
+      elastiqp::KktVjp vjp;
+      vjp.setup(n, m, p);
+      const elastiqp::DataGrads& g =
+          vjp.compute(qp.Q, qp.A, qp.G, qp.h, rsol, ct);
+
+      double worst = 0.0;
+      for (int dir = 0; dir < 3; ++dir) {
+        MatrixXd dQ = problem_gen::Randn(rng, n, n);
+        dQ = 0.5 * (dQ + dQ.transpose());
+        const MatrixXd dA = problem_gen::Randn(rng, m, n);
+        const MatrixXd dG = problem_gen::Randn(rng, p, n);
+        const VectorXd dq = problem_gen::Randn(rng, n, 1);
+        const VectorXd db = problem_gen::Randn(rng, m, 1);
+        const VectorXd dh = problem_gen::Randn(rng, p, 1);
+        const VectorXd dw = problem_gen::Randn(rng, p, 1);
+
+        const double lp =
+            loss(qp.Q + eps * dQ, qp.q + eps * dq, qp.A + eps * dA,
+                 qp.b + eps * db, qp.G + eps * dG, qp.h + eps * dh,
+                 pen + eps * dw, nullptr);
+        const double lm =
+            loss(qp.Q - eps * dQ, qp.q - eps * dq, qp.A - eps * dA,
+                 qp.b - eps * db, qp.G - eps * dG, qp.h - eps * dh,
+                 pen - eps * dw, nullptr);
+        const double fd = (lp - lm) / (2.0 * eps);
+        double an = (g.Q.array() * dQ.array()).sum() + g.q.dot(dq) +
+                    (g.G.array() * dG.array()).sum() + g.h.dot(dh) +
+                    g.penalty.dot(dw);
+        if (m > 0) an += (g.A.array() * dA.array()).sum() + g.b.dot(db);
+        const double err = std::abs(fd - an) / std::max(1.0, std::abs(fd));
+        if (!std::isfinite(err)) {
+          worst = err;
+          break;
+        }
+        worst = std::max(worst, err);
+      }
+      Check(with_eq ? "feasible+eq n=8 m=3 p=20" : "infeasible n=8 p=20",
+            std::isfinite(worst) && worst < 1e-4, worst, "relerr");
+    }
   }
 
   std::printf(g_all_ok ? "\nAll PDAL tests passed.\n" : "\nFAILURES\n");
