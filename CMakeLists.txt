@@ -25,11 +25,13 @@ target_compile_features(elastiqp INTERFACE cxx_std_17)
 # Build tests. Skip inside a pip wheel build (scikit). The tests
 # cross-validate the solver against vendored PIQP (third_party/piqp) and a
 # test-only IPM reference implementation (tests/ipm_reference.hpp); neither
-# is installed or distributed.
+# is installed or distributed. common/ holds dev-only headers (problem
+# generators, KKT vjp) shared by the tests and benchmarks.
 if(NOT SKBUILD)
   add_executable(test_pdal tests/test_pdal.cc)
   target_include_directories(test_pdal PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/tests
+    ${CMAKE_CURRENT_SOURCE_DIR}/common
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/piqp/include)
   target_link_libraries(test_pdal PRIVATE elastiqp::elastiqp)
   add_test(NAME elastiqp.pdal_cross_validation COMMAND test_pdal)
@@ -37,21 +39,16 @@ if(NOT SKBUILD)
   add_executable(test_ipm_reference tests/test_ipm_reference.cc)
   target_include_directories(test_ipm_reference PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/tests
+    ${CMAKE_CURRENT_SOURCE_DIR}/common
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/piqp/include)
   target_link_libraries(test_ipm_reference PRIVATE elastiqp::elastiqp)
   add_test(NAME elastiqp.ipm_reference_validation COMMAND test_ipm_reference)
 endif()
 
-# Build benchmarks if flag provided and submodule is cloned
-option(ELASTIQP_BUILD_BENCHMARKS
-  "Build the benchmarks/ submodule (if initialized)" OFF)
+# Build benchmarks if flag provided
+option(ELASTIQP_BUILD_BENCHMARKS "Build the benchmarks/ directory" OFF)
 if(ELASTIQP_BUILD_BENCHMARKS)
-  if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/CMakeLists.txt)
-    add_subdirectory(benchmarks)
-  else()
-    message(STATUS "elastiqp: benchmarks/ submodule not initialized -- "
-      "run: git submodule update --init --checkout benchmarks")
-  endif()
+  add_subdirectory(benchmarks)
 endif()
 
 # Build JAX FFI
