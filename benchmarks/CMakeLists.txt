@@ -40,6 +40,11 @@ elastiqp_bench(bench_collision_2d  bench_collision_2d.cc)
 elastiqp_bench(bench_robot_control bench_robot_control.cc)
 elastiqp_bench(bench_diff_robot    bench_diff_robot.cc)
 
+# Relax small-kappa stall regression (replays the committed sequence file;
+# no Pinocchio needed).
+elastiqp_bench(test_relax_stall    test_relax_stall.cc)
+add_test(NAME elastiqp.relax_stall COMMAND test_relax_stall)
+
 # --- robotics generator + correctness tests (need Pinocchio) -----------------
 # Need an installed Pinocchio (ROS/pip/conda binary or source build; point
 # CMAKE_PREFIX_PATH at it). Only regeneration of the committed data file and

@@ -165,7 +165,8 @@ struct Settings {
   // and equality dual). The prox centers sit
   // at the current iterate, so the value only damps the step -- it does not
   // perturb the relaxed point -- and it is escalated x100 on factorization
-  // failure like the main loop's rho.
+  // failure like the main loop's rho, as well as on line-search stalls
+  // (Levenberg-Marquardt style, decaying back after clean full steps).
   double relax_reg = 1e-9;
 };
 
@@ -263,6 +264,11 @@ class Solver {
     dyr_.resize(m_);
     dv1r_.resize(p_);
     dv2r_.resize(p_);
+    xr_bak_.resize(n_);
+    tr_bak_.resize(p_);
+    yr_bak_.resize(m_);
+    v1r_bak_.resize(p_);
+    v2r_bak_.resize(p_);
     llt_r_ = Eigen::LLT<MatrixXd, Eigen::Lower>(n_);
 
     ruiz_ = settings.ruiz && p_ > 0;
@@ -474,10 +480,12 @@ class Solver {
   // (x, t, y, v_t, v_ineq), started from the tight solution through the
   // same retraction. Complementarity and positivity hold by construction
   // at every iterate, so there is no fraction-to-boundary safeguard, just
-  // a residual backtracking line search; from the retraction start this
-  // typically converges in 2-9 Newton steps (one n x n factorization
-  // each, reusing the solve() condensation shape with weights
-  // Lambda = z1 z2 / (z1 s2 + z2 s1), qpax's elastic weight).
+  // a residual backtracking line search with Levenberg-Marquardt damping
+  // on stalls (a failed line search reverts the iterate and escalates the
+  // relax_reg damping instead of accepting a noise step); from the
+  // retraction start this typically converges in 2-9 Newton steps (one
+  // n x n factorization each, reusing the solve() condensation shape with
+  // weights Lambda = z1 z2 / (z1 s2 + z2 s1), qpax's elastic weight).
   //
   // Call after solve(); the returned Solution (and solution()) is the
   // RELAXED point, not the optimum, with tol on the unscaled relaxed-KKT
@@ -504,6 +512,7 @@ class Solver {
     double rho = settings.relax_reg;
     double delta = settings.relax_reg;
     int retries = 0;
+    int stalls = 0;
     int iter = 0;
     Status status = Status::kMaxIter;
     double res = relax_residual(kappa_s);
@@ -575,6 +584,11 @@ class Solver {
       // direction -- see relax_residual(); termination stays on the max
       // norm.
       const double merit_prev = relax_merit_;
+      xr_bak_ = xr_;
+      tr_bak_ = tr_;
+      if (m_ > 0) yr_bak_ = yr_;
+      v1r_bak_ = v1r_;
+      v2r_bak_ = v2r_;
       xr_ += dxr_;
       tr_ += dtr_;
       if (m_ > 0) yr_ += dyr_;
@@ -593,6 +607,29 @@ class Solver {
         v1r_ -= alpha * dv1r_;
         v2r_ -= alpha * dv2r_;
         res_new = relax_residual(kappa_s);
+      }
+      // Levenberg-Marquardt stall handling. When even 12 halvings cannot
+      // decrease the merit, the direction itself is unreliable (on badly
+      // scaled rows the elimination amplifies roundoff by z/s = w^2/kappa,
+      // and below the resulting noise floor exact steps turn into noise).
+      // Accepting the failed step would walk the iterate AWAY from the
+      // best point, so instead: revert, escalate the damping, refactor.
+      // The damping relaxes back after clean full steps.
+      if (!(std::isfinite(relax_merit_) && relax_merit_ <= merit_prev)) {
+        xr_ = xr_bak_;
+        tr_ = tr_bak_;
+        if (m_ > 0) yr_ = yr_bak_;
+        v1r_ = v1r_bak_;
+        v2r_ = v2r_bak_;
+        res = relax_residual(kappa_s);
+        if (++stalls > settings.max_factor_retries) break;
+        rho *= 100;
+        delta *= 100;
+        continue;
+      }
+      if (rho > settings.relax_reg && alpha == 1.0) {
+        rho = std::max(rho / 10.0, settings.relax_reg);
+        delta = std::max(delta / 10.0, settings.relax_reg);
       }
       res = res_new;
     }
@@ -1288,6 +1325,7 @@ class Solver {
   VectorXd rf1_, rf2_, rf3_, rf4_, rf5_;   // relaxed-KKT residuals
   VectorXd d1r_, d2r_, einvr_, lamr_, wr_, pvr_;  // condensation scalings
   VectorXd dxr_, dtr_, dyr_, dv1r_, dv2r_;        // Newton step
+  VectorXd xr_bak_, tr_bak_, yr_bak_, v1r_bak_, v2r_bak_;  // stall revert
   Eigen::LLT<MatrixXd, Eigen::Lower> llt_r_;
   double relax_primal_res_ = 0, relax_dual_res_ = 0;
   double relax_merit_ = 0;  // squared 2-norm of the relaxed-KKT residual
