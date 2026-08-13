@@ -38,7 +38,8 @@ The mechanism is the log-barrier trick of `docs/log_barrier_admm_note.tex`,
 adapted to the elastic form: the barrier's closed-form slack prox
 `b_κ(v) = (v + sqrt(v² + 4κ))/2` provides an *implicit-complementarity
 parametrization* of the slack/dual pairs, and a Newton corrector in those
-coordinates converges from the PDAL warm start in a handful of iterations.
+coordinates converges from the tight PDAL certificate in a handful of
+iterations.
 
 ## Background
 
@@ -147,7 +148,7 @@ system, and what remains — F1–F5 above in the unknowns
 `(x, t, y, v_t, v_ineq)` — is smooth and unconstrained. We run plain Newton
 on it (`relax()` in `elastiqp.hpp`):
 
-- **Warm start**: from the tight PDAL certificate through the same
+- **Initialization**: from the tight PDAL certificate through the same
   retraction, `v_t = z_t - s_t`, `v_ineq = z_ineq - s_ineq`. The starting
   point already sits on the κ-manifold; only stationarity/feasibility
   residuals (size O(κ)) remain.
@@ -196,60 +197,6 @@ many conflicting rows, degenerate/weakly-active, m = 0, p ≫ n), where the
 literal ADMM iteration needed hundreds-to-thousands of sweeps or diverged
 when over-scaled.
 
-### Warm starting relax() across control ticks
-
-In a control loop (`solve() → relax() → set_*() → solve() → relax() → …`)
-the previous tick's relaxed iterate is an obvious candidate start for the
-next relaxation: it persists in the relax workspace, and because the
-v-parametrization is kappa-agnostic — *any* v maps onto the current κ
-manifold exactly — a stale iterate is always a *valid* start, even after
-data or κ changes. `Settings::relax_warm_start` (default on) enables this.
-
-Making it *profitable* turned out to be the interesting part. What the
-experiments showed (all measured on drifting control-loop instances,
-n up to 58, p up to 400):
-
-- **The retraction start is a strong incumbent.** Its x, t, y satisfy the
-  new tight KKT to solver tolerance, and its v *sign pattern encodes the
-  new smoothed configuration exactly*, so its (often larger) residual is
-  concentrated in the weakly-active rows where Newton contracts fastest.
-- **Residual norms do not predict the winner.** A stale iterate with a
-  10× smaller residual can still converge slower: its error is spread
-  across every densely-coupled equation, and — the failure mode that
-  matters — rows whose smoothed configuration changed must traverse the
-  curved region of `b_κ` near `v = 0` (curvature scale `√κ`), where full
-  Newton steps stall against the line search. This is the retraction-space
-  version of the classic "IPMs can't warm start across active-set changes"
-  phenomenon.
-- **The winning criterion is dimensional.** The stale iterate is adopted
-  only if its residual is below both `0.1×` the retraction start's residual
-  *and* `0.02·√κ` — i.e. well inside the retraction's curvature basin.
-  Calibration was sharp: residuals under `0.02·√κ` won consistently
-  (2–3× fewer iterations), `~0.1·√κ` was a coin flip, and above that the
-  stale start reliably lost. Selection costs three residual evaluations
-  (a few matvecs), no factorization.
-- **Bounded regret backstop.** If an adopted warm start has not dropped the
-  residual by two orders within 4 iterations, it is abandoned for the
-  retraction start; wasted work is capped and counted in `Solution::iters`.
-  With the selection rule above this rarely fires.
-
-Measured over drifting ticks (κ = 1e-3, tol 1e-10, drift 1e-4 — a typical
-high-rate control loop; "cold" = `relax_warm_start = false`):
-
-| instance | cold relax | warm relax |
-|---|---|---|
-| n=30, m=8, p=200 | 382 µs/tick (10.3 it) | 163 µs/tick (4.1 it) |
-| n=58, m=15, p=400 | 1277 µs/tick (7.8 it) | 540 µs/tick (3.2 it) |
-
-At drift ≥ 1e-2 (or κ = 1e-6, where the basin `√κ = 1e-3` is far tighter
-than any realistic drift) the selection falls back to the retraction start
-and warm behaves identically to cold — across every (instance, κ, drift)
-combination swept, warm start was never worse. Repeated `relax()` on an
-unchanged problem converges in 0 iterations. The relaxed point itself is
-unchanged by warm starting (verified to ~1e-11); only the start moves. The
-JAX FFI path is cold-start-per-call (functional purity) and does not use
-this.
-
 ### Limitation shared with the IPM
 
 Rows with `penalty_i = 0` admit no relaxed point: `z_t + z_ineq = 0` cannot
@@ -268,7 +215,7 @@ with zero-penalty rows in the *tight* solve.
 | Complementarity at result | within solver tolerance | exact to round-off (`z⊙s = κ` by construction) |
 | Positivity | fraction-to-boundary step limiting (`tau`) | automatic (range of `b_κ`) |
 | Cost per iteration | 1 KKT factorization | 1 KKT factorization (same condensed shape) |
-| Typical iterations (warm) | ~2–8 | ~2–9 (1–4 with tick-to-tick warm start) |
+| Typical iterations (warm) | ~2–8 | ~2–9 |
 | Solver state after | iterate moves to relaxed point | tight iterate and factorization cache preserved |
 | Exact gradients (κ = 0) | supported — iterates stay strictly interior | **not defined** — the PDAL certificate sits exactly on the boundary (`s` or `z` exactly 0), so the exact-KKT backward solve divides by zero. `jax.grad` at `target_kappa=0` raises a `TypeError` naming the fix. |
 
@@ -300,9 +247,7 @@ Unchanged from the IPM pattern, now on `elastiqp::Solver`:
 - **C++ / Python bindings**: `solver.solve()` for the forward pass;
   `solver.relax(kappa)` only when a differentiation point is needed. The
   returned `Solution` is the relaxed certificate; `solver`'s warm state
-  still holds the tight solution. Across control ticks, repeated `relax()`
-  calls warm start from the previous relaxed iterate automatically (see
-  above; disable with `Settings::relax_warm_start = false`).
+  still holds the tight solution.
 - **JAX**: `elastiqp.jax.solve(..., target_kappa=1e-3)`. The primal path
   always runs the plain tight solve (relaxation skipped); the `custom_vjp`
   fwd runs solve + relax and stashes the relaxed point; the bwd solves the
@@ -315,9 +260,7 @@ Unchanged from the IPM pattern, now on `elastiqp::Solver`:
 
 - `tests/test_pdal.cc`: PDAL relax vs the IPM reference's relax agreement
   (κ ∈ {1e-2, 1e-3, 1e-6}, with equalities and conflicts), round-off-exact
-  complementarity, iterate/warm-start preservation across relax; relax warm
-  start across drifting ticks (fewer iterations, same relaxed point), under
-  a κ change, and graceful fallback after a full problem jump.
+  complementarity, iterate/warm-start preservation across relax.
 - `tests/test_jax_ffi.py`: smoothed gradients vs central finite differences
   of the relaxed solution map on all seven parameters (plus degenerate,
   m = 0, and batched instances); κ → 0 convergence to the tight

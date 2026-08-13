@@ -264,7 +264,7 @@ def plot_diff_timing():
     save(fig, "diff_timing.png")
 
 
-# --------------------------------------- relax warm start at robot scale
+# --------------------------------------- relax cost at robot scale
 
 def plot_diff_robot():
     rows = read_csv("diff_robot_ticks.csv")
@@ -276,34 +276,27 @@ def plot_diff_robot():
         return
     fig, (ax, ax2) = plt.subplots(
         1, 2, figsize=(9.5, 2.8), gridspec_kw={"width_ratios": [2.2, 1]})
-    for key, label, col, z in (
-            ("relax_cold_us", "relax cold start", TINTS["elastiqp"], 2),
-            ("relax_warm_us", "relax warm start", COLORS["elastiqp"], 3)):
-        ticks = [int(r["tick"]) for r in sub]
-        us = [float(r[key]) for r in sub]
-        ax.plot(ticks, us, color=col, lw=1.2, label=label, zorder=z)
+    ticks = [int(r["tick"]) for r in sub]
+    us = [float(r["relax_us"]) for r in sub]
+    ax.plot(ticks, us, color=COLORS["elastiqp"], lw=1.2, label="relax(κ)",
+            zorder=2)
     ax.set_yscale("log")
     ax.set_xlabel("control tick", fontsize=9)
     ax.set_ylabel("relax(κ) time [µs]", fontsize=9)
-    ax.set_title(f"{sc}, κ={kappa}: per-tick relax cost, cold vs warm start",
-                 fontsize=10)
+    ax.set_title(f"{sc}, κ={kappa}: per-tick relax cost", fontsize=10)
     ax.grid(True, color="#e5e4dc", linewidth=0.8)
     ax.set_axisbelow(True)
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
     ax.legend(frameon=False, fontsize=9)
 
-    ic = [int(r["iters_cold"]) for r in sub]
-    iw = [int(r["iters_warm"]) for r in sub]
-    bins = np.arange(min(ic + iw) - 0.5, max(ic + iw) + 1.5)
-    ax2.hist(ic, bins=bins, color=TINTS["elastiqp"], label="cold", zorder=2)
-    ax2.hist(iw, bins=bins, histtype="step", lw=1.8,
-             edgecolor=COLORS["elastiqp"], label="warm", zorder=3)
+    it = [int(r["relax_iters"]) for r in sub]
+    bins = np.arange(min(it) - 0.5, max(it) + 1.5)
+    ax2.hist(it, bins=bins, color=TINTS["elastiqp"], zorder=2)
     ax2.set_xlabel("relax Newton steps / tick", fontsize=9)
     ax2.set_title("iteration counts", fontsize=10)
     for side in ("top", "right"):
         ax2.spines[side].set_visible(False)
-    ax2.legend(frameon=False, fontsize=9)
     save(fig, "diff_robot_relax.png")
 
 

@@ -20,22 +20,17 @@
 // The benchmark runs the identical trajectory two ways --
 //   cold: a fresh solver per tick (setup + solve + relax from scratch)
 //   warm: one persistent solver; per tick set_G/set_h, warm-started
-//         solve(), and relax() warm-started from the previous tick's
-//         relaxed iterate
+//         solve(), then relax()
 // -- and reports per-tick timings for each phase, so cold vs warm and
 // forward vs differentiation (relax + vjp) costs are directly
-// comparable. The vjp cost is identical in both paths and timed once.
+// comparable. The warm/cold split applies to the forward solve only;
+// relax() always starts from the retraction of the tick's tight
+// certificate. The vjp cost is identical in both paths and timed once.
 //
 // Measured behavior on this problem (n = 4, p = 8): the warm forward
 // solve cuts mean iterations ~9 -> ~7.7 (~1.4x on wall time, more at
-// finer tick spacing). The relax() warm start is a
-// no-op here -- the cold retraction start already converges in ~2 Newton
-// steps (its floor), and the per-tick drift exceeds the warm-candidate
-// adoption basin (0.02 sqrt(kappa), see Settings::relax_warm_start) even
-// at 10x finer ticks -- so warm relax matches cold relax plus the ~0.2 us
-// candidate evaluation. It is left on to exercise the mechanism and its
-// graceful degradation; expect it to pay off on larger problems where
-// the retraction start needs 5-9 steps, not here.
+// finer tick spacing), and relax() converges in ~2 Newton steps (its
+// floor) on both paths.
 //
 // A per-tick trace prints distance and gradient; away from corner
 // transitions |d(dist)/d(cx,cy)| ~ 1 (translating a face 1:1 with the
@@ -202,7 +197,7 @@ int main() {
       const double us_crelax = UsSince(t0);
       all_ok = all_ok && csol.converged == 1 && crel.converged == 1;
 
-      // ---- warm: vector+matrix update, warm solve, warm relax ----
+      // ---- warm: vector+matrix update, warm solve, then relax ----
       t0 = Clock::now();
       warm.set_G(tp.G);
       warm.set_h(tp.h);
@@ -256,22 +251,22 @@ int main() {
   }
 
   const auto row = [](const char* name, const std::vector<double>& v) {
-    std::printf("%-22s %9.2f %9.2f\n", name, Median(v), Mean(v));
+    std::printf("%-24s %9.2f %9.2f\n", name, Median(v), Mean(v));
   };
-  std::printf("\nper-tick timings:%28s %9s\n", "median", "mean");
+  std::printf("\nper-tick timings:%30s %9s\n", "median", "mean");
   row("cold setup", t_cold_setup);
   row("cold solve", t_cold_solve);
-  row("cold relax", t_cold_relax);
+  row("relax (cold path)", t_cold_relax);
   row("warm set_G/set_h", t_warm_update);
   row("warm solve", t_warm_solve);
-  row("warm relax", t_warm_relax);
+  row("relax (warm path)", t_warm_relax);
   row("vjp (backward)", t_vjp);
 
-  std::printf("\nper-tick iterations:%25s %9s\n", "median", "mean");
+  std::printf("\nper-tick iterations:%27s %9s\n", "median", "mean");
   row("cold solve iters", it_cold);
   row("warm solve iters", it_warm);
-  row("cold relax iters", rxit_cold);
-  row("warm relax iters", rxit_warm);
+  row("relax iters (cold path)", rxit_cold);
+  row("relax iters (warm path)", rxit_warm);
   row("warm factorizations", fact_warm);
 
   const double cf = Median(t_cold_solve);

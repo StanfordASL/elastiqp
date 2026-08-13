@@ -103,8 +103,7 @@ while (running) {
 }
 
 // When differentiating: relax to the kappa-smoothed differentiation point
-// (does not disturb the solver's warm-start state). Repeated relax() calls
-// across a control loop warm start from the previous relaxed point
+// (does not disturb the solver's warm-start state)
 const elastiqp::Solution relaxed = solver.relax(kappa);
 ```
 

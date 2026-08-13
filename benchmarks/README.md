@@ -18,7 +18,7 @@ NOT required to run them:
 | `bench_random_qp` | cold solve / `relax(kappa)` / KKT vjp timings on random dense elastic QP families |
 | `bench_collision_2d` | differentiable collision distance (qpax closest-point QP), cold-vs-warm solver over a 2D sweep; deliberate small-scale contrast to `bench_diff_robot` |
 | `bench_robot_control` | per-tick solve-time distribution, cold vs warm, on realistic robot control loops (diff-ik / arm-osc / hum-wbc) |
-| `bench_diff_robot` | cost of differentiability at robot scale: relax cold-vs-warm start, KKT vjp, amortization vs the forward solve |
+| `bench_diff_robot` | cost of differentiability at robot scale: relax(kappa), KKT vjp, amortization vs the forward solve |
 
 The **cross-solver** benchmarks are enabled with
 `-DELASTIQP_BENCH_EXTERNAL_SOLVERS=ON`, which downloads pinned release
@@ -78,13 +78,6 @@ diff-ik   500 ticks  n=  6 m=  0 p= 24  hash=06e1349ed626e304  sum|q|=2.111816e+
 arm-osc   500 ticks  n=  6 m=  0 p= 24  hash=50cad1dc3c672ba1  sum|q|=1.187094e+03  sum|h|=1.741511e+05
 hum-wbc   250 ticks  n= 46 m= 18 p=132  hash=4761dc012d8a9bde  sum|q|=4.127335e+02  sum|h|=2.095248e+05
 ```
-
-## The relax() warm-start verdict (bench_diff_robot)
-
-`Settings::relax_warm_start` is kept only if `bench_diff_robot` shows warm
-relax at mean <= 0.9x cold on at least one robot scenario at kappa = 1e-3,
-with p95 <= 1.1x cold everywhere (graceful degradation). See the header
-comment in `bench_diff_robot.cc` for the protocol.
 
 ## Python layer (`python/`)
 

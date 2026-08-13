@@ -124,9 +124,7 @@ int main() {
         }
         t_solve.push_back(best);
 
-        // Cold relax per kappa: retraction start each time (no warm
-        // start between the repeated calls or between kappas).
-        solver.settings.relax_warm_start = false;
+        // Relax per kappa: retraction start each time.
         for (int k = 0; k < 3; ++k) {
           double best_rx = 0.0;
           for (int rep = 0; rep < kReps; ++rep) {
