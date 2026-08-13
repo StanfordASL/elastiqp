@@ -154,6 +154,11 @@ batch_ls = vmap_loss(batch_q)
 
 For runnable Python/JAX examples, see the `examples` folder
 
+## Assorted Tips
+
+- If differentiating through problems with large penalty weights (roughly >= 1e4), consider turning on Ruiz equilibration. In Python/JAX: `ruiz=True`; in C++: `settings.ruiz = true`
+
+
 ## Acknowledgments
 
 ElastiQP builds on the following excellent projects:

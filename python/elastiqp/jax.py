@@ -302,9 +302,10 @@ def solve(
     (the default 1e-3 is also qpax's) differentiates at a kappa-relaxed
     central point with complementarity s.z = kappa, giving smoothed,
     well-conditioned gradients near active-set changes at the cost of an
-    O(kappa) bias. Values below ~1e-3 get increasingly hard for the
-    relaxation Newton corrector on ill-conditioned problems (it stalls on
-    the humanoid-WBC benchmark at kappa <= 1e-4); check `converged`.
+    O(kappa) bias. With large penalty weights (>= ~1e4) the corrector's
+    roundoff amplification grows as penalty^2 / kappa and stalls it at
+    small kappa (check `converged`); enable ruiz=True in that regime,
+    which rescales the penalties to O(1) and removes the amplification.
     The relaxed point is reached by a Newton corrector in the log-barrier
     retraction coordinates z = b_kappa(v), s = b_kappa(-v). The relaxation
     only runs on the differentiation path: a plain (undifferentiated)

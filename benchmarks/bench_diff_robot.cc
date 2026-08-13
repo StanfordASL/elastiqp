@@ -35,13 +35,15 @@ using std::chrono::steady_clock;
 
 namespace {
 
-// relax() terminates on the max UNSCALED KKT residual, and the torque-box
-// penalty rows are 1e5-scale, where double precision floors the attainable
-// residual near 2e-11 -- so the library-default 1e-8 is the honest tight
-// tolerance here (1e-10, the setting of the synthetic O(1)-scale experiments
-// in docs/pdal_differentiability.md, sits at that floor). max_iter matches
-// the jax_ffi default; ticks that exhaust it are counted in the fail
-// columns, not hidden.
+// relax() terminates on the max UNSCALED KKT residual. The penalty tiers
+// here reach 1e5, and an inactive row with penalty w relaxes to the pair
+// (z, s) = (w, kappa/w): the relax() Newton elimination amplifies roundoff
+// by z/s = w^2/kappa, which reaches 1e14 at kappa = 1e-6 and stalls the
+// corrector well above any usable tolerance. Ruiz equilibration removes
+// that amplification at the source (the scaled penalty is O(1)), which is
+// why it is enabled below -- with it, the 1e-8 tolerance is attainable at
+// every kappa in the sweep. max_iter matches the jax_ffi default; ticks
+// that exhaust it are counted in the fail columns, not hidden.
 constexpr double kFwdEps = 1e-8;
 constexpr double kRelaxTol = 1e-8;
 constexpr int kRelaxMaxIter = 50;
@@ -99,6 +101,7 @@ elastiqp::Solver MakeSolver(const RobotQP& first) {
   solver.settings.eps_abs = kFwdEps;
   solver.settings.eps_rel = 0;
   solver.settings.warm_start = true;
+  solver.settings.ruiz = true;  // see the kRelaxTol comment above
   solver.setup(first.Q, first.q, first.A, first.b, first.G, first.h,
                first.penalty);
   return solver;
