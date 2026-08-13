@@ -25,6 +25,24 @@ void Check(const char* name, bool ok, double val, const char* what) {
   g_all_ok &= ok;
 }
 
+// This suite cross-validates against PIQP solved at eps ~ 1e-10 with
+// agreement thresholds around 1e-5..1e-6, which needs more accuracy than
+// the control-sized library default (eps_abs = 1e-5). Every IPM solve
+// here therefore pins the tight tolerances explicitly.
+elastiqp::IpmSettings TightIpmSettings() {
+  elastiqp::IpmSettings s;
+  s.eps_abs = 1e-8;
+  s.eps_rel = 1e-9;
+  s.eps_duality_gap_abs = 1e-8;
+  s.eps_duality_gap_rel = 1e-9;
+  return s;
+}
+
+template <typename... Args>
+elastiqp::Solution TightIpmSolve(Args&&... args) {
+  return elastiqp::IpmSolve(std::forward<Args>(args)..., TightIpmSettings());
+}
+
 // Vanilla piqp on the expanded formulation (equalities carried over as hard
 // constraints on the x block); returns (x, t, y, z_t, z_ineq).
 struct ExpandedSol {
@@ -91,7 +109,7 @@ int main() {
   std::printf("IPM: feasible => matches strict QP, t ~ 0\n");
   for (auto [n, p] : {std::pair{10, 12}, {14, 100}, {58, 500}}) {
     const QPData qp = problem_gen::Feasible(rng, n, p);
-    const auto esol = elastiqp::IpmSolve(qp.Q, qp.q, qp.G, qp.h, 1e3);
+    const auto esol = TightIpmSolve(qp.Q, qp.q, qp.G, qp.h, 1e3);
     const StrictSol ref = SolveStrictPiqp(qp);
     const double dx = (esol.x - ref.x).lpNorm<Eigen::Infinity>();
     char name[64];
@@ -106,7 +124,7 @@ int main() {
   for (auto [n, p] : {std::pair{14, 60}, {30, 200}}) {
     const QPData qp = problem_gen::Infeasible(rng, n, p, p / 4);
     const VectorXd penalty = VectorXd::Constant(p, 10.0);
-    const auto esol = elastiqp::IpmSolve(qp.Q, qp.q, qp.G, qp.h, penalty);
+    const auto esol = TightIpmSolve(qp.Q, qp.q, qp.G, qp.h, penalty);
     const double res = problem_gen::ElasticKKTResidual(
         qp.Q, qp.q, qp.G, qp.h, penalty, esol.x, esol.t, esol.z_t, esol.z_ineq);
     char name[64];
@@ -118,7 +136,7 @@ int main() {
   for (auto [n, p] : {std::pair{8, 10}, {14, 100}, {58, 300}}) {
     const QPData qp = problem_gen::Infeasible(rng, n, p, p / 4);
     const VectorXd penalty = VectorXd::Constant(p, 10.0);
-    const auto esol = elastiqp::IpmSolve(qp.Q, qp.q, qp.G, qp.h, penalty);
+    const auto esol = TightIpmSolve(qp.Q, qp.q, qp.G, qp.h, penalty);
     const ExpandedSol ref = SolveExpanded(qp, penalty);
     const double dx = (esol.x - ref.x).lpNorm<Eigen::Infinity>();
     char name[64];
@@ -135,7 +153,7 @@ int main() {
     const QPData qp = problem_gen::Infeasible(rng, n, p, p / 4);
     VectorXd penalty(p);
     for (int i = 0; i < p; ++i) penalty[i] = (i % 2) ? 100.0 : 5.0;
-    const auto esol = elastiqp::IpmSolve(qp.Q, qp.q, qp.G, qp.h, penalty);
+    const auto esol = TightIpmSolve(qp.Q, qp.q, qp.G, qp.h, penalty);
     const ExpandedSol ref = SolveExpanded(qp, penalty);
     const double dx = (esol.x - ref.x).lpNorm<Eigen::Infinity>();
     Check("n=10 p=40 mixed penalty",
@@ -151,7 +169,7 @@ int main() {
     const MatrixXd R = problem_gen::Randn(rng, n / 2, n);
     qp.Q = R.transpose() * R;  // rank n/2
     const VectorXd penalty = VectorXd::Constant(p, 10.0);
-    const auto esol = elastiqp::IpmSolve(qp.Q, qp.q, qp.G, qp.h, penalty);
+    const auto esol = TightIpmSolve(qp.Q, qp.q, qp.G, qp.h, penalty);
     const ExpandedSol ref = SolveExpanded(qp, penalty);
     const double dx = (esol.x - ref.x).lpNorm<Eigen::Infinity>();
     Check("n=20 (rank 10) p=60",
@@ -165,7 +183,7 @@ int main() {
        {std::tuple{14, 4, 60}, {30, 8, 200}, {58, 15, 500}}) {
     const QPData qp = problem_gen::RandomFeasible(rng, n, m, p);
     const auto esol =
-        elastiqp::IpmSolve(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, 1e3);
+        TightIpmSolve(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, 1e3);
     const StrictSol ref = SolveStrictPiqp(qp);
     const double dx = (esol.x - ref.x).lpNorm<Eigen::Infinity>();
     const double eq_res = (qp.A * esol.x - qp.b).lpNorm<Eigen::Infinity>();
@@ -184,7 +202,7 @@ int main() {
     const QPData qp = problem_gen::InfeasibleEq(rng, n, m, p, p / 4);
     const VectorXd penalty = VectorXd::Constant(p, 10.0);
     const auto esol =
-        elastiqp::IpmSolve(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
+        TightIpmSolve(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
     const ExpandedSol ref = SolveExpanded(qp, penalty);
     const double dx = (esol.x - ref.x).lpNorm<Eigen::Infinity>();
     const double eq_res = (qp.A * esol.x - qp.b).lpNorm<Eigen::Infinity>();
@@ -206,7 +224,7 @@ int main() {
     const QPData qp = problem_gen::RandomFeasible(rng, 20, 8, 0);
     const MatrixXd G(0, 20);
     const VectorXd h(0);
-    const auto esol = elastiqp::IpmSolve(qp.Q, qp.q, qp.A, qp.b, G, h, 10.0);
+    const auto esol = TightIpmSolve(qp.Q, qp.q, qp.A, qp.b, G, h, 10.0);
     // Analytic reference: [Q A'; A 0] [x; y] = [-q; b].
     const int n = 20, m = 8;
     MatrixXd Kf = MatrixXd::Zero(n + m, n + m);
@@ -226,7 +244,7 @@ int main() {
     Ai.row(1) = qp.A.row(0);
     VectorXd bi(2);
     bi << 0.0, 1.0;
-    const auto bad = elastiqp::IpmSolve(qp.Q, qp.q, Ai, bi, G, h, 10.0);
+    const auto bad = TightIpmSolve(qp.Q, qp.q, Ai, bi, G, h, 10.0);
     Check("inconsistent A x = b detected",
           bad.status == elastiqp::Status::kNumerics && bad.converged == 0 &&
               bad.primal_res > 0.1,
@@ -234,7 +252,7 @@ int main() {
 
     MatrixXd Qs = MatrixXd::Zero(n, n);
     Qs(0, 0) = 1.0;
-    const auto sing = elastiqp::IpmSolve(Qs, qp.q, MatrixXd(0, n), VectorXd(0),
+    const auto sing = TightIpmSolve(Qs, qp.q, MatrixXd(0, n), VectorXd(0),
                                       G, h, 10.0);
     Check("singular unconstrained KKT detected",
           sing.status == elastiqp::Status::kNumerics && sing.converged == 0,
@@ -250,6 +268,7 @@ int main() {
     const QPData qp = problem_gen::InfeasibleEq(rng, n, m, p, p / 4);
     const VectorXd penalty = VectorXd::Constant(p, 10.0);
     elastiqp::IpmSolver solver;
+    solver.settings = TightIpmSettings();
     solver.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
     const auto tight = solver.solve();
     const auto& rsol = solver.relax(kappa);
@@ -282,6 +301,7 @@ int main() {
     const VectorXd penalty = VectorXd::Constant(p, 10.0);
 
     elastiqp::IpmSolver warm;
+    warm.settings = TightIpmSettings();
     warm.setup(qp0.Q, qp0.q, qp0.A, qp0.b, qp0.G, qp0.h, penalty);
 
     std::normal_distribution<double> dist;
@@ -297,7 +317,7 @@ int main() {
       warm.set_h(h);
       warm.set_b(b);
       const auto& ws = warm.solve();
-      const auto cs = elastiqp::IpmSolve(qp0.Q, q, qp0.A, b, qp0.G, h, penalty);
+      const auto cs = TightIpmSolve(qp0.Q, q, qp0.A, b, qp0.G, h, penalty);
       all_conv &= ws.converged == 1 && cs.converged == 1;
       warm_iters += ws.iters;
       cold_iters += cs.iters;
@@ -325,6 +345,7 @@ int main() {
     const VectorXd penalty = VectorXd::Constant(p, 10.0);
 
     elastiqp::IpmSolver warm;
+    warm.settings = TightIpmSettings();
     warm.setup(qp0.Q, qp0.q, qp0.G, qp0.h, penalty);
 
     std::normal_distribution<double> dist;
@@ -338,7 +359,7 @@ int main() {
       warm.set_q(q);
       warm.set_h(h);
       const auto& ws = warm.solve();
-      const auto cs = elastiqp::IpmSolve(qp0.Q, q, qp0.G, h, penalty);
+      const auto cs = TightIpmSolve(qp0.Q, q, qp0.G, h, penalty);
       all_conv &= ws.converged == 1 && cs.converged == 1;
       warm_iters += ws.iters;
       cold_iters += cs.iters;
@@ -368,6 +389,7 @@ int main() {
     const VectorXd penalty = VectorXd::Constant(p, 10.0);
 
     elastiqp::IpmSolver solver;
+    solver.settings = TightIpmSettings();
     solver.settings.warm_start = false;
     solver.setup(qp0.Q, qp0.q, qp0.A, qp0.b, qp0.G, qp0.h, penalty);
 
@@ -402,7 +424,7 @@ int main() {
                               prev.z_ineq.cwiseMax(f));
       }
       const auto& ws = solver.solve();
-      const auto cs = elastiqp::IpmSolve(qp0.Q, q, qp0.A, b, qp0.G, h, penalty);
+      const auto cs = TightIpmSolve(qp0.Q, q, qp0.A, b, qp0.G, h, penalty);
       all_conv &= ws.converged == 1 && cs.converged == 1;
       explicit_iters += ws.iters;
       cold_iters += cs.iters;
@@ -432,7 +454,7 @@ int main() {
     const int n = 20, m = 5, p = 80;
     const QPData qp = problem_gen::InfeasibleEq(rng, n, m, p, p / 4);
     const auto ref =
-        elastiqp::IpmSolve(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, 10.0);
+        TightIpmSolve(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, 10.0);
     std::uniform_real_distribution<double> unif(-4.0, 4.0);
     MatrixXd Gs = qp.G, As = qp.A;
     VectorXd hs = qp.h, bs = qp.b, ws(p);
@@ -448,6 +470,8 @@ int main() {
       bs[i] *= s;
     }
     elastiqp::IpmSolver off, on;
+    off.settings = TightIpmSettings();
+    on.settings = TightIpmSettings();
     on.settings.ruiz = true;
     off.setup(qp.Q, qp.q, As, bs, Gs, hs, ws);
     on.setup(qp.Q, qp.q, As, bs, Gs, hs, ws);
@@ -478,6 +502,7 @@ int main() {
       penalty[i] = 10.0 / s;
     }
     elastiqp::IpmSolver warm;
+    warm.settings = TightIpmSettings();
     warm.settings.ruiz = true;
     warm.setup(qp0.Q, qp0.q, qp0.A, qp0.b, qp0.G, qp0.h, penalty);
 
@@ -495,6 +520,7 @@ int main() {
       warm.set_b(b);
       const auto& ws = warm.solve();
       elastiqp::IpmSolver cold;
+      cold.settings = TightIpmSettings();
       cold.settings.ruiz = true;
       cold.setup(qp0.Q, q, qp0.A, b, qp0.G, h, penalty);
       const auto& cs = cold.solve();
@@ -529,6 +555,7 @@ int main() {
       pen[i] = 10.0 / s;
     }
     elastiqp::IpmSolver solver;
+    solver.settings = TightIpmSettings();
     solver.settings.ruiz = true;
     solver.settings.warm_start = false;
     solver.setup(qp.Q, qp.q, qp.G, qp.h, pen);
@@ -559,6 +586,7 @@ int main() {
       penalty[i] = 10.0 / s;
     }
     elastiqp::IpmSolver solver;
+    solver.settings = TightIpmSettings();
     solver.settings.ruiz = true;
     solver.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
     const auto tight = solver.solve();
@@ -601,10 +629,11 @@ int main() {
       h2[p + i] = 1e-13 * dist(rng);
     }
     elastiqp::IpmSolver solver;
+    solver.settings = TightIpmSettings();
     solver.settings.ruiz = true;
     solver.setup(qp.Q, qp.q, G2, h2, VectorXd::Constant(p + k_noise, 10.0));
     const auto sol = solver.solve();
-    const auto ref = elastiqp::IpmSolve(qp.Q, qp.q, qp.G, qp.h, 10.0);
+    const auto ref = TightIpmSolve(qp.Q, qp.q, qp.G, qp.h, 10.0);
     const double dx = (sol.x - ref.x).lpNorm<Eigen::Infinity>();
     std::printf("  iters=%d\n", sol.iters);
     Check("6 noise rows at 1e-13",
@@ -616,7 +645,7 @@ int main() {
     const QPData qp = problem_gen::Feasible(rng, 15, 4);
     const MatrixXd G(0, 15);
     const VectorXd h(0);
-    const auto esol = elastiqp::IpmSolve(qp.Q, qp.q, G, h, 10.0);
+    const auto esol = TightIpmSolve(qp.Q, qp.q, G, h, 10.0);
     const double res = (qp.Q * esol.x + qp.q).lpNorm<Eigen::Infinity>();
     Check("n=15 p=0", esol.converged == 1 && res < 1e-7, res, "res");
   }

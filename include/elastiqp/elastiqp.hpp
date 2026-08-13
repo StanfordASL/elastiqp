@@ -99,15 +99,19 @@ struct Solution {
 };
 
 // Primal-dual augmented Lagrangian settings -- every knob the solver has.
-// Note that the convergence criteria and defaults are ElastiQP's, NOT
-// proxsuite's looser 1e-5.
+// The 1e-5 accuracy target matches proxsuite's default and is sized for
+// control: on the robot-control benchmarks, warm-started solves deliver
+// ~1e-6 KKT residuals at this setting, while asking for 1e-8 costs 2-3x
+// the iterations. High-accuracy use can tighten eps_abs; 1e-8 converges
+// fine, just slower. (Unlike proxsuite we keep the duality-gap check on
+// by default -- it is a stricter stop and cheap to evaluate.)
 struct Settings {
   // Termination, on the unscaled elastic-KKT residuals.
-  double eps_abs = 1e-8;
-  double eps_rel = 1e-9;
+  double eps_abs = 1e-5;
+  double eps_rel = 0;
   bool check_duality_gap = true;
-  double eps_duality_gap_abs = 1e-8;
-  double eps_duality_gap_rel = 1e-9;
+  double eps_duality_gap_abs = 1e-5;
+  double eps_duality_gap_rel = 0;
   int max_factor_retries = 10;
 
   // Reuse the previous solve's (x, y, z_ineq) and cached factorization from
@@ -477,13 +481,17 @@ class Solver {
   //
   // Call after solve(); the returned Solution (and solution()) is the
   // RELAXED point, not the optimum, with tol on the unscaled relaxed-KKT
-  // residuals. The solver's own iterate and
+  // residuals. The default tol is tighter than the solver's eps_abs on
+  // purpose: gradient accuracy is governed by this residual (the implicit
+  // differentiation linearizes here), and extra digits are nearly free in
+  // this quadratically convergent corrector, whereas the forward solve
+  // pays linear-tail iterations for them. The solver's own iterate and
   // factorization cache are untouched: a subsequent warm solve() still
   // starts from the tight solution. No-op when p == 0, kappa <= 0, or the
   // previous solve ended in kNumerics. Rows with penalty_i = 0 have no
   // interior (z_t + z_ineq = 0 cannot hold with z > 0), so the relaxation
   // cannot converge for them -- drop such rows instead.
-  const Solution& relax(double kappa, double tol = 1e-8, int max_iter = 30) {
+  const Solution& relax(double kappa, double tol = 1e-6, int max_iter = 50) {
     if (p_ == 0 || !have_warm_ || kappa <= 0.0) return sol_;
     // kappa is in the user's frame; each s.z pair picks up only the cost
     // factor under Ruiz (s scales with the row, z against it).

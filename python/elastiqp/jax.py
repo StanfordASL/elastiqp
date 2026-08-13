@@ -2,7 +2,9 @@
 
 Solves are differentiable with ``target_kappa > 0`` (log-barrier smoothed
 gradients, evaluated at the kappa-relaxed central point with
-complementarity s.z = kappa).
+complementarity s.z = kappa). The default target_kappa=1e-3 (qpax's
+default) makes jax.grad work out of the box; set it to 0 to forbid
+differentiation.
 
 Set ruiz=True for badly-scaled data.
 
@@ -272,10 +274,10 @@ def solve(
     *,
     A=None,
     b=None,
-    eps_abs=1e-8,
+    eps_abs=1e-5,
     max_iter=250,
     ruiz=False,
-    target_kappa=0.0,
+    target_kappa=1e-3,
     vmap_method="sequential",
 ):
     """Solve the elastic QP
@@ -288,17 +290,21 @@ def solve(
     (compile-time) options.
 
     Every call here is a cold solve. It is differentiable in reverse mode
-    w.r.t. all array arguments when target_kappa > 0; jax.grad with
-    target_kappa=0 raises at trace time (the certificate sits exactly on
-    the constraint boundary, where the exact KKT derivative is undefined).
+    w.r.t. all array arguments when target_kappa > 0 (the default);
+    jax.grad with an explicit target_kappa=0 raises at trace time (the
+    certificate sits exactly on the constraint boundary, where the exact
+    KKT derivative is undefined).
     `ruiz=True` enables Ruiz equilibration for badly-scaled data; the
     solver terminates on and returns unscaled quantities, so it does not
     affect gradients.
 
     `target_kappa` controls gradient smoothing (qpax-style): kappa > 0
-    (qpax uses 1e-3) differentiates at a kappa-relaxed central point with
-    complementarity s.z = kappa, giving smoothed, well-conditioned
-    gradients near active-set changes at the cost of an O(kappa) bias.
+    (the default 1e-3 is also qpax's) differentiates at a kappa-relaxed
+    central point with complementarity s.z = kappa, giving smoothed,
+    well-conditioned gradients near active-set changes at the cost of an
+    O(kappa) bias. Values below ~1e-3 get increasingly hard for the
+    relaxation Newton corrector on ill-conditioned problems (it stalls on
+    the humanoid-WBC benchmark at kappa <= 1e-4); check `converged`.
     The relaxed point is reached by a Newton corrector in the log-barrier
     retraction coordinates z = b_kappa(v), s = b_kappa(-v). The relaxation
     only runs on the differentiation path: a plain (undifferentiated)

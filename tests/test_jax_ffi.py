@@ -72,8 +72,9 @@ def main():
     )
 
     Q, q, A, b, G, h, x_star = random_qp(1, 14, 4, 60)
-    sol = elastiqp.jax.solve(Q, q, G, h, 1e3, A=A, b=b)
-    nb_sol = elastiqp.solve(Q, q, G, h, 1e3, A=A, b=b)
+    # eq < 1e-8 needs a tighter solve than the 1e-5 default.
+    sol = elastiqp.jax.solve(Q, q, G, h, 1e3, A=A, b=b, eps_abs=1e-8)
+    nb_sol = elastiqp.solve(Q, q, G, h, 1e3, A=A, b=b, eps_abs=1e-8)
     dx = np.abs(np.asarray(sol.x) - nb_sol.x).max()
     eq = np.abs(A @ np.asarray(sol.x) - b).max()
     check(
@@ -455,11 +456,16 @@ def main():
     )
 
     # The exact (kappa=0) KKT derivative is undefined at the boundary
-    # certificate: grad without target_kappa must fail with a message that
-    # names the fix, not a generic JAX internal.
+    # certificate: grad with an explicit target_kappa=0 must fail with a
+    # message that names the fix, not a generic JAX internal. (The default
+    # target_kappa=1e-3 is differentiable out of the box.)
     try:
         jax.grad(
-            lambda q_: jnp.sum(elastiqp.jax.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx).x)
+            lambda q_: jnp.sum(
+                elastiqp.jax.solve(
+                    Qx, q_, Gx, hx, 10.0, A=Ax, b=bx, target_kappa=0.0
+                ).x
+            )
         )(qx)
         msg = None
     except TypeError as e:
@@ -468,6 +474,16 @@ def main():
     check(
         "...with a message pointing at target_kappa",
         msg is not None and "target_kappa" in msg and "not differentiable" in msg,
+        "",
+    )
+
+    # With the default target_kappa (1e-3), grad works out of the box.
+    g_def = jax.grad(
+        lambda q_: jnp.sum(elastiqp.jax.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx).x)
+    )(qx)
+    check(
+        "grad with default target_kappa is finite",
+        bool(jnp.all(jnp.isfinite(g_def))),
         "",
     )
 

@@ -25,6 +25,7 @@
 // Cold-start only: the ffi constructs a fresh solver per call since
 // JAX/XLA expect functional purity.
 
+#include <algorithm>
 #include <cstdint>
 
 #include "elastiqp/elastiqp.hpp"
@@ -74,9 +75,14 @@ ffi::Error ElastiqpPdalImpl(
   info->typed_data()[0] = static_cast<double>(sol.converged);
   info->typed_data()[1] = static_cast<double>(sol.iters);
 
+  // The relax tolerance is decoupled from eps_abs: the VJP linearizes at
+  // the relaxed point, so gradient accuracy is set by THIS residual, and
+  // the Newton corrector buys digits cheaply. min() keeps an explicitly
+  // tight eps_abs tightening the gradients too, without a loose forward
+  // tolerance loosening them.
   const elastiqp::Solution& rsol =
       (target_kappa > 0 && p > 0)
-          ? solver.relax(target_kappa, eps_abs, 50)
+          ? solver.relax(target_kappa, std::min(eps_abs, 1e-6), 50)
           : sol;
   Eigen::Map<Eigen::VectorXd>(xr->typed_data(), n) = rsol.x;
   Eigen::Map<Eigen::VectorXd>(tr->typed_data(), p) = rsol.t;

@@ -135,8 +135,9 @@ sol = elastiqp.jax.solve(Q, q, G, h, penalty, A=A, b=b)
 
 # Compatible with jax.grad and vjp
 def loss(q_):
-    # Specify a target_kappa >0 when solving for smoothed gradients
-    sol = elastiqp.jax.solve(Q, q_, G, h, penalty, A=A, b=b, target_kappa=1e-3)
+    # Smoothed gradients are on by default (target_kappa=1e-3, qpax's
+    # default); pass target_kappa=0 to forbid differentiation.
+    sol = elastiqp.jax.solve(Q, q_, G, h, penalty, A=A, b=b)
     return jnp.sum(sol.x**2)
 
 grad_q = jax.grad(loss)(q)

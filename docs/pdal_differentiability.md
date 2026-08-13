@@ -22,8 +22,8 @@ converged solution to the **kappa-relaxed central point** of the elastic QP
 (`_kkt_bwd` in `python/elastiqp/jax.py`, formerly `_ipm_bwd`) is evaluated
 there unchanged, so:
 
-- `elastiqp.jax.solve(..., target_kappa=1e-3)` is now compatible with
-  `jax.grad` / `jax.vjp`, under `jit` and `vmap`.
+- `elastiqp.jax.solve` is now compatible with `jax.grad` / `jax.vjp`,
+  under `jit` and `vmap`, out of the box (default `target_kappa=1e-3`).
 - PDAL and IPM smoothed gradients agree to ~1e-7 on every parameter
   (`Q, q, A, b, G, h, penalty`), and both match finite differences of their
   relaxed solution maps.
@@ -255,7 +255,7 @@ Unchanged from the IPM pattern, now on `elastiqp::Solver`:
   `solver.relax(kappa)` only when a differentiation point is needed. The
   returned `Solution` is the relaxed certificate; `solver`'s warm state
   still holds the tight solution.
-- **JAX**: `elastiqp.jax.solve(..., target_kappa=1e-3)`. The primal path
+- **JAX**: `elastiqp.jax.solve` (default `target_kappa=1e-3`). The primal path
   always runs the plain tight solve (relaxation skipped); the `custom_vjp`
   fwd runs solve + relax and stashes the relaxed point; the bwd solves the
   transposed KKT system there. `Result.converged` folds in the relaxation

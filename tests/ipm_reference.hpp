@@ -60,11 +60,11 @@ namespace elastiqp {
 // method.
 struct IpmSettings {
   // Termination, on the unregularized elastic-KKT residuals.
-  double eps_abs = 1e-8;
-  double eps_rel = 1e-9;
+  double eps_abs = 1e-5;
+  double eps_rel = 0;
   bool check_duality_gap = true;
-  double eps_duality_gap_abs = 1e-8;
-  double eps_duality_gap_rel = 1e-9;
+  double eps_duality_gap_abs = 1e-5;
+  double eps_duality_gap_rel = 0;
   int max_factor_retries = 10;
 
   // Reuse the previous solve's iterate from the second solve() on, after

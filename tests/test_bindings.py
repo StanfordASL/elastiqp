@@ -70,7 +70,8 @@ def main():
 
     print("solve with hard equalities")
     Q, q, A, b, G, h, x_star = random_qp(2, 14, 4, 60)
-    sol = elastiqp.solve(Q, q, G, h, 1e3, A=A, b=b)
+    # eq < 1e-8 needs a tighter solve than the 1e-5 default.
+    sol = elastiqp.solve(Q, q, G, h, 1e3, A=A, b=b, eps_abs=1e-8)
     dx = np.abs(sol.x - x_star).max()
     eq = np.abs(A @ sol.x - b).max()
     check(
@@ -133,6 +134,10 @@ def main():
     Q, q0, A, b0, G, h0, _ = random_qp(3, n, m, p)
     G, h0 = make_infeasible(G, h0, p // 4)
     warm = elastiqp.Solver()
+    # The warm-vs-cold agreement threshold (1e-6) needs tighter solves
+    # than the 1e-5 default.
+    warm.settings.eps_abs = 1e-8
+    warm.settings.eps_duality_gap_abs = 1e-8
     warm.setup(Q, q0, G, h0, 10.0, A=A, b=b0)
     cold_iters = warm_iters = 0
     worst_dx = worst_eq = 0.0
@@ -149,7 +154,7 @@ def main():
         if first_sol is None:
             first_sol = ws  # held across later solves on the same object
             first_x = ws.x.copy()
-        cs = elastiqp.solve(Q, q_k, G, h_k, 10.0, A=A, b=b_k)
+        cs = elastiqp.solve(Q, q_k, G, h_k, 10.0, A=A, b=b_k, eps_abs=1e-8)
         all_conv &= ws.converged == 1 and cs.converged == 1
         warm_iters += ws.iters
         cold_iters += cs.iters

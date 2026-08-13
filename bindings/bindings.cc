@@ -212,8 +212,8 @@ NB_MODULE(_core, m) {
               "relax",
               [](Solver& s, double kappa, double tol, int max_iter)
                   -> Solution { return s.relax(kappa, tol, max_iter); },
-              nb::arg("kappa"), nb::arg("tol") = 1e-8,
-              nb::arg("max_iter") = 30,
+              nb::arg("kappa"), nb::arg("tol") = 1e-6,
+              nb::arg("max_iter") = 50,
               "Walk the converged solution to the kappa-relaxed central "
               "point (s.z = kappa) for smooth differentiation, via the "
               "log-barrier retraction. Call after solve(); the returned "
@@ -272,7 +272,7 @@ NB_MODULE(_core, m) {
       },
       nb::arg("Q"), nb::arg("q"), nb::arg("G"), nb::arg("h"),
       nb::arg("penalty"), nb::kw_only(), nb::arg("A") = nb::none(),
-      nb::arg("b") = nb::none(), nb::arg("eps_abs") = 1e-8,
+      nb::arg("b") = nb::none(), nb::arg("eps_abs") = 1e-5,
       nb::arg("max_iter") = 250, nb::arg("ruiz") = false, solve_doc);
 
   m.def(
@@ -288,6 +288,6 @@ NB_MODULE(_core, m) {
       },
       nb::arg("Q"), nb::arg("q"), nb::arg("G"), nb::arg("h"),
       nb::arg("penalty"), nb::kw_only(), nb::arg("A") = nb::none(),
-      nb::arg("b") = nb::none(), nb::arg("eps_abs") = 1e-8,
+      nb::arg("b") = nb::none(), nb::arg("eps_abs") = 1e-5,
       nb::arg("max_iter") = 250, nb::arg("ruiz") = false, solve_doc);
 }

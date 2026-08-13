@@ -55,11 +55,16 @@ double EqualityResidual(const RobotQP& qp, const VectorXd& x) {
   return (qp.A * x - qp.b).lpNorm<Eigen::Infinity>();
 }
 
-// Absolute-only termination: the conflict scenarios have 1e5-scale penalty
-// data, where the default relative criteria stop at absolute KKT residuals
-// around 1e-4 -- accurate, but the tests want a scale-free bound.
+// Absolute-only termination, pinned tight: the 1e-6 KKT / 1e-5 PIQP
+// agreement thresholds below need more accuracy than the control-sized
+// library default (eps_abs = 1e-5), and the conflict scenarios have
+// 1e5-scale penalty data where relative criteria would stop at absolute
+// KKT residuals around 1e-4 -- accurate, but the tests want a scale-free
+// bound.
 elastiqp::Settings TestSettings() {
   elastiqp::Settings s;
+  s.eps_abs = 1e-8;
+  s.eps_duality_gap_abs = 1e-8;
   s.eps_rel = 0;
   s.eps_duality_gap_rel = 0;
   return s;
