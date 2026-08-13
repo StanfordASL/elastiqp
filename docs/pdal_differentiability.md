@@ -170,9 +170,16 @@ on it (`relax()` in `elastiqp.hpp`):
   the 2-norm merit `½‖F‖₂²`**, not the max-norm: the Newton step is a
   guaranteed descent direction for the former (slope `-FᵀF < 0` at exact
   Jacobians) but not the latter, and a max-norm-monotone search measurably
-  stalls (100+ rejected halvings) whenever a full step trades residual
-  between rows — which is exactly what happens when starting anywhere but
-  the tight certificate. Termination stays on the max-norm.
+  stalls whenever a full step trades residual between rows. On
+  well-conditioned instances the two accept tests behave identically (the
+  search rarely rejects at all from the retraction start), but on
+  ill-conditioned real data (the hum-wbc sequences, with 1e5-scale penalty
+  rows) row-trading occurs at intermediate iterates even from the
+  retraction start: there a max-norm-monotone search exhausts its halving
+  budget ~2× as often, takes ~10% more wall time, and adds convergence
+  failures at every κ. An Armijo sufficient-decrease test (c₁ = 1e-4) is
+  measurably identical to the plain monotone merit test, so the extra
+  parameter is not worth carrying. Termination stays on the max-norm.
 - **Regularization**: small fixed prox terms (`relax_reg = 1e-9` on the
   primal diagonal and the equality dual, escalated ×100 on factorization
   failure). The prox centers sit at the current iterate, so — as in the
