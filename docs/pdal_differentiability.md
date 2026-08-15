@@ -232,22 +232,55 @@ same point (Δx ~2e-6 relative at ~1e10 conditioning, vjp gradients agree
 to ~2e-6 at κ = 1e-3). Stale chains degrade gracefully: warm-starting
 from a relaxed point 25 ticks old still converges in 3–5 iterations.
 
-The advantage is regime-dependent: it requires the smoothed row
-configuration to be mostly stable across calls. When a data step flips
-the activity of many weakly-active rows (measured on a conflicted
-synthetic with per-tick drift ~1e-2, an order larger than the robot
-loops), the warm start re-pays the barrier curvature on every flipped
-row and costs *more* than the retraction start (~1.5× iterations). It
-still converges to the same point — the default stays `warm = true`
-because control loops are the target regime — but for sequences of
-essentially unrelated problems pass `warm = false`.
+The advantage is regime-dependent, and `bench_relax_warm` maps the
+boundary on random drifting QPs (three sizes up to n=58/p=400, feasible/
+conflicted/degenerate structures, penalty 10 and 1e4, drift σ from 1e-4
+to 1e-1 on q/h/b/G, 100-tick random walks). The single controlling
+variable is **smoothed-configuration flips per call** — sign changes of
+`v = z − s` (which side of the `s⊙z = κ` hyperbola a pair sits on)
+between consecutive relaxed points:
+
+- **flips ≈ 0 → the chain wins big and unconditionally.** Cost-only
+  drift (fixed constraint geometry) converges in 1.1–1.7 iterations at
+  every σ up to 1e-1: 5–7.5× over the retraction start. The robot
+  sequences behave the same way (2.0 iterations) because a physical
+  trajectory moves constraints coherently — even 25-tick-stale starts
+  flip almost nothing.
+- **Each flipped row costs a fresh curvature walk at that row's scale,
+  ~log2(scale²/κ) iterations.** At penalty 10 that is ~15–25 iterations
+  (the chain loses 2–7× to the retraction start once drift flips a few
+  rows per tick); at penalty 1e4 the walk exceeds any useful budget and
+  the warm Newton *stalls* rather than converges (the w²/κ elimination
+  amplification along the traversal — the same mechanism as the historic
+  relax stalls). Ruiz does **not** mitigate this: the scaled penalty is
+  O(1) but the scaled target shrinks to `c_s·κ`, preserving the walk
+  length (measured: ruiz on/off identical).
+- **Smaller κ moves both costs against the chain**: the retraction
+  start's residual is O(κ) against a fixed absolute tolerance (cold gets
+  *cheaper*: 6.7 → 2.9 iterations from κ=1e-2 to 1e-6), while each flip's
+  traversal gets longer.
+- Structure (feasible/conflicted/degenerate) and size matter only
+  through how drift translates into flips. Random-walk drift on `h`
+  flips constantly (every boundary moves independently); coherent
+  trajectories do not. The warm and cold results agree to ≤1e-9
+  relative in every cell.
+
+Practical rule: chain when consecutive problems are ticks of one
+trajectory; pass `warm = false` for sequences of essentially unrelated
+problems (random sampling, batch datasets), especially with high
+penalties or small κ. Misjudging costs bounded overhead, not
+correctness: a doomed warm attempt is capped at
+`Settings::relax_warm_budget` (default 15) iterations before the
+automatic retraction fallback, so the worst case is ~budget + cold
+(measured ≥0.15× cold wall time, vs 0.04× uncapped) while healthy warm
+starts (1–10 iterations) never hit the cap.
 
 Semantics:
 
 - The first call after `setup()` uses the retraction; a warm run that
-  fails to converge automatically redoes the solve from the retraction
-  (`iters` then counts both runs), and a non-converged result clears the
-  stored chain.
+  fails to converge within `min(max_iter, relax_warm_budget)` iterations
+  automatically redoes the solve from the retraction (`iters` then
+  counts both runs), and a non-converged result clears the stored chain.
 - Ruiz scaling is fixed at `setup()`, so the chain survives `set_*()`
   data updates without an intervening `solve()`: a gradient-only loop can
   run `set_*()` + `relax()` alone.

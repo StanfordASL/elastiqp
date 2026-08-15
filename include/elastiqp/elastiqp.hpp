@@ -167,6 +167,15 @@ struct Settings {
   // perturb the relaxed point -- and it is escalated x100 on factorization
   // failure like the main loop's rho.
   double relax_reg = 1e-9;
+
+  // Iteration budget for a relax() WARM attempt before it gives up and
+  // restarts from the tight retraction (see relax()). A healthy warm
+  // start converges in 1-10 iterations (bench_relax_warm, bench_diff_
+  // robot); a warm start whose smoothed configuration flipped on
+  // high-penalty rows stalls instead of converging, and without this cap
+  // it burns the full max_iter before the fallback. The effective budget
+  // is min(relax_warm_budget, max_iter).
+  int relax_warm_budget = 15;
 };
 
 // Reusable ProxQP-style elastic solver. setup() once, then alternate
@@ -527,8 +536,13 @@ class Solver {
     if (warm && relax_have_warm_) {
       // Continue from the previous relaxed iterate, still in the
       // workspace; on non-convergence redo from the retraction (needs a
-      // tight certificate to reconstruct from).
-      relax_run(kappa_s, tol, max_iter);
+      // tight certificate to reconstruct from). The attempt is capped at
+      // relax_warm_budget: a healthy warm start converges well inside it,
+      // and a doomed one (smoothed configuration flipped on high-penalty
+      // rows) stalls rather than converges, so extra iterations before
+      // the fallback are pure waste (measured in bench_relax_warm).
+      relax_run(kappa_s, tol,
+                std::min(max_iter, settings.relax_warm_budget));
       if (sol_.converged != 1 && have_warm_) {
         const int warm_iters = sol_.iters;
         relax_init_retraction();
