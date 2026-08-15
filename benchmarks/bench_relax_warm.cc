@@ -11,9 +11,13 @@
 // the s.z = kappa hyperbola a pair sits on): each flipped row re-pays
 // the curvature walk. This benchmark maps that trade across problem
 // size, structure, penalty tier, drift size, and drift composition, on
-// random control-loop-style trajectories (fixed matrices unless G
-// drifts; relative-sigma random walk per tick, as in the forward-pass
-// warm-start studies).
+// random control-loop-style trajectories (fixed matrices unless G or Q
+// drift; relative-sigma random walk per tick, as in the forward-pass
+// warm-start studies). Headline finding: the split is exactly
+// cost-drift (q, Q -- flips = 0, warm wins ~5-7.5x at any sigma) vs
+// constraint-geometry drift (h, b, G -- flips grow with sigma and warm
+// loses). A drifting Hessian does not change which side of the
+// hyperbola a row sits on, so qQ behaves identically to q.
 //
 // Per tick: warm forward solve, then relax warm-first (the chain must
 // run BEFORE the cold probe: any converged relax refreshes the stored
@@ -59,7 +63,12 @@ constexpr int kRelaxMaxIter = 50;
 constexpr double kKappa = 1e-3;  // headline; see the kappa sweep at the end
 
 enum class Structure { kFeas, kInfeas, kDegen };
-enum class Drift { kQ, kQH, kQHG };  // what random-walks per tick
+// What random-walks per tick. kQ/kQQ drift only the cost (linear /
+// linear+quadratic): the constraint geometry is fixed, so the smoothed
+// row configuration should be stable regardless of how far the optimum
+// moves. Q drifts through its Cholesky factor (relative, entrywise) so
+// it stays positive definite.
+enum class Drift { kQ, kQQ, kQH, kQHG, kAll };
 
 const char* Name(Structure s) {
   switch (s) {
@@ -71,21 +80,29 @@ const char* Name(Structure s) {
 const char* Name(Drift d) {
   switch (d) {
     case Drift::kQ: return "q";
+    case Drift::kQQ: return "qQ";
     case Drift::kQH: return "qh";
-    default: return "qhG";
+    case Drift::kQHG: return "qhG";
+    default: return "all";
   }
 }
+bool DriftsHB(Drift d) {
+  return d == Drift::kQH || d == Drift::kQHG || d == Drift::kAll;
+}
+bool DriftsG(Drift d) { return d == Drift::kQHG || d == Drift::kAll; }
+bool DriftsQ(Drift d) { return d == Drift::kQQ || d == Drift::kAll; }
 
 struct Size {
   int n, m, p;
 };
 
-// Pre-generated trajectory. G is per-tick only under kQHG (else one copy).
+// Pre-generated trajectory. G/Q are per-tick only when they drift.
 struct Trajectory {
   QPData base;
   VectorXd penalty;
   std::vector<VectorXd> q, h, b;
-  std::vector<MatrixXd> G;  // empty unless Drift::kQHG
+  std::vector<MatrixXd> G;  // empty unless DriftsG
+  std::vector<MatrixXd> Q;  // empty unless DriftsQ
 };
 
 Trajectory MakeTrajectory(Size sz, Structure st, double penalty_w,
@@ -120,19 +137,33 @@ Trajectory MakeTrajectory(Size sz, Structure st, double penalty_w,
   std::normal_distribution<double> dist;
   VectorXd q = traj.base.q, h = traj.base.h, b = traj.base.b;
   MatrixXd G = traj.base.G;
+  // Q drifts via its Cholesky factor (Q stays positive definite).
+  MatrixXd L, L0;
+  if (DriftsQ(drift)) {
+    L = traj.base.Q.llt().matrixL();
+    L0 = L;
+  }
   for (int k = 0; k < kTicks; ++k) {
     for (int i = 0; i < sz.n; ++i) q[i] += qs * dist(rng);
-    if (drift != Drift::kQ) {
+    if (DriftsHB(drift)) {
       for (int i = 0; i < sz.p; ++i) h[i] += hs * dist(rng);
       for (int i = 0; i < sz.m; ++i) b[i] += bs * dist(rng);
     }
-    if (drift == Drift::kQHG) {
+    if (DriftsG(drift)) {
       for (int i = 0; i < sz.p; ++i) {
         for (int j = 0; j < sz.n; ++j) {
           G(i, j) += Gs * std::abs(traj.base.G(i, j)) * dist(rng);
         }
       }
       traj.G.push_back(G);
+    }
+    if (DriftsQ(drift)) {
+      for (int i = 0; i < sz.n; ++i) {
+        for (int j = 0; j <= i; ++j) {
+          L(i, j) += sigma * std::abs(L0(i, j)) * dist(rng);
+        }
+      }
+      traj.Q.push_back(L * L.transpose());
     }
     traj.q.push_back(q);
     traj.h.push_back(h);
@@ -172,7 +203,8 @@ CellResult RunCell(const Trajectory& traj, double kappa, bool ruiz) {
   solver.settings.eps_rel = 0;
   solver.settings.warm_start = true;
   solver.settings.ruiz = ruiz;
-  solver.setup(traj.base.Q, traj.q[0], traj.base.A, traj.b[0],
+  solver.setup(traj.Q.empty() ? traj.base.Q : traj.Q[0], traj.q[0],
+               traj.base.A, traj.b[0],
                traj.G.empty() ? traj.base.G : traj.G[0], traj.h[0],
                traj.penalty);
 
@@ -184,6 +216,7 @@ CellResult RunCell(const Trajectory& traj, double kappa, bool ruiz) {
     solver.set_h(traj.h[k]);
     if (traj.base.b.size() > 0) solver.set_b(traj.b[k]);
     if (!traj.G.empty()) solver.set_G(traj.G[k]);
+    if (!traj.Q.empty()) solver.set_Q(traj.Q[k]);
 
     auto t0 = steady_clock::now();
     const int fwd_ok = solver.solve().converged;
@@ -312,9 +345,11 @@ int main(int argc, char** argv) {
   std::printf(
       "=== drift composition (n=30, m=8, p=200, infeas, penalty 1e4, ruiz) "
       "===\n"
-      "q: cost only (stable geometry) | qh: +bounds | qhG: +matrix\n");
+      "q: linear cost only | qQ: +quadratic cost (Hessian drifts, geometry\n"
+      "fixed) | qh: +bounds | qhG: +constraint matrix | all: everything\n");
   Header();
-  for (const Drift drift : {Drift::kQ, Drift::kQH, Drift::kQHG}) {
+  for (const Drift drift :
+       {Drift::kQ, Drift::kQQ, Drift::kQH, Drift::kQHG, Drift::kAll}) {
     for (const double sigma : kSigmas) {
       const Trajectory traj = MakeTrajectory({30, 8, 200}, Structure::kInfeas,
                                              1e4, sigma, drift, 4242);

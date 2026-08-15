@@ -176,6 +176,22 @@ struct Settings {
   // it burns the full max_iter before the fallback. The effective budget
   // is min(relax_warm_budget, max_iter).
   int relax_warm_budget = 15;
+
+  // Predicted-flip gate for a relax() warm attempt. Before continuing
+  // from the stored chain iterate, count the rows whose smoothed-
+  // configuration sign (which side of the s.z = kappa hyperbola, per
+  // block) under the retraction of the CURRENT tight certificate
+  // disagrees with the stored iterate; if more than this many disagree,
+  // skip the warm attempt and start from the retraction directly --
+  // each such flip re-pays the barrier curvature walk, and at high
+  // penalty a flipped warm start stalls to the budget fallback anyway
+  // (bench_relax_warm). Only well-separated rows count: a near-corner
+  // row (|v_old * v_new| <= 100 kappa) flips cheaply, and its converged
+  // relaxed sign can chronically disagree with its retraction sign
+  // without any tick-to-tick flip. The gate needs a tight certificate
+  // from solve(), so gradient-only chains (set_*() + relax() with no
+  // solve()) are not gated. Set negative to disable.
+  int relax_warm_flip_tol = 0;
 };
 
 // Reusable ProxQP-style elastic solver. setup() once, then alternate
@@ -514,7 +530,12 @@ class Solver {
   // is not what governs the iteration count.) The first call, and any
   // call after setup(), starts from the retraction; if a warm-started run
   // fails to converge, it silently redoes the solve from the retraction
-  // (iters then counts both runs). The stored chain also survives data
+  // (iters then counts both runs). When a tight certificate is
+  // available, a predicted-flip gate (Settings::relax_warm_flip_tol)
+  // skips the warm attempt outright when the data step flipped the
+  // smoothed configuration of well-separated rows -- the regime where
+  // the warm start pays the curvature walk per flipped row and loses to
+  // the retraction. The stored chain also survives data
   // updates without an intervening solve(), so a gradient-only loop can
   // run set_*() + relax() alone. Changing kappa between calls is allowed
   // (v re-materializes on the new manifold); expect a few extra
@@ -533,14 +554,18 @@ class Solver {
     // factor under Ruiz (s scales with the row, z against it).
     const double kappa_s = c_s_ * kappa;
 
-    if (warm && relax_have_warm_) {
+    if (warm && relax_have_warm_ &&
+        !(have_warm_ && settings.relax_warm_flip_tol >= 0 &&
+          relax_predict_flips(kappa_s) > settings.relax_warm_flip_tol)) {
       // Continue from the previous relaxed iterate, still in the
       // workspace; on non-convergence redo from the retraction (needs a
       // tight certificate to reconstruct from). The attempt is capped at
       // relax_warm_budget: a healthy warm start converges well inside it,
       // and a doomed one (smoothed configuration flipped on high-penalty
       // rows) stalls rather than converges, so extra iterations before
-      // the fallback are pure waste (measured in bench_relax_warm).
+      // the fallback are pure waste (measured in bench_relax_warm). The
+      // predicted-flip gate above catches most doomed starts before they
+      // spend the budget (see Settings::relax_warm_flip_tol).
       relax_run(kappa_s, tol,
                 std::min(max_iter, settings.relax_warm_budget));
       if (sol_.converged != 1 && have_warm_) {
@@ -1134,6 +1159,32 @@ class Solver {
                    ssq_us(rf4_, inv_di_) + ssq_us(rf5_, inv_di_) +
                    (m_ > 0 ? ssq_us(rf3_, inv_de_) : 0.0);
     return std::max(relax_dual_res_, relax_primal_res_);
+  }
+
+  // Predicted expensive flips for a warm relax() attempt: rows whose
+  // retraction v-sign (from the current tight certificate, same map as
+  // relax_init_retraction()) disagrees with the stored chain iterate's,
+  // counting only pairs well clear of the hyperbola corner
+  // (|v_old * v_new| > 100 kappa_s, i.e. a traversal of >~ 7 halvings).
+  // O(p n); does not touch the chain iterate (wGx_ is recomputed by
+  // both relax entry paths).
+  int relax_predict_flips(double kappa_s) {
+    const double corner2 = 100.0 * kappa_s;
+    wGx_.noalias() = G_ * x_;
+    int flips = 0;
+    for (Eigen::Index i = 0; i < p_; ++i) {
+      const double r = wGx_[i] - h_[i];
+      const double ti = std::max(r + mu_in_ * (z_[i] - penalty_[i]), 0.0);
+      const double v1 = (penalty_[i] - z_[i]) - ti;
+      const double v2 = z_[i] - std::max(ti - r, 0.0);
+      if ((v1 > 0) != (v1r_[i] > 0) && std::abs(v1 * v1r_[i]) > corner2) {
+        flips++;
+      }
+      if ((v2 > 0) != (v2r_[i] > 0) && std::abs(v2 * v2r_[i]) > corner2) {
+        flips++;
+      }
+    }
+    return flips;
   }
 
   // Retraction start for relax(): the reconstructed elastic certificate of
