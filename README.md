@@ -33,7 +33,7 @@ ElastiQP is a C++/Eigen header-only library with Python bindings and a JAX forei
 
 The solver is an elastic Primal-Dual Augmented Lagrangian (PDAL) method based on [ProxQP](https://github.com/Simple-Robotics/proxsuite), with a condensed formulation of the elastic slacks.
 
-The solver is fast (particularly with warm-starting), and it is *differentiable* with kappa-smoothed gradients: `relax(kappa)` walks the solution to the kappa-relaxed central point (complementarity $s \odot z = \kappa$) through a log-barrier retraction, for smooth implicit differentiation (see `docs/log_barrier_admm_note.tex` and `docs/pdal_differentiability.md`). Ruiz equilibration is available for poorly-conditioned problems (off by default).
+The solver is a *log-barrier* PDAL: every inner subproblem replaces the slack indicators with the smooth barrier retraction $z = b_\kappa(v),\ s = b_\kappa(-v)$ and anneals the central-path parameter $\kappa \downarrow$ alongside the usual BCL schedule, so the forward pass and the differentiation path are two stopping points of the same method. It is fast (particularly with warm-starting) and *differentiable* with kappa-smoothed gradients: `relax(kappa)` runs the same smooth corrector at a fixed kappa to the kappa-relaxed central point (complementarity $s \odot z = \kappa$) for smooth implicit differentiation (see `docs/log_barrier_pdal.tex` and `docs/log_barrier_pdal_implementation.md`). Ruiz equilibration is available for poorly-conditioned problems (off by default).
 
 For a rough sense of numbers, on a laptop with an Intel i7 CPU, ElastiQP can solve humanoid-scale whole-body control problems at approximately 32 us.
 

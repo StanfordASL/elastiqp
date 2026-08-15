@@ -3,6 +3,17 @@
 *Notes on the implementation of `elastiqp::Solver::relax()` and the
 differentiable JAX path (`target_kappa > 0`).*
 
+*Update (2026-08-14): the barrier smoothing described here is no longer a
+backward-pass-only mechanism. The forward pass is now itself a log-barrier
+PDAL (every inner subproblem is the smooth barrier subproblem, with kappa
+annealed to `kappa_min` by the outer loop), and `relax()` shares its
+machinery — see `docs/log_barrier_pdal.tex` for the math and
+`docs/log_barrier_pdal_implementation.md` for the implementation. This
+document remains accurate about `relax()`'s target point, the backward
+pass, and the JAX workflow; references to the forward pass's "three-state
+active-set test" and exact piecewise line search describe the previous
+solver.*
+
 *Historical note: when this work was done, ElastiQP shipped a secondary
 proximal interior-point (IPM) backend, and the IPM's `relax()` was the
 existing differentiability path this work replaces. This result made the

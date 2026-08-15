@@ -10,51 +10,70 @@
 // iff the equality constraints are consistent. The slacks are handled
 // analytically rather than added as explicit decision variables.
 //
-// The solver is a primal-dual augmented Lagrangian (PDAL) method based on
-// ProxQP, adapted to the elastic form above.
+// The solver is a LOG-BARRIER primal-dual proximal augmented Lagrangian
+// (barrier PDAL) method: the proximal-method-of-multipliers / BCL outer
+// structure of ProxQP, with the slack indicators replaced by the barrier
+// -kappa*sum log(s) so that every inner subproblem is smooth
+// (docs/log_barrier_pdal.tex, adapted to the elastic form in
+// docs/log_barrier_pdal_implementation.md).
 //
 // Notes:
 //
-// Eliminating the elastic slacks t analytically turns the problem
-// into  min 0.5 x'Qx + q'x + sum_i penalty_i [G_i x - h_i]_+
-// s.t. Ax = b, and the AL treatment of each inequality row becomes the
-// Moreau envelope of the weighted l1 penalty: quadratic with curvature
-// 1/mu_in near the boundary, linear with slope penalty_i past the kink.
-// On the dual side the multiplier estimate is projected onto [0, penalty]
-// instead of the nonnegative ray (bounded multipliers <=> exact l1
-// penalty), so ProxQP's active-set test gains a third state:
+// Each elastic row carries two slack/dual pairs: (s_t, z_t) for t >= 0 and
+// (s_ineq, z_ineq) for Gx - t <= h, with the t-stationarity tying
+// z_t + z_ineq = penalty (the bounded multiplier that makes the l1 penalty
+// exact). Every pair is parametrized by a single implicit-complementarity
+// coordinate v through the log-barrier retraction
 //
-//   S_i = G_i x - h_i + mu_in * z_prev_i          (shifted row value)
-//   inactive   S <= 0                  row out, dual snaps to 0
-//   active     0 < S < mu_in*penalty   identical to hard ProxQP
-//   saturated  S >= mu_in*penalty      row out, constant gradient
-//                                      penalty_i*G_i, dual snaps to penalty_i
+//   z = b_kappa(v),  s = b_kappa(-v),  b_kappa(v) = (v + sqrt(v^2+4kappa))/2,
 //
-// Everything else mirrors proxsuite's dense backend (PDAL merit with nu=1,
-// exact line search on the piecewise-quadratic merit, BCL outer loop with
-// multiplier revert on bad steps, equality-constrained cold start), with the
-// linear algebra condensed onto the n x n SPD system
-//   K = Q + rho*I + (1/mu_eq) A^T A + (1/mu_in) G_act^T G_act
-// (proxsuite's PrimalLDLT shape). The factorization is cached across Newton
-// iterations AND across solve() calls: it is rebuilt only when Q/A/G, the
-// active set, or (rho, mu) change -- so re-solves in a control loop where
-// only vectors (q, b, h, penalty) drift and the active set is stable cost
-// zero factorizations.
+// which satisfies z.s = kappa and z, s > 0 identically for ANY v. The inner
+// subproblem at a fixed central-path parameter kappa is therefore an
+// unconstrained smooth root-finding problem in (x, t, y, v_t, v_ineq)
+// (residuals F1..F5, see barrier_kkt_fill), solved by damped Newton with a
+// backtracking line search on ||F||_2^2. The outer BCL loop anneals kappa
+// (kappa_init -> kappa_min, one shrink per good step) alongside the usual
+// mu schedule, warm-starting each barrier subproblem with the previous v --
+// inexact path following with BCL-controlled subproblem accuracy.
 //
-// Because the penalty is exact (no barrier), an unsaturated solution matches
-// the hard-constrained QP exactly, and the reconstructed elastic certificate
-// satisfies the t-block dual feasibility penalty - z_t - z_ineq = 0 exactly.
-// Warm starting needs no slack/dual flooring: there is no interior to
-// protect; the previous (x, y, z_ineq) is reused as-is, with z_ineq clamped to
-// [0, penalty], along with mu/rho and the cached factorization.
+// The dual proximal terms bound the condensed row weights by 1/mu_in
+// independently of kappa (beta = b' / (b'(-v) + mu_in b') <= 1/mu_in), so
+// the Newton systems stay conditioned like ProxQP's as kappa -> 0. In that
+// limit b_kappa becomes the orthant projection and the smooth solver
+// degenerates exactly into the ordinary active-set PDAL: rows far from
+// their kinks have weights snapped to 0 (inactive/saturated) or their
+// active value, which is what lets the factorization cache (keyed on the
+// weight vector Lambda, see ensure_factor) recover the zero/low-cost
+// warm re-solves of an active-set method.
+//
+// The linear algebra is condensed onto the n x n SPD system
+//   K = Q + rho*I + (1/mu_eq) A^T A + G^T diag(Lambda) G,
+//   Lambda_i = beta2_i (rho + beta1_i) / (rho + beta1_i + beta2_i),
+// (the elastic pair-elimination weight; with beta = z/s it is qpax's
+// elastic weight). One LLT per Newton step when the weights move, zero
+// when they are frozen within kkt_cache_tol.
+//
+// Termination and every reported quantity stay on the TIGHT elastic KKT:
+// the certificate is reconstructed by hard projection from (x, z_ineq)
+// exactly as in the active-set solver (update_residuals), so an
+// unsaturated converged solution matches the hard-constrained QP to
+// tolerance, reported slacks of feasible rows are identically zero, and
+// penalty - z_t - z_ineq = 0 holds exactly. The barrier bias at
+// kappa_min (duality gap ~ 2 p kappa) sits below the termination
+// tolerances. Warm starting reuses the previous (x, y, z_ineq) with
+// z_ineq clamped to [0, penalty], and starts directly at kappa_min.
 //
 // Omitted from proxsuite: GPDAL merit, incremental LDLT updates + iterative
-// refinement, infeasibility detection, box specialization, nonconvex handling.
-// Equalities hold to solver tolerance (~eps_abs).
+// refinement, infeasibility detection, box specialization, nonconvex
+// handling. Equalities hold to solver tolerance (~eps_abs).
 //
-// Differentiability: relax(kappa) walks the converged solution to a
-// kappa-relaxed central point (complementarity s.z = kappa) for smooth
-// implicit differentiation, using a log-barrier retraction
+// Differentiability: relax(kappa) runs the SAME smooth Newton corrector at
+// a fixed kappa (without the proximal terms -- the centers sit at the
+// iterate) to walk the converged solution to the kappa-relaxed central
+// point (s.z = kappa) for smooth implicit differentiation. Forward and
+// backward pass are thus two stopping points of one barrier method:
+// solve() follows kappa down to kappa_min, relax() holds it at the
+// differentiation target.
 
 #pragma once
 
@@ -91,7 +110,7 @@ struct Solution {
   VectorXd z_t, z_ineq;     // duals for t >= 0 and Gx - t <= h
   Status status = Status::kUnsolved;
   int converged = 0;  // 1 iff status == kSolved
-  int iters = 0;      // total inner semismooth Newton steps
+  int iters = 0;      // total inner barrier-Newton steps
   double primal_obj = 0.0;
   double primal_res = 0.0;
   double dual_res = 0.0;
@@ -119,18 +138,25 @@ struct Settings {
   bool warm_start = true;
 
   // Iteration budget. The outer BCL loop runs max_outer_iter rounds; each
-  // round runs up to max_iter_in semismooth Newton steps, and Solution::iters
+  // round runs up to max_iter_in barrier-Newton steps, and Solution::iters
   // reports their total (so it is not bounded by max_outer_iter).
   int max_outer_iter = 250;
   int max_iter_in = 1500;
 
   // Proximal regularization (primal) and AL penalties / dual prox (mu).
-  // proxsuite defaults.
+  // rho and the mu_init values are proxsuite defaults. The mu floors are
+  // HIGHER than proxsuite's (1e-9 / 1e-8): the barrier solver's duals are
+  // closed-form maps of x (y = yk + (Ax - b)/mu_eq, z through the row
+  // solve), so evaluation round-off in the primal enters the dual
+  // residual amplified by 1/mu -- the floor must keep machine-eps / mu
+  // below the termination tolerance. mu only sets the outer contraction
+  // RATE (any fixed mu > 0 converges), so the cost of the higher floor is
+  // negligible.
   double rho = 1e-6;
   double mu_eq_init = 1e-3;
   double mu_in_init = 1e-1;
-  double mu_min_eq = 1e-9;
-  double mu_min_in = 1e-8;
+  double mu_min_eq = 1e-6;
+  double mu_min_in = 1e-6;
   double mu_update_factor = 0.1;
 
   // BCL outer-loop schedule (proxsuite defaults). eta_ext starts at
@@ -148,6 +174,41 @@ struct Settings {
   double cold_reset_threshold = 1e-5;
   double cold_reset_residual = 1e-5;
   int safe_guard = 10000;  // total-Newton-iteration escape for BCL
+
+  // Log-barrier central-path schedule of the forward pass
+  // (docs/log_barrier_pdal.tex). Every BCL round solves the smooth barrier
+  // PDAL subproblem at the current kappa (complementarity target
+  // s.z = kappa on both elastic pairs); kappa shrinks by
+  // kappa_update_factor after each good outer step, down to kappa_min,
+  // where the barrier bias (duality gap ~ 2 p kappa, residual bias
+  // O(kappa/margin)) sits below any practical termination tolerance.
+  // Warm-started solves match the smoothing to the distance from the
+  // solution instead of starting the full schedule: the starting kappa is
+  // kappa_warm_scale * max(primal_res, dual_res) at entry, clamped into
+  // [kappa_min, kappa_init] -- a near-optimal start re-solves almost
+  // tight, while a badly drifted one gets the same globalization as a
+  // cold start. The default is deliberately conservative (structural
+  // drift on badly scaled data stays robust). Control loops whose active
+  // set is stable across ticks can set kappa_warm_scale = 0: warm solves
+  // then start at kappa_min and typically converge in ~2 Newton steps
+  // (measured ~4x faster warm ticks on the humanoid WBC benchmark). All
+  // kappas must be > 0: the retraction derivative is undefined at
+  // (v, kappa) = (0, 0).
+  double kappa_init = 1e-2;
+  double kappa_warm_scale = 1e-1;
+  double kappa_update_factor = 1e-2;
+  double kappa_min = 1e-13;
+
+  // Factorization reuse for the barrier Newton systems: the cached KKT
+  // factor is reused while every row weight Lambda_i satisfies
+  //   |dLambda_i| ||G_i||^2 <= tol * (Lambda_i ||G_i||^2 + min diag K),
+  // i.e. each row is frozen relative to itself, with an absolute
+  // allowance anchored to the smallest curvature in K. Steps taken on a
+  // reused factor are inexact-Newton steps safeguarded by the line
+  // search; at this tolerance the direction error is negligible. Decided
+  // rows' weights freeze as kappa -> 0, so warm re-solves with a stable
+  // configuration skip refactorization the way an active-set cache does.
+  double kkt_cache_tol = 1e-9;
 
   // Ruiz equilibration of the stacked [Q A' G'; A 0 0; G 0 0] structure
   // plus cost normalization. Read at setup() time (ignored when p == 0);
@@ -203,36 +264,38 @@ class Solver {
     z_.resize(p_);
     xk_.resize(n_);
     yk_.resize(m_);
-    zk_.resize(p_);
 
-    S_.resize(p_);
     zhat_.resize(p_);
     t_.resize(p_);
     s2_.resize(p_);
     r_.resize(p_);
-    din_.resize(p_);
-    pv_.resize(p_);
-    tp_.resize(p_);
     verr_.resize(n_);
     dyrhs_.resize(m_);
     rhs_x_.resize(n_);
-    dx_.resize(n_);
-    dy_.resize(m_);
-    dz_.resize(p_);
-    Qdx_.resize(n_);
-    Adx_.resize(m_);
     Gdx_.resize(p_);
     wQx_.resize(n_);
     wGtz_.resize(n_);
-    wGtd_.resize(n_);
     wAty_.resize(n_);
     wAx_.resize(m_);
     wGx_.resize(p_);
 
-    state_.assign(static_cast<size_t>(p_), 0);
-    f_active_.assign(static_cast<size_t>(p_), 0);
-    bp_.clear();
-    bp_.reserve(static_cast<size_t>(2 * p_));
+    // Barrier iterate of the forward pass (re-derived from (x, z) at the
+    // start of every solve) and its prox centers.
+    tb_.resize(p_);
+    tk_.resize(p_);
+    v1_.resize(p_);
+    v2_.resize(p_);
+    v1k_.resize(p_);
+    v2k_.resize(p_);
+    z2k_.resize(p_);
+    zk_.resize(p_);
+    beta1_.resize(p_);
+    beta2_.resize(p_);
+    dhat1_.resize(p_);
+    dhat2_.resize(p_);
+    zc_.resize(p_);
+    g2_.resize(p_);
+    f_lam_.resize(p_);
 
     GS_.resize(p_, n_);
     K_.resize(n_, n_);
@@ -252,8 +315,6 @@ class Solver {
     rf3_.resize(m_);
     rf4_.resize(p_);
     rf5_.resize(p_);
-    d1r_.resize(p_);
-    d2r_.resize(p_);
     einvr_.resize(p_);
     lamr_.resize(p_);
     wr_.resize(p_);
@@ -398,21 +459,70 @@ class Solver {
     update_residuals();
     if (converged()) return finish(Status::kSolved);
 
+    // Central-path schedule: cold starts anneal kappa_init -> kappa_min
+    // (one shrink per good BCL step); a (near-optimal) warm start goes
+    // straight to kappa_min. The barrier iterate (t, v1, v2) is derived
+    // from the tight certificate of (x, z) through the retraction, so it
+    // starts exactly on the s.z = kappa manifold.
+    const bool cold =
+        !explicit_ws && !(settings.warm_start && have_warm_);
+    kappa_ = cold ? settings.kappa_init
+                  : std::min(settings.kappa_init,
+                             std::max(settings.kappa_min,
+                                      settings.kappa_warm_scale *
+                                          std::max(primal_res_, dual_res_)));
+
+    barrier_init();
+
     // ------------- outer loop (PMM + BCL, proxsuite qp_solve) -------------
     for (int oiter = 0; oiter < settings.max_outer_iter; ++oiter) {
       const double pri_old = primal_res_;
       const double dua_old = dual_res_;
+      const double kappa_s = c_s_ * kappa_;
 
       // The PMM "multiplier update" is implicit: snapshot the prox centers
-      // and let the inner primal-dual Newton move (x, y, z) jointly.
+      // and let the inner Newton move (x, t, y, v1, v2) jointly. The dual
+      // centers are the retraction images of the v snapshot at the
+      // CURRENT kappa (after a shrink this is the path-following
+      // re-centering of the previous round's pairs).
+      const int iters_before = iters_total_;
       xk_ = x_;
+      tk_ = tb_;
       if (m_ > 0) yk_ = y_;
-      zk_ = z_;
-      wGx_.noalias() = G_ * x_;
-      S_ = wGx_ - h_ + mu_in_ * zk_;
+      v1k_ = v1_;
+      v2k_ = v2_;
+      zk_ = z_;  // certificate snapshot for the bad-step revert
+      for (Eigen::Index i = 0; i < p_; ++i) {
+        z2k_[i] = retraction(v2k_[i], kappa_s);
+      }
 
-      if (!inner_loop(eta_in)) {
+      if (!inner_loop(eta_in, kappa_s)) {
         return finish(Status::kNumerics);
+      }
+
+      // Certificate dual for the tight reconstruction: decided rows snap
+      // to their exact bound, active rows keep the inner loop's
+      // linearized dual iterate, clamped into the box [0, penalty] that
+      // the reported certificate, the BCL test, and warm starting all
+      // rely on. "Decided" is read off the barrier pair itself: a row is
+      // tight-saturated iff its t-bound dual z1 = kappa/t vanishes as
+      // kappa -> 0 (slack bounded away from zero), and tight-inactive
+      // iff z2 does -- degenerate ties keep z1, z2 = O(1) and are
+      // robustly excluded (snapping a tie stalls convergence; leaving a
+      // truly saturated dual epsilon below penalty turns into a
+      // penalty-scaled duality-gap bias). The kappa_s * 1e6 threshold
+      // means "slack > 1e-6"; the absolute cap keeps early large-kappa
+      // rounds from snapping.
+      for (Eigen::Index i = 0; i < p_; ++i) {
+        const double zsnap =
+            std::min(kappa_s * 1e6, 1e-10 * (1.0 + penalty_[i]));
+        double zi = std::min(std::max(zc_[i], 0.0), penalty_[i]);
+        if (z1r_[i] < zsnap) {
+          zi = penalty_[i];
+        } else if (z2r_[i] < zsnap) {
+          zi = 0.0;
+        }
+        z_[i] = zi;
       }
 
       update_residuals();
@@ -422,15 +532,52 @@ class Solver {
 
       // BCL update (proxsuite bcl_update): the elastic primal feasibility
       // (equality residual + inequality violation beyond the reconstructed
-      // slack) decides between a dual update and a mu shrink.
+      // slack) decides between a dual update and a mu shrink. Good steps
+      // also advance the central path.
       if (pri_new <= eta_ext || iters_total_ > settings.safe_guard) {
-        eta_ext *= std::pow(mu_in_, settings.beta_bcl);
+        // Floor eta_ext at the termination tolerance: the BCL test judges
+        // whether the subproblem made adequate PRIMAL progress, and
+        // demanding progress below eps_abs is meaningless. Without the
+        // floor eta_ext decays to denormals, every endgame step reads
+        // "bad", and mu collapses to its floor -- raising the 1/mu noise
+        // amplification of the dual maps exactly when the last digits of
+        // the dual residual and duality gap are being ground out.
+        eta_ext = std::max(eta_ext * std::pow(mu_in_, settings.beta_bcl),
+                           0.1 * settings.eps_abs);
         eta_in = std::max(eta_in * mu_in_, eps_in_min);
+        // Anneal the central path; rounds the inner Newton dispatches in
+        // a step or two are tracking the path easily, so take a double
+        // kappa step (self-regulating: near-optimal warm starts and easy
+        // endgames skip levels, hard stretches keep the fine schedule).
+        double kfac = settings.kappa_update_factor;
+        if (iters_total_ - iters_before <= 2) kfac *= kfac;
+        kappa_ = std::max(kappa_ * kfac, settings.kappa_min);
+        // Endgame dual push: the primal is at tolerance but the dual
+        // residual has stopped improving -- the dual prox contraction is
+        // too slow at the current mu (weakly curved directions contract
+        // like sigma * mu per round). Tighten mu WITHOUT the bad-step
+        // revert: the multipliers are the best estimates available, and
+        // the eta_ext floor above would otherwise pin mu forever.
+        // (Gated to dua clearly above tolerance: pushing mu once the dual
+        // is within a decade of eps_abs trades the last digits for 1/mu
+        // evaluation noise.)
+        if (pri_new <= 0.1 * settings.eps_abs &&
+            dua_new > 10.0 * settings.eps_abs && dua_new > 0.9 * dua_old) {
+          mu_in_ = std::max(mu_in_ * settings.mu_update_factor,
+                            settings.mu_min_in);
+          mu_eq_ = std::max(mu_eq_ * settings.mu_update_factor,
+                            settings.mu_min_eq);
+        }
       } else {
-        // Bad step: revert the multipliers (x is kept) and increase the
-        // penalties. The factorization cache invalidates via the mu
-        // fingerprint.
+        // Bad step: revert the multipliers (x and t are kept) and increase
+        // the penalties. The certificate dual reverts to its round-start
+        // SNAPSHOT (re-deriving it from the retraction of v2k would
+        // re-inject map round-off amplified by 1/mu_in). The factorization
+        // cache invalidates via the Lambda fingerprint once the weights
+        // move.
         if (m_ > 0) y_ = yk_;
+        v1_ = v1k_;
+        v2_ = v2k_;
         z_ = zk_;
         mu_in_ = std::max(mu_in_ * settings.mu_update_factor,
                           settings.mu_min_in);
@@ -463,12 +610,12 @@ class Solver {
   // solve stays well-conditioned near degenerate (weakly-active)
   // constraints: the complementarity margins are bounded below by ~kappa.
   //
-  // Method (see docs/log_barrier_admm_note.tex): replacing the slack indicator
+  // Method (docs/log_barrier_pdal.tex; historically
+  // docs/log_barrier_admm_note.tex): replacing the slack indicator
   // with the barrier -kappa*sum log(s) turns the slack update into the
   // smooth retraction b_k(v) = (v + sqrt(v^2 + 4 kappa))/2, and the paired
   // update z = b_k(v), s = b_k(-v) satisfies z.s = kappa and z, s > 0
-  // EXACTLY for any v (the note's ADMM produces exactly this pair with
-  // v = z - s). relax() therefore parametrizes each slack/dual pair by its
+  // EXACTLY for any v. relax() therefore parametrizes each slack/dual pair by its
   // v and Newton-iterates the remaining smooth conditions -- stationarity
   // in x and t, Ax = b, s_t = t, s_ineq = h + t - Gx -- in
   // (x, t, y, v_t, v_ineq), started from the tight solution through the
@@ -518,24 +665,29 @@ class Solver {
       }
       iter++;
 
-      // Condensed Newton system. Eliminating dv1, dv2 (with b' in (0, 1)
-      // and D = b'(v)/b'(-v) = z/s) and dt gives, per row,
-      //   E = rho + D1 + D2,  Lambda = D2 (rho + D1) / E,
-      //   E dt = D2 G dx - F2 + D1 F4 + D2 F5,
-      // and the n x n SPD system
+      // Condensed Newton system, shared with the forward pass
+      // (condense_weights / barrier_direction). relax() is the mu_in = 0,
+      // centers-at-the-iterate instance of the barrier machinery: the
+      // pair weights are beta = b'(v)/b'(-v) = z/s (unbounded near the
+      // boundary as kappa -> 0, which is why Ruiz matters for large
+      // penalties here), Dhat = b'(-v), and per row
+      //   E = rho + beta1 + beta2,  Lambda = beta2 (rho + beta1) / E,
+      // giving the n x n SPD system
       //   [Q + rho I + (1/delta) A'A + G' diag(Lambda) G] dx = rhs.
-      d1r_ = z1r_.cwiseQuotient(s1r_);
-      d2r_ = z2r_.cwiseQuotient(s2r_);
-      einvr_ = ((d1r_ + d2r_).array() + rho).cwiseInverse();
-      lamr_ = d2r_.array() * (d1r_.array() + rho) * einvr_.array();
+      beta1_ = z1r_.cwiseQuotient(s1r_);
+      beta2_ = z2r_.cwiseQuotient(s2r_);
+      for (Eigen::Index i = 0; i < p_; ++i) {
+        dhat1_[i] = retraction_dcomp(v1r_[i], kappa_s);
+        dhat2_[i] = retraction_dcomp(v2r_[i], kappa_s);
+      }
+      condense_weights(rho);
       bool ok = true;
       while (!relax_factor(rho, delta)) {
         if (retries < settings.max_factor_retries) {
           rho *= 100;
           delta *= 100;
           retries++;
-          einvr_ = ((d1r_ + d2r_).array() + rho).cwiseInverse();
-          lamr_ = d2r_.array() * (d1r_.array() + rho) * einvr_.array();
+          condense_weights(rho);
         } else {
           ok = false;
           break;
@@ -547,26 +699,7 @@ class Solver {
       }
       retries = 0;
 
-      wr_ = d1r_.cwiseProduct(rf4_) + d2r_.cwiseProduct(rf5_) - rf2_;
-      pvr_ = d2r_.cwiseProduct(rf5_ - einvr_.cwiseProduct(wr_));
-      rhs_x_ = -rf1_;
-      rhs_x_.noalias() -= G_.transpose() * pvr_;
-      if (m_ > 0) {
-        rhs_x_.noalias() -= (1.0 / delta) * (A_.transpose() * rf3_);
-      }
-      dxr_ = llt_r_.solve(rhs_x_);
-      Gdx_.noalias() = G_ * dxr_;
-      dtr_ = einvr_.cwiseProduct(d2r_.cwiseProduct(Gdx_) + wr_);
-      if (m_ > 0) {
-        dyr_.noalias() = A_ * dxr_;
-        dyr_ += rf3_;
-        dyr_ /= delta;
-      }
-      for (Eigen::Index i = 0; i < p_; ++i) {
-        dv1r_[i] = (rf4_[i] - dtr_[i]) / retraction_dcomp(v1r_[i], kappa_s);
-        dv2r_[i] = (rf5_[i] + Gdx_[i] - dtr_[i]) /
-                   retraction_dcomp(v2r_[i], kappa_s);
-      }
+      barrier_direction(delta, llt_r_);
 
       // Full Newton step, then halve until the merit 0.5||F||^2 stops
       // increasing (the retraction keeps every trial point feasible, so
@@ -746,9 +879,8 @@ class Solver {
     z_.setZero();
     xk_.setZero();
     yk_.setZero();
-    zk_.setZero();
 
-    std::fill(state_.begin(), state_.end(), static_cast<signed char>(0));
+    lamr_.setZero();  // no inequality rows in the cold-start system
     if (!ensure_factor()) return false;
 
     rhs_x_ = -q_;
@@ -763,207 +895,331 @@ class Solver {
     return std::isfinite(x_.sum()) && (m_ == 0 || std::isfinite(y_.sum()));
   }
 
-  // ---- inner semismooth Newton on the PDAL merit (proxsuite
-  // primal_dual_newton_semi_smooth). Returns false only on a factorization
-  // disaster. Invariant on entry and throughout: S_ = Gx - h + mu_in*zk_.
-  bool inner_loop(double eps_int) {
+  // ---- inner loop ----
+  // With the row blocks and the equality dual eliminated in closed form
+  // at every evaluation point (row_update; y*(x) = yk + (Ax - b)/mu_eq),
+  // the barrier subproblem is an unconstrained smooth CONVEX minimization
+  // in x alone,
+  //   Phi(x) = f(x) + rho/2||x - xk||^2
+  //          + yk'(Ax-b) + ||Ax-b||^2/(2 mu_eq) + sum_i rowval_i(G_i x),
+  // (partial max over duals / min over primal slacks preserves convexity;
+  // Danskin gives grad Phi = the reduced F1 and hess Phi = the condensed
+  // K). Each iteration takes the condensed Newton step and an exact line
+  // search: the slice derivative g(alpha) = Phi'(x + alpha dx) . dx is
+  // strictly increasing, so its root is found by bracketed regula falsi
+  // -- the smooth analogue of proxsuite's exact piecewise line search,
+  // and like it, alpha may exceed 1. A g evaluation costs p scalar row
+  // solves plus O(p) dot products (no matvecs). Returns false only on a
+  // factorization disaster / non-finite iterates.
+  bool inner_loop(double eps_int, double kappa_s) {
+    // Closed-form block updates at the incoming centers (this is where
+    // the PMM multiplier update actually happens).
+    // The equality dual stays an ADDITIVE iterate (y += alpha dy): the
+    // first step folds y onto its closed form y* = yk + (Ax - b)/mu_eq
+    // exactly (the map is linear), and accumulating instead of
+    // re-deriving keeps fresh A*x round-off from entering y amplified by
+    // 1/mu_eq -- the same reason the certificate dual zc_ is linearized.
+    wGx_.noalias() = G_ * x_;
+    row_update(kappa_s);
+    if (m_ > 0) wAx_.noalias() = A_ * x_;
+    zc_ = z2r_;
+    double err = inner_residual(kappa_s);
     for (int it = 0; it < settings.max_iter_in; ++it) {
-      const double err = compute_inner_terms();
-      // The mismatch ||zhat - z|| enters err weighted by mu_in, so at the
-      // mu floor a subproblem can pass this test while the multipliers are
-      // still far from their clamp targets. The outer loop only runs while
-      // the true elastic KKT is unsatisfied, so never accept a subproblem
-      // without taking at least one Newton step (which snaps the
-      // multipliers) -- otherwise the outer loop can spin to kMaxIter with
-      // an unchanged iterate.
+      if (!std::isfinite(err)) return false;
+      // The outer loop only runs while the true elastic KKT is
+      // unsatisfied, so never accept a subproblem without taking at least
+      // one Newton step -- otherwise the outer loop can spin to kMaxIter
+      // with an unchanged iterate.
       if (err <= eps_int && it > 0) return true;
 
-      // Three-state row classification on the shifted value S (elastic
-      // version of proxsuite's active-set test; ties mirror its >=).
+      // Pair weights (both derivative branches evaluated stably). The
+      // proxed row pair has beta2 = b'/(b'(-v) + mu_in b') <= 1/mu_in
+      // uniformly in kappa; the barrier-slaved t pair has beta1 = z1/s1
+      // (unbounded near the boundary, but it only enters through
+      // Lambda = beta2 (rho + beta1)/(rho + beta1 + beta2) <= beta2 and
+      // through beta1 * F4 products whose F4 is zero to relative
+      // round-off after row_update).
       for (Eigen::Index i = 0; i < p_; ++i) {
-        if (S_[i] >= mu_in_ * penalty_[i]) {
-          state_[static_cast<size_t>(i)] = 2;  // saturated
-        } else if (S_[i] >= 0.0) {
-          state_[static_cast<size_t>(i)] = 1;  // active
-        } else {
-          state_[static_cast<size_t>(i)] = 0;  // inactive
-        }
+        // B = b'(v) and C = b'(-v) are the same {small, 1 - small} pair
+        // swapped by the sign of v: one sqrt serves both, stably.
+        const double u1 = v1_[i];
+        const double r1 = std::sqrt(u1 * u1 + 4.0 * kappa_s);
+        const double s1 = 2.0 * kappa_s / (r1 * (r1 + std::abs(u1)));
+        const double c1 = u1 >= 0.0 ? s1 : 1.0 - s1;
+        const double b1 = u1 >= 0.0 ? 1.0 - s1 : s1;
+        dhat1_[i] = c1;
+        beta1_[i] = b1 / c1;
+        const double u2 = v2_[i];
+        const double r2 = std::sqrt(u2 * u2 + 4.0 * kappa_s);
+        const double s2 = 2.0 * kappa_s / (r2 * (r2 + std::abs(u2)));
+        const double c2 = u2 >= 0.0 ? s2 : 1.0 - s2;
+        const double b2 = u2 >= 0.0 ? 1.0 - s2 : s2;
+        dhat2_[i] = c2 + mu_in_ * b2;
+        beta2_[i] = b2 / dhat2_[i];
       }
+      condense_weights(rho_);
       if (!ensure_factor()) return false;
-
-      // Newton system, condensed onto K (see header comment). Non-active
-      // rows leave the system: their dual snaps to its known target
-      // (0 inactive, penalty saturated) and the target replaces z in the
-      // dual residual on the right-hand side.
-      for (Eigen::Index i = 0; i < p_; ++i) {
-        switch (state_[static_cast<size_t>(i)]) {
-          case 1:
-            din_[i] = S_[i] - mu_in_ * z_[i];
-            pv_[i] = 0.0;
-            break;
-          case 2:
-            din_[i] = 0.0;
-            pv_[i] = penalty_[i] - z_[i];
-            break;
-          default:
-            din_[i] = 0.0;
-            pv_[i] = -z_[i];
-            break;
-        }
-      }
-      tp_ = pv_ + din_ / mu_in_;
-      wGtd_.noalias() = G_.transpose() * tp_;
-      rhs_x_ = -verr_ - wGtd_;
-      if (m_ > 0) {
-        rhs_x_.noalias() -= (1.0 / mu_eq_) * (A_.transpose() * dyrhs_);
-      }
-      dx_ = llt_.solve(rhs_x_);
-      if (!std::isfinite(dx_.sum())) return false;
-      Gdx_.noalias() = G_ * dx_;
-      Qdx_.noalias() = Q_ * dx_;
-      if (m_ > 0) {
-        Adx_.noalias() = A_ * dx_;
-        dy_ = (Adx_ + dyrhs_) / mu_eq_;
-      }
-      for (Eigen::Index i = 0; i < p_; ++i) {
-        dz_[i] = state_[static_cast<size_t>(i)] == 1
-                     ? (Gdx_[i] + din_[i]) / mu_in_
-                     : pv_[i];
-      }
+      barrier_direction(mu_eq_, llt_);
+      if (!std::isfinite(dxr_.sum())) return false;
 
       iters_total_++;
-      const double alpha = line_search();
-
-      double dwmax = dx_.lpNorm<Eigen::Infinity>();
-      if (m_ > 0) dwmax = std::max(dwmax, dy_.lpNorm<Eigen::Infinity>());
-      dwmax = std::max(dwmax, dz_.lpNorm<Eigen::Infinity>());
+      // Certificate dual: the LINEARIZED update from the pre-step point.
+      // The Newton step zeroes the measured F1 (which contained this z)
+      // to second order, so the pair (x + alpha dx, zc) reaches the
+      // linear-solve round-off floor -- unlike the row-map z, which
+      // re-derives from x every evaluation and re-injects primal
+      // round-off amplified by 1/mu_in (visible at penalty ~ 1e5 against
+      // tight tolerances). This is the additive dual iterate of ordinary
+      // PDAL, recovered from the same step data.
+      zc_ = z2r_;  // pre-step row duals (the line search overwrites z2r_)
+      const double alpha = line_search(kappa_s);
+      zc_ += alpha * (beta2_.cwiseProduct(dhat2_).cwiseProduct(dv2r_));
+      const double dwmax = dxr_.lpNorm<Eigen::Infinity>();
       if (alpha * dwmax < 1e-11 && it > 0) return true;
 
-      x_ += alpha * dx_;
-      if (m_ > 0) y_ += alpha * dy_;
-      z_ += alpha * dz_;
-      // The exact line search is unclamped (alpha can exceed 1, mirroring
-      // proxsuite), so a snap direction dz = -z or w - z can overshoot the
-      // dual box. Project back: the merit's z-terms are separable quadratics
-      // with minimizers zhat in [0, w], so this never increases the merit,
-      // and it preserves the solver invariant z in [0, penalty] that the
-      // residuals, duality gap, and reported certificate all rely on.
-      z_ = z_.cwiseMax(0.0).cwiseMin(penalty_);
-      S_ += alpha * Gdx_;
+      // Accept: move x and the additive y along, then re-solve the rows
+      // at full precision at the accepted point (zhat_ still holds the
+      // pre-step G x from the line search).
+      x_ += alpha * dxr_;
+      wGx_ = zhat_ + alpha * Gdx_;
+      if (m_ > 0) y_ += alpha * dyr_;
+      row_update(kappa_s);
+      err = inner_residual(kappa_s);
       if (alpha == 0.0) return true;
     }
     return true;  // out of inner iterations; the outer loop adapts mu
   }
 
-  // Inner stopping quantities (proxsuite compute_inner_loop_saddle_point,
-  // with the nonnegative-ray projection replaced by the [0, penalty]
-  // clamp). Fills the buffers the Newton step reuses.
-  double compute_inner_terms() {
+  // Exact line search on the convex slice: finds the root of the strictly
+  // increasing g(alpha) = Phi'(x + alpha dx) . dx
+  //   = c0 + c1 alpha + Gdx . z2*(alpha) + Adx . y*(alpha),
+  // where the rows and equality dual are re-eliminated at every trial
+  // point. Leaves wGx_ and the row blocks at the returned alpha. dyrhs_
+  // holds A dx on exit (reused by the caller's y update).
+  double line_search(double kappa_s) {
     wQx_.noalias() = Q_ * x_;
-    wGtz_.noalias() = G_.transpose() * z_;
-    verr_ = wQx_ + q_ + wGtz_ + rho_ * (x_ - xk_);
-    double err = 0.0;
+    verr_ = wQx_ + q_ + rho_ * (x_ - xk_);
+    double c0 = dxr_.dot(verr_);
+    rhs_x_.noalias() = Q_ * dxr_;  // scratch: Q dx
+    double c1 = dxr_.dot(rhs_x_) + rho_ * dxr_.squaredNorm();
+    double cy0 = 0.0, cy1 = 0.0;
     if (m_ > 0) {
-      wAty_.noalias() = A_.transpose() * y_;
-      verr_ += wAty_;
-      wAx_.noalias() = A_ * x_;
-      dyrhs_ = wAx_ - b_ + mu_eq_ * (yk_ - y_);
-      err = dyrhs_.lpNorm<Eigen::Infinity>();
+      dyrhs_.noalias() = A_ * dxr_;
+      // Adx . y*(alpha) with y*(x) = y + F3/mu_eq (rf3_ is current):
+      cy0 = dyrhs_.dot(y_) + dyrhs_.dot(rf3_) / mu_eq_;
+      cy1 = dyrhs_.squaredNorm() / mu_eq_;
     }
-    err = std::max(err, verr_.lpNorm<Eigen::Infinity>());
-    double inerr = 0.0;
-    for (Eigen::Index i = 0; i < p_; ++i) {
-      const double zh =
-          std::min(std::max(S_[i] / mu_in_, 0.0), penalty_[i]);
-      zhat_[i] = zh;
-      inerr = std::max(inerr, std::abs(zh - z_[i]));
-    }
-    return std::max(err, mu_in_ * inerr);
-  }
+    zhat_ = wGx_;  // base G x (zhat_ is free scratch during the inner loop)
 
-  // Exact line search on the piecewise-quadratic PDAL merit along
-  // (dx, dy, dz) (proxsuite linesearch::primal_dual_ls). The derivative is
-  // piecewise affine in alpha with breakpoints where a row's shifted value
-  // S_i(alpha) crosses 0 or mu_in*penalty_i; scan the (nondecreasing in
-  // expectation) derivative for its sign change and interpolate.
-  double line_search() {
-    // alpha-independent scalars of the smooth part. With
-    // dy = (Adx + dyrhs)/mu_eq we have Adx - mu_eq*dy = -dyrhs, which
-    // collapses the second (dual-coupling) equality term.
-    double a = dx_.dot(Qdx_) + rho_ * dx_.squaredNorm();
-    double b = dx_.dot(wQx_) + dx_.dot(q_) + rho_ * dx_.dot(x_ - xk_);
-    if (m_ > 0) {
-      a += (Adx_.squaredNorm() + dyrhs_.squaredNorm()) / mu_eq_;
-      b += Adx_.dot(dyrhs_) / mu_eq_ + Adx_.dot(y_) -
-           dyrhs_.squaredNorm() / mu_eq_;
-    }
-
-    const auto grad_at = [&](double alpha) {
-      double g = b + a * alpha;
-      for (Eigen::Index i = 0; i < p_; ++i) {
-        const double c = Gdx_[i];
-        const double Sa = S_[i] + alpha * c;
-        const double za = z_[i] + alpha * dz_[i];
-        const double mw = mu_in_ * penalty_[i];
-        if (Sa >= mw) {  // saturated
-          g += penalty_[i] * c - mu_in_ * (penalty_[i] - za) * dz_[i];
-        } else if (Sa >= 0.0) {  // active
-          g += (Sa / mu_in_) * c +
-               (Sa / mu_in_ - za) * (c - mu_in_ * dz_[i]);
-        } else {  // inactive
-          g += mu_in_ * za * dz_[i];
-        }
-      }
-      return g;
+    // Loose row tolerance for trial evaluations: the search only needs
+    // bracketing accuracy on g. The caller's residual evaluation redoes
+    // the accepted point's rows at full precision.
+    const auto g_at = [&](double alpha) {
+      wGx_ = zhat_ + alpha * Gdx_;
+      row_update(kappa_s, 1e-9);
+      return c0 + cy0 + alpha * (c1 + cy1) + Gdx_.dot(z2r_);
     };
 
-    bp_.clear();
-    for (Eigen::Index i = 0; i < p_; ++i) {
-      const double c = Gdx_[i];
-      if (c == 0.0) continue;
-      const double a1 = -S_[i] / c;
-      if (a1 > 0.0 && std::isfinite(a1)) bp_.push_back(a1);
-      const double a2 = (mu_in_ * penalty_[i] - S_[i]) / c;
-      if (a2 > 0.0 && std::isfinite(a2)) bp_.push_back(a2);
-    }
-    std::sort(bp_.begin(), bp_.end());
+    // g(0) is free: the rows are already at their optima for the current
+    // x, so no row solve is needed. g(0) = -dx'K dx < 0 up to round-off;
+    // a nonnegative value means the direction carries no descent left
+    // (round-off floor) -- report a zero step so the caller's stagnation
+    // guard can finish the loop.
+    const double g0 = c0 + cy0 + Gdx_.dot(z2r_);
+    if (g0 >= 0.0) return 0.0;
+    // Wolfe-style curvature acceptance: |g(alpha)| <= c2 |g(0)| holds in
+    // a neighborhood of the 1D minimizer of the smooth convex slice and
+    // keeps the evaluation count low (often a single g(1)); c2 = 0.5 is
+    // well inside the standard Wolfe range for Newton directions.
+    const double gtol = 0.5 * (-g0);
 
-    double alpha_prev = 0.0;
-    double g_prev = grad_at(0.0);
-    if (g_prev >= 0.0) return 0.0;
-    for (const double t : bp_) {
-      const double gt = grad_at(t);
-      if (gt >= 0.0) {
-        return alpha_prev + (-g_prev) * (t - alpha_prev) / (gt - g_prev);
+    double alpha = 1.0;
+    double g = g_at(1.0);
+    if (std::abs(g) <= gtol) return alpha;
+
+    double alo = 0.0, glo = g0, ahi = 1.0, ghi = g;
+    if (g < 0.0) {
+      // Still descending at alpha = 1: expand (strong convexity
+      // guarantees g -> +infinity eventually).
+      alo = 1.0;
+      glo = g;
+      for (int k = 0; k < 12; ++k) {
+        alpha *= 2.0;
+        g = g_at(alpha);
+        if (std::abs(g) <= gtol) return alpha;
+        if (g > 0.0) break;
+        alo = alpha;
+        glo = g;
       }
-      alpha_prev = t;
-      g_prev = gt;
+      if (g < 0.0) return alpha;  // deep flat stretch; bounded step
+      ahi = alpha;
+      ghi = g;
     }
-    // Affine tail beyond the last breakpoint.
-    const double g2 = grad_at(alpha_prev + 1.0);
-    const double slope = g2 - g_prev;
-    if (slope <= 0.0) return alpha_prev + 1.0;  // pathological; bounded step
-    return alpha_prev + (-g_prev) / slope;
+
+    // Regula falsi with bisection safeguard on the increasing g.
+    for (int k = 0; k < 20; ++k) {
+      double amid = alo + (-glo) * (ahi - alo) / (ghi - glo);
+      const double span = ahi - alo;
+      if (!(amid > alo + 0.02 * span && amid < ahi - 0.02 * span) ||
+          !std::isfinite(amid)) {
+        amid = 0.5 * (alo + ahi);
+      }
+      g = g_at(amid);
+      alpha = amid;
+      if (std::abs(g) <= gtol) return alpha;
+      if (g >= 0.0) {
+        ahi = amid;
+        ghi = g;
+      } else {
+        alo = amid;
+        glo = g;
+      }
+    }
+    // Iteration cap: land on the bracket's descent side (g < 0 there, so
+    // the merit strictly decreased on [0, alo]). The caller re-solves the
+    // rows at the returned alpha.
+    return alo;
+  }
+
+  // Exact per-row minimization of the barrier subproblem for fixed x --
+  // the elastic analogue of the note's closed-form smooth multiplier
+  // update (docs/log_barrier_pdal.tex sec. 3), and the smooth counterpart
+  // of the active-set solver's dual snap. For fixed x (and centers), each
+  // row's (t, s1, z1, s2, z2) block is determined by F2 = F4 = F5 = 0 with
+  // z.s = kappa. The t-bound pair carries NO dual prox (mirroring the
+  // tight solver, where z_t is slaved to the fold, never proximally
+  // anchored -- anchoring it freezes z_t near penalty and kills the row's
+  // feasibility pull), so F4 gives s1 = t, z1 = kappa/t exactly. The row
+  // pair eliminates through its proximal equation F5: with
+  // d2 = (t - r) - mu z2k and mk = mu_in * kappa,
+  //   s2 = b_mk(d2),  mu z2 = b_mk(-d2)
+  // (the paired retraction, so z2.s2 = kappa to round-off), leaving one
+  // strictly increasing scalar equation per row,
+  //   F2(t) = penalty - kappa/t - z2(t) + rho (t - tk) = 0,   t > 0,
+  // solved by bracketed Newton whose out-of-bracket fallback is the
+  // frozen-z2 quadratic model rho t^2 + (penalty - z2 - rho tk) t - kappa
+  // = 0 (closed-form positive root; it solves the barrier + linear part
+  // exactly, so it jumps between the t ~ kappa/penalty inactive regime
+  // and the t ~ violation regime in one step). This absorbs
+  // arbitrarily large multiplier updates in closed form, so the coupled
+  // Newton only moves (x, y). With the rows at their exact optima, the
+  // condensed n x n step IS the Newton step of the reduced smooth system
+  // in (x, y) (implicit function theorem through the same elimination).
+  //
+  // Reads the row values from wGx_ (the caller keeps it at G x for the
+  // point being evaluated -- during the line search that is one axpy, not
+  // a matvec) and writes (tb_, v1_, v2_) plus the dual images z1r_, z2r_.
+  // ftol is the relative residual tolerance of the scalar solves: the
+  // line search passes a loose one (it only needs g(alpha) bracketing
+  // accuracy), every state-defining call uses round-off level -- a looser
+  // final tolerance leaves a systematic z2 offset of ftol * penalty that
+  // floors the dual residual (visible at penalty ~ 1e5 against
+  // eps_abs = 1e-8).
+  void row_update(double kappa_s, double ftol = 4e-16) {
+    const double mk = mu_in_ * kappa_s;
+    for (Eigen::Index i = 0; i < p_; ++i) {
+      const double r = wGx_[i] - h_[i];
+      const double w = penalty_[i];
+      const double a2 = r + mu_in_ * z2k_[i];
+      const double tc = tk_[i];
+      double z2 = 0.0;
+      // One sqrt serves both b_mk(-d) and its derivative (the stable
+      // branches of retraction / retraction_dcomp, inlined).
+      const auto fval = [&](double t, double* deriv) {
+        const double d = t - a2;
+        const double rr = std::sqrt(d * d + 4.0 * mk);
+        const double bm = d <= 0.0 ? 0.5 * (rr - d) : 2.0 * mk / (rr + d);
+        z2 = bm / mu_in_;
+        if (deriv != nullptr) {
+          const double small = 2.0 * mk / (rr * (rr + std::abs(d)));
+          const double bp = d >= 0.0 ? small : 1.0 - small;
+          *deriv = kappa_s / (t * t) + bp / mu_in_ + rho_;
+        }
+        return w - kappa_s / t - z2 + rho_ * (t - tc);
+      };
+      // Start from the previous t, floored into the barrier's natural
+      // scale so cold zeros are valid.
+      double t = std::max(tb_[i], kappa_s / (w + 1.0));
+      double lo = 0.0;
+      double hi = std::numeric_limits<double>::infinity();
+      bool fresh = false;  // z2 corresponds to the current t
+      for (int k = 0; k < 60; ++k) {
+        double ft;
+        const double f = fval(t, &ft);
+        fresh = true;
+        if (f > 0.0) {
+          hi = t;
+        } else {
+          lo = t;
+        }
+        const double fscale =
+            w + kappa_s / t + z2 + std::abs(rho_ * (t - tc));
+        if (std::abs(f) <= ftol * fscale) break;
+        double tn = t - f / ft;
+        if (!(tn > lo && tn < hi) || !std::isfinite(tn)) {
+          // Frozen-z2 quadratic model (stable positive-root formula): it
+          // solves the barrier + linear part exactly, jumping between the
+          // inactive and violated regimes in one step.
+          const double bq = w - z2 - rho_ * tc;
+          const double disc = std::sqrt(bq * bq + 4.0 * rho_ * kappa_s);
+          tn = bq >= 0.0 ? (2.0 * kappa_s) / (bq + disc)
+                         : (disc - bq) / (2.0 * rho_);
+          if (!(tn > lo && tn < hi) || !std::isfinite(tn)) {
+            tn = std::isfinite(hi) ? 0.5 * (lo + hi) : 2.0 * t + 1.0;
+          }
+        }
+        const bool done = std::abs(tn - t) <= 1e-14 * (1.0 + std::abs(tn));
+        t = tn;
+        fresh = false;
+        if (done) break;
+      }
+      if (!fresh) fval(t, nullptr);  // final pair at the accepted t
+      tb_[i] = t;
+      z1r_[i] = kappa_s / t;
+      z2r_[i] = z2;
+      v1_[i] = kappa_s / t - t;              // z1 - s1, exact manifold pair
+      v2_[i] = z2 - retraction(t - a2, mk);  // z2 - s2
+    }
+  }
+
+  // Inner stopping quantity: the max norm of the barrier-PDAL residuals
+  // at the current iterate (scaled frame, matching the absolute eta_in
+  double inner_residual(double kappa_s) {
+    barrier_kkt_fill(x_, tb_, y_, v1_, v2_, kappa_s, true);
+    double err = std::max(rf1_.lpNorm<Eigen::Infinity>(),
+                          rf2_.lpNorm<Eigen::Infinity>());
+    err = std::max({err, rf4_.lpNorm<Eigen::Infinity>(),
+                    rf5_.lpNorm<Eigen::Infinity>()});
+    if (m_ > 0) err = std::max(err, rf3_.lpNorm<Eigen::Infinity>());
+    return err;
+  }
+
+  // Barrier iterate (t, v1, v2) from the tight certificate of the current
+  // (x, z): the same reconstruction update_residuals reports, mapped
+  // through v = z - s per pair. Places the iterate exactly on the
+  // s.z = kappa manifold for any kappa.
+  void barrier_init() {
+    wGx_.noalias() = G_ * x_;
+    for (Eigen::Index i = 0; i < p_; ++i) {
+      const double r = wGx_[i] - h_[i];
+      const double ti = std::max(r + mu_in_ * (z_[i] - penalty_[i]), 0.0);
+      tb_[i] = ti;
+      v1_[i] = (penalty_[i] - z_[i]) - ti;      // z_t - s_t
+      v2_[i] = z_[i] - std::max(ti - r, 0.0);   // z_ineq - s_ineq
+    }
   }
 
   // ---- factorization cache ----
+  // K = Q + rho*I + (1/mu_eq) A'A + G' diag(lamr_) G into llt_.
   bool factor_kkt() {
-    Eigen::Index na = 0;
-    const double s = std::sqrt(1.0 / mu_in_);
-    for (Eigen::Index i = 0; i < p_; ++i) {
-      if (state_[static_cast<size_t>(i)] == 1) {
-        GS_.row(na) = s * G_.row(i);
-        ++na;
-      }
-    }
     K_.triangularView<Eigen::Lower>() = Q_;
     K_.diagonal().array() += rho_;
     if (m_ > 0) {
       K_.triangularView<Eigen::Lower>() += (1.0 / mu_eq_) * AtA_;
     }
-    if (na > 0) {
-      K_.selfadjointView<Eigen::Lower>().rankUpdate(
-          GS_.topRows(na).transpose());
+    if (p_ > 0 && lamr_.maxCoeff() > 0.0) {
+      GS_.noalias() = lamr_.cwiseSqrt().asDiagonal() * G_;
+      K_.selfadjointView<Eigen::Lower>().rankUpdate(GS_.transpose());
     }
     llt_.compute(K_);
     ++factor_count_;
@@ -971,13 +1227,34 @@ class Solver {
            std::isfinite(K_.diagonal().sum());
   }
 
+  // Refactor only when (rho, mu_eq), the matrices, or the row weights
+  // Lambda moved: reuse is accepted while every row's weight change
+  // perturbs K by less than kkt_cache_tol relative to its diagonal scale
+  // (|dLambda_i| ||G_i||^2 <= tol * max|diag K|, a bound on the spectral
+  // perturbation). Weights of decided rows freeze as kappa -> 0, so a
+  // settled configuration -- notably warm re-solves -- skips
+  // factorizations entirely; steps on a reused factor are inexact-Newton
+  // steps safeguarded by the merit line search. On LLT failure rho is
+  // escalated x100 (the slightly stale Lambda then only adds to the
+  // Jacobian inexactness, which the same safeguard covers).
   bool ensure_factor() {
-    bool need = !factored_ || matrix_dirty_ || f_rho_ != rho_ ||
-                f_mu_eq_ != mu_eq_ || f_mu_in_ != mu_in_;
-    if (!need) {
+    if (matrix_dirty_) {
       for (Eigen::Index i = 0; i < p_; ++i) {
-        const bool act = state_[static_cast<size_t>(i)] == 1;
-        if (act != (f_active_[static_cast<size_t>(i)] != 0)) {
+        g2_[i] = G_.row(i).squaredNorm();
+      }
+    }
+    bool need = !factored_ || matrix_dirty_ || f_rho_ != rho_ ||
+                f_mu_eq_ != mu_eq_;
+    if (!need) {
+      // Per-row acceptance: relative freeze of the row's own weight plus
+      // an absolute term anchored to the SMALLEST curvature in K (the
+      // max-diagonal alone lets mid-weight rows drift by amounts that are
+      // large against weakly-curved directions, capping the attainable
+      // accuracy on ill-conditioned endgames).
+      const double tol = settings.kkt_cache_tol;
+      for (Eigen::Index i = 0; i < p_; ++i) {
+        if (std::abs(lamr_[i] - f_lam_[i]) * g2_[i] >
+            tol * (f_lam_[i] * g2_[i] + f_kdiag_min_)) {
           need = true;
           break;
         }
@@ -998,11 +1275,8 @@ class Solver {
     matrix_dirty_ = false;
     f_rho_ = rho_;
     f_mu_eq_ = mu_eq_;
-    f_mu_in_ = mu_in_;
-    for (Eigen::Index i = 0; i < p_; ++i) {
-      f_active_[static_cast<size_t>(i)] =
-          state_[static_cast<size_t>(i)] == 1 ? 1 : 0;
-    }
+    f_lam_ = lamr_;
+    f_kdiag_min_ = K_.diagonal().minCoeff();
     return true;
   }
 
@@ -1011,7 +1285,7 @@ class Solver {
   // Closed-form prox of kappa*(-log): the positive root of
   // s^2 - v s - kappa = 0, i.e. b_k(v) = (v + sqrt(v^2 + 4 kappa))/2, with
   // the cancellation-free branch b_k(v) = 2 kappa / (sqrt(..) - v) for
-  // v < 0 (docs/log_barrier_admm_note.tex).
+  // v < 0 (docs/log_barrier_pdal.tex eq. 24).
   static double retraction(double v, double kappa) {
     const double r = std::sqrt(v * v + 4.0 * kappa);
     return v >= 0.0 ? 0.5 * (v + r) : 2.0 * kappa / (r - v);
@@ -1024,6 +1298,101 @@ class Solver {
     const double r = std::sqrt(v * v + 4.0 * kappa);
     const double small = 2.0 * kappa / (r * (r + std::abs(v)));
     return v >= 0.0 ? small : 1.0 - small;
+  }
+
+  // ---- shared barrier machinery (forward inner loop AND relax()) ----
+
+  // Materialize the retraction pairs (z1r_, s1r_, z2r_, s2r_) and the
+  // barrier-PDAL residuals rf1_..rf5_ at the given point:
+  //   F1 = Q x + q + A'y + G'z2 [+ rho (x - xk)]
+  //   F2 = penalty - z1 - z2    [+ rho (t - tk)]
+  //   F3 = A x - b              [+ mu_eq (yk - y)]
+  //   F4 = s1 - t               (no dual prox: z_t is barrier-slaved)
+  //   F5 = G x + s2 - h - t     [+ mu_in (z2k - z2)]
+  // with_prox adds the bracketed proximal terms against the current
+  // centers (xk_, tk_, yk_, z2k_); relax() calls without them (its
+  // centers sit at the iterate, where they vanish identically).
+  void barrier_kkt_fill(const VectorXd& x, const VectorXd& t,
+                        const VectorXd& y, const VectorXd& v1,
+                        const VectorXd& v2, double kappa_s, bool with_prox) {
+    for (Eigen::Index i = 0; i < p_; ++i) {
+      // Each pair shares one sqrt (stable branches of retraction).
+      const double u1 = v1[i];
+      const double r1 = std::sqrt(u1 * u1 + 4.0 * kappa_s);
+      z1r_[i] = u1 >= 0.0 ? 0.5 * (u1 + r1) : 2.0 * kappa_s / (r1 - u1);
+      s1r_[i] = u1 >= 0.0 ? 2.0 * kappa_s / (r1 + u1) : 0.5 * (r1 - u1);
+      const double u2 = v2[i];
+      const double r2 = std::sqrt(u2 * u2 + 4.0 * kappa_s);
+      z2r_[i] = u2 >= 0.0 ? 0.5 * (u2 + r2) : 2.0 * kappa_s / (r2 - u2);
+      s2r_[i] = u2 >= 0.0 ? 2.0 * kappa_s / (r2 + u2) : 0.5 * (r2 - u2);
+    }
+    wQx_.noalias() = Q_ * x;
+    wGtz_.noalias() = G_.transpose() * z2r_;
+    rf1_ = wQx_ + q_ + wGtz_;
+    if (m_ > 0) {
+      wAty_.noalias() = A_.transpose() * y;
+      rf1_ += wAty_;
+      wAx_.noalias() = A_ * x;
+      rf3_ = wAx_ - b_;
+    }
+    rf2_ = penalty_ - z1r_ - z2r_;
+    wGx_.noalias() = G_ * x;
+    rf4_ = s1r_ - t;
+    rf5_ = s2r_ + wGx_ - h_ - t;
+    if (with_prox) {
+      rf1_ += rho_ * (x - xk_);
+      rf2_ += rho_ * (t - tk_);
+      if (m_ > 0) rf3_ += mu_eq_ * (yk_ - y);
+      rf5_ += mu_in_ * (z2k_ - z2r_);
+    }
+  }
+
+  // E^{-1} and the condensed row weights from the pair weights beta1/2:
+  //   E = rho + beta1 + beta2,  Lambda = beta2 (rho + beta1) / E.
+  // With beta = z/s (relax) these are qpax's elastic weights; with the
+  // dual-proximal beta = b'/(b'(-v) + mu_in b') (forward pass) they are
+  // bounded by 1/mu_in uniformly in kappa.
+  void condense_weights(double rho) {
+    einvr_ = ((beta1_ + beta2_).array() + rho).cwiseInverse();
+    lamr_ = beta2_.array() * (beta1_.array() + rho) * einvr_.array();
+  }
+
+  // Newton direction of the condensed barrier system: reads the residuals
+  // rf1_..rf5_ and the weights beta1_/beta2_/dhat1_/dhat2_/einvr_ (which
+  // must match the factorization in llt), writes (dxr_, dtr_, dyr_,
+  // dv1r_, dv2r_). Eliminating (dv1, dv2, dt) row-wise:
+  //   Dhat dv1 = F4 - dt,   Dhat dv2 = F5 + G dx - dt,
+  //   E dt = beta2 G dx + g,   g = beta1 F4 + beta2 F5 - F2,
+  // leaves K dx = -F1 - (1/mu_eq) A'F3 - G'(beta2 (F5 - g/E)) and
+  // dy = (A dx + F3)/mu_eq.
+  void barrier_direction(double mu_eq,
+                         const Eigen::LLT<MatrixXd, Eigen::Lower>& llt) {
+    wr_ = beta1_.cwiseProduct(rf4_) + beta2_.cwiseProduct(rf5_) - rf2_;
+    pvr_ = beta2_.cwiseProduct(rf5_ - einvr_.cwiseProduct(wr_));
+    rhs_x_ = -rf1_;
+    rhs_x_.noalias() -= G_.transpose() * pvr_;
+    if (m_ > 0) {
+      rhs_x_.noalias() -= (1.0 / mu_eq) * (A_.transpose() * rf3_);
+    }
+    dxr_ = llt.solve(rhs_x_);
+    // One step of iterative refinement against the staged K_ (which
+    // matches llt by construction): the condensed matrix carries
+    // curvatures from rho up to max(1/mu_eq, 1/mu_in) row weights, and at
+    // cond(K) ~ 1e10+ the plain LLT solve's cond * eps error becomes the
+    // dual-residual floor in weakly-curved directions (e.g. barely
+    // regularized force variables outside every inequality row).
+    verr_.noalias() = K_.selfadjointView<Eigen::Lower>() * dxr_;
+    verr_ -= rhs_x_;
+    dxr_ -= llt.solve(verr_);
+    Gdx_.noalias() = G_ * dxr_;
+    dtr_ = einvr_.cwiseProduct(beta2_.cwiseProduct(Gdx_) + wr_);
+    if (m_ > 0) {
+      dyr_.noalias() = A_ * dxr_;
+      dyr_ += rf3_;
+      dyr_ /= mu_eq;
+    }
+    dv1r_ = (rf4_ - dtr_).cwiseQuotient(dhat1_);
+    dv2r_ = (rf5_ + Gdx_ - dtr_).cwiseQuotient(dhat2_);
   }
 
   // Residuals of the kappa-relaxed KKT at (xr, tr, yr, v1r, v2r), with the
@@ -1045,25 +1414,7 @@ class Solver {
     const auto ssq_us = [](const VectorXd& v, const VectorXd& s) {
       return v.size() > 0 ? v.cwiseProduct(s).squaredNorm() : 0.0;
     };
-    for (Eigen::Index i = 0; i < p_; ++i) {
-      z1r_[i] = retraction(v1r_[i], kappa_s);
-      s1r_[i] = retraction(-v1r_[i], kappa_s);
-      z2r_[i] = retraction(v2r_[i], kappa_s);
-      s2r_[i] = retraction(-v2r_[i], kappa_s);
-    }
-    wQx_.noalias() = Q_ * xr_;
-    wGtz_.noalias() = G_.transpose() * z2r_;
-    rf1_ = wQx_ + q_ + wGtz_;
-    if (m_ > 0) {
-      wAty_.noalias() = A_.transpose() * yr_;
-      rf1_ += wAty_;
-      wAx_.noalias() = A_ * xr_;
-      rf3_ = wAx_ - b_;
-    }
-    rf2_ = penalty_ - z1r_ - z2r_;
-    wGx_.noalias() = G_ * xr_;
-    rf4_ = s1r_ - tr_;
-    rf5_ = s2r_ + wGx_ - h_ - tr_;
+    barrier_kkt_fill(xr_, tr_, yr_, v1r_, v2r_, kappa_s, false);
     relax_dual_res_ =
         std::max(inf_us(rf1_, inv_cdx_), inf_us(rf2_, z_us_));
     relax_primal_res_ =
@@ -1242,14 +1593,20 @@ class Solver {
   VectorXd q_, b_, h_, penalty_;
   MatrixXd AtA_;  // cached A^T A (lower triangle valid), only when m_ > 0
 
-  // Iterates and prox centers (persist across solves for warm starting)
+  // Iterates and prox centers. (x, y, z) persist across solves for warm
+  // starting; the barrier coordinates (tb, v1, v2) are re-derived from
+  // them at the start of every solve (barrier_init) and live only within
+  // it, together with their centers (tk, v1k, v2k, z1k, z2k).
   VectorXd x_, y_, z_;
-  VectorXd xk_, yk_, zk_;
+  VectorXd xk_, yk_;
+  VectorXd tb_, v1_, v2_;
+  VectorXd tk_, v1k_, v2k_, z2k_, zk_;
   bool have_warm_ = false;
   bool explicit_warm_ = false;
 
-  // Proximal / AL state (persists across solves)
+  // Proximal / AL / central-path state (persists across solves)
   double rho_ = 0, mu_eq_ = 0, mu_in_ = 0;
+  double kappa_ = 0;
 
   // Ruiz scaling state (identity when ruiz_ is false)
   bool ruiz_ = false;
@@ -1258,14 +1615,11 @@ class Solver {
   VectorXd inv_cdx_, inv_de_, inv_di_;      // residual unscaling
   VectorXd y_us_, z_us_;                    // dual unscaling (de/c, di/c)
 
-  // Factorization cache
+  // Factorization cache (Lambda fingerprint, see ensure_factor)
   bool matrix_dirty_ = true, factored_ = false;
-  double f_rho_ = 0, f_mu_eq_ = 0, f_mu_in_ = 0;
-  std::vector<signed char> f_active_;
+  double f_rho_ = 0, f_mu_eq_ = 0, f_kdiag_min_ = 0;
+  VectorXd f_lam_, g2_;
   int factor_retries_ = 0, factor_count_ = 0, iters_total_ = 0;
-
-  // Row states: 0 inactive, 1 active, 2 saturated
-  std::vector<signed char> state_;
 
   // Residual scalars
   double primal_res_ = 0, dual_res_ = 0;
@@ -1273,20 +1627,23 @@ class Solver {
   double primal_obj_ = 0, duality_gap_ = 0, duality_gap_rel_ = 0;
 
   // Workspace (allocated in setup, reused every iteration)
-  VectorXd S_, zhat_, t_, s2_, r_, din_, pv_, tp_;
-  VectorXd verr_, dyrhs_, rhs_x_, dx_, dy_, dz_, Qdx_, Adx_, Gdx_;
-  VectorXd wQx_, wGtz_, wGtd_, wAty_, wAx_, wGx_;
+  VectorXd zhat_, t_, s2_, r_;
+  VectorXd verr_, dyrhs_, rhs_x_, Gdx_;
+  VectorXd wQx_, wGtz_, wAty_, wAx_, wGx_;
+  VectorXd beta1_, beta2_, dhat1_, dhat2_;  // barrier pair weights
+  VectorXd zc_;  // linearized certificate dual of the inner loop
   MatrixXd GS_, K_;
   Eigen::LLT<MatrixXd, Eigen::Lower> llt_;
-  std::vector<double> bp_;
 
-  // relax() iterate and workspace (allocated in setup). Kept separate from
-  // the solve() state so the relaxation never disturbs warm starting or the
-  // factorization cache.
+  // relax() iterate and workspace (allocated in setup). The iterate and
+  // factorization are kept separate from the solve() state so the
+  // relaxation never disturbs warm starting or the factorization cache;
+  // the residual/direction scratch (rf*, einvr_, lamr_, d*r_) is shared
+  // with the forward inner loop, which recomputes it every iteration.
   VectorXd xr_, tr_, yr_, v1r_, v2r_;      // iterate (v parametrizes z, s)
   VectorXd z1r_, z2r_, s1r_, s2r_;         // retraction images of v
-  VectorXd rf1_, rf2_, rf3_, rf4_, rf5_;   // relaxed-KKT residuals
-  VectorXd d1r_, d2r_, einvr_, lamr_, wr_, pvr_;  // condensation scalings
+  VectorXd rf1_, rf2_, rf3_, rf4_, rf5_;   // barrier-KKT residuals
+  VectorXd einvr_, lamr_, wr_, pvr_;       // condensation scalings
   VectorXd dxr_, dtr_, dyr_, dv1r_, dv2r_;        // Newton step
   Eigen::LLT<MatrixXd, Eigen::Lower> llt_r_;
   double relax_primal_res_ = 0, relax_dual_res_ = 0;
