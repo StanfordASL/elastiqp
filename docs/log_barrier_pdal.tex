@@ -1,0 +1,287 @@
+\documentclass[10pt]{article}
+
+\usepackage[letterpaper,margin=0.82in]{geometry}
+\usepackage{amsmath,amssymb,mathtools,bm}
+\usepackage{microtype}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+
+\setlength{\parindent}{1.25em}
+\setlength{\parskip}{0pt}
+\setlist[itemize]{leftmargin=2.1em,itemsep=0.25em,topsep=0.35em}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\one}{\mathbf{1}}
+\newcommand{\diag}{\operatorname{Diag}}
+\newcommand{\prox}{\operatorname{prox}}
+\newcommand{\ind}{\mathrm{I}}
+\newcommand{\pos}[1]{\left[#1\right]_{+}}
+
+\title{\vspace{-2.2em}Log-Barrier Primal--Dual Augmented Lagrangians\\
+\large A short note on smooth multiplier updates and implicit complementarity}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-2.4em}
+
+\begin{abstract}
+This note replaces the nonnegative-orthant indicator in a standard slack-variable quadratic program by a logarithmic barrier and applies a primal--dual proximal augmented Lagrangian method. The regularized inequality saddle point admits a closed-form smooth multiplier and slack update. This update replaces the hard orthant projection of ordinary primal--dual augmented Lagrangian methods by exactly the paired retraction used by Arrizabalaga, Tracy, and Manchester~\cite{arrizabalaga2026single,arrizabalaga2026implicit}, up to the natural scaling of the dual proximal parameter. We also give a symmetric reduced Newton system and distinguish this barrier method from ordinary active-set PDAL methods such as ProxQP~\cite{bambade2022proxqp}.
+\end{abstract}
+
+\section{Convex QP preliminaries}
+
+Following~\cite{arrizabalaga2026single,arrizabalaga2026implicit}, consider the convex quadratic program
+\begin{equation}
+\begin{aligned}
+\underset{x\in\R^n}{\operatorname{minimize}}\quad
+    &\frac12x^\top Qx+q^\top x
+&\qquad\Longleftrightarrow\qquad
+\underset{x\in\R^n,\,s\in\R^p}{\operatorname{minimize}}\quad
+    &\frac12x^\top Qx+q^\top x\\
+\text{subject to}\quad
+    &Ax=b,\qquad Gx\leq h,
+&
+\text{subject to}\quad
+    &Ax=b,\qquad Gx+s=h,\qquad s\geq0.
+\end{aligned}
+\end{equation}
+Here $Q\in\mathbb{S}_+^n$, $q\in\R^n$, $A\in\R^{m\times n}$, $b\in\R^m$, $G\in\R^{p\times n}$, and $h\in\R^p$. The variables $y\in\R^m$ and $z\in\R^p$ denote the multipliers of $Ax=b$ and $Gx+s=h$, respectively. The KKT residuals and cone conditions are
+\begin{equation}
+\begin{aligned}
+r_t&:=Qx+q+A^\top y+G^\top z=0,
+&r_c&:=z\odot s=0,\\
+r_e&:=Ax-b=0,
+&r_i&:=Gx+s-h=0,
+\qquad s,z\geq0.
+\end{aligned}
+\end{equation}
+Equivalently, the slack formulation has objective
+\begin{equation}
+f(x)+\ind_{\R_+^p}(s),
+\qquad
+f(x):=\frac12x^\top Qx+q^\top x,
+\end{equation}
+subject to the two affine equalities in~(1). For a central-path parameter $\kappa>0$, replace the indicator by the extended-valued log barrier
+\begin{equation}
+\phi_\kappa(s):=
+\begin{cases}
+-\kappa\displaystyle\sum_{i=1}^p\log s_i,&s>0,\\
++\infty,&\text{otherwise}.
+\end{cases}
+\end{equation}
+The stationarity condition of the resulting barrier problem with respect to $s$ is $z-\kappa s^{-1}=0$. Hence every barrier solution satisfies
+\begin{equation}
+z\odot s=\kappa\one,
+\qquad s,z>0.
+\end{equation}
+
+\section{Barrier primal--dual augmented Lagrangian}
+
+Let $(x^k,y^k,z^k)$ be the current primal--dual center. Following the proximal method of multipliers~\cite{rockafellar1976}, introduce a primal proximal regularization $\rho>0$ and dual proximal regularizations $\mu_e,\mu_i>0$. The barrier PDAL saddle function is
+\begin{align}
+\mathcal{M}_{\rho,\mu_e,\mu_i,\kappa}^k(x,s,y,z)
+:={}&f(x)+\phi_\kappa(s)
+  +y^\top(Ax-b)+z^\top(Gx+s-h)\notag\\
+&+\frac{\rho}{2}\lVert x-x^k\rVert_2^2
+  -\frac{\mu_e}{2}\lVert y-y^k\rVert_2^2
+  -\frac{\mu_i}{2}\lVert z-z^k\rVert_2^2.
+\end{align}
+One proximal PDAL step computes, exactly or inexactly,
+\begin{equation}
+(x^{k+1},s^{k+1},y^{k+1},z^{k+1})
+\approx
+\underset{x,\,s>0}{\operatorname{argmin}}
+\;\underset{y,z}{\operatorname{argmax}}
+\mathcal{M}_{\rho,\mu_e,\mu_i,\kappa}^k(x,s,y,z).
+\end{equation}
+The corresponding optimality equations are
+\begin{equation}
+\begin{aligned}
+Qx+q+A^\top y+G^\top z+\rho(x-x^k)&=0,\\
+Ax-b+\mu_e(y^k-y)&=0,\\
+Gx+s-h+\mu_i(z^k-z)&=0,\\
+z-\kappa s^{-1}&=0.
+\end{aligned}
+\end{equation}
+At a fixed point of the proximal iteration, the proximal terms vanish and~(8) reduces to the KKT system of the barrier QP. Sending $\kappa\downarrow0$ recovers the original complementarity conditions under the usual regularity assumptions.
+
+\section{Closed-form smooth multiplier update}
+
+For fixed $x$, the equality equation in~(8) gives
+\begin{equation}
+y=y^k+\frac{1}{\mu_e}(Ax-b).
+\end{equation}
+The inequality equations also admit a closed-form solution. Define
+\begin{equation}
+t:=z^k+\frac{1}{\mu_i}(Gx-h),
+\qquad
+\nu:=\frac{\kappa}{\mu_i}.
+\end{equation}
+Eliminating $s$ from the last two equations in~(8) gives, componentwise,
+\begin{equation}
+z_i^2-t_i z_i-\nu=0.
+\end{equation}
+Only the positive root is compatible with the barrier domain, so
+\begin{equation}
+\boxed{
+z=b_\nu(t),
+\qquad
+s=\mu_i b_\nu(-t),
+\qquad
+b_\nu(a):=\frac{a+\sqrt{a^2+4\nu}}{2},
+\qquad
+\nu=\frac{\kappa}{\mu_i}.}
+\end{equation}
+The identity $b_\nu(a)b_\nu(-a)=\nu$ immediately gives
+\begin{equation}
+z\odot s=\mu_i\nu\one=\kappa\one.
+\end{equation}
+Equivalently, define the scaled multiplier $u:=\mu_i z$ and
+\begin{equation}
+\bar t:=\mu_i z^k+Gx-h,
+\qquad
+\bar\kappa:=\mu_i\kappa.
+\end{equation}
+Using the scaling identity $c\,b_\nu(a)=b_{c^2\nu}(ca)$ gives the paired form
+\begin{equation}
+\boxed{
+u=b_{\bar\kappa}(\bar t),
+\qquad
+s=b_{\bar\kappa}(-\bar t),
+\qquad
+u\odot s=\bar\kappa\one.}
+\end{equation}
+Thus the log-barrier replacement has a particularly simple interpretation in ordinary PDAL. The hard multiplier projection
+\begin{equation}
+z=\pos{z^k+\frac{1}{\mu_i}(Gx-h)}
+\end{equation}
+is replaced by the smooth map
+\begin{equation}
+z=b_{\kappa/\mu_i}\!\left(z^k+\frac{1}{\mu_i}(Gx-h)\right).
+\end{equation}
+Since $b_\nu(a)\to[a]_+$ as $\nu\downarrow0$, ordinary PDAL is recovered in the zero-barrier limit. In proximal notation, $b_\nu=\prox_{\nu(-\log)}$; see, for example, Parikh and Boyd~\cite{parikh2014proximal}.
+
+\section{Implicit complementarity and a symmetric Newton system}
+
+The closed-form update is useful when the primal and dual blocks are alternated. A ProxQP-style implementation instead solves the coupled proximal subproblem. Introduce the implicit-complementarity coordinate $v\in\R^p$ and retract after every step using
+\begin{equation}
+z=b_\kappa(v),
+\qquad
+s=b_\kappa(-v),
+\qquad
+v=z-s.
+\end{equation}
+The proximal equations~(8) reduce to the smooth residual system
+\begin{equation}
+\begin{aligned}
+R_t^k(x,y,v)
+&:=Qx+q+A^\top y+G^\top b_\kappa(v)+\rho(x-x^k)=0,\\
+R_e^k(x,y)
+&:=Ax-b+\mu_e(y^k-y)=0,\\
+R_i^k(x,v)
+&:=Gx+b_\kappa(-v)-h+\mu_i\bigl(z^k-b_\kappa(v)\bigr)=0.
+\end{aligned}
+\end{equation}
+Let
+\begin{equation}
+B:=\diag\!\left(b_\kappa'(v)\right),
+\qquad
+C:=\diag\!\left(b_\kappa'(-v)\right)=I-B,
+\qquad
+D:=C+\mu_iB,
+\qquad
+W:=CD^{-1}.
+\end{equation}
+The direct linearization of~(19) has the block derivatives $G^\top B$ and $-D$. Subtracting $G^\top W$ times the inequality row from the stationarity row gives the symmetric system
+\begin{equation}
+\boxed{
+\begin{bmatrix}
+Q+\rho I-G^\top WG&G^\top&A^\top\\
+G&-D&0\\
+A&0&-\mu_eI
+\end{bmatrix}
+\begin{bmatrix}
+\Delta x\\ \Delta v\\ \Delta y
+\end{bmatrix}
+=-
+\begin{bmatrix}
+R_t^k-G^\top W R_i^k\\
+R_i^k\\
+R_e^k
+\end{bmatrix}.}
+\end{equation}
+After computing a step length $\alpha$, update $(x,y,v)$ and retract:
+\begin{equation}
+x\leftarrow x+\alpha\Delta x,
+\qquad
+y\leftarrow y+\alpha\Delta y,
+\qquad
+v\leftarrow v+\alpha\Delta v,
+\qquad
+z,s\leftarrow b_\kappa(v),b_\kappa(-v).
+\end{equation}
+The slack and multiplier remain positive and satisfy perturbed complementarity after every completed step. Moreover,
+\begin{equation}
+0\prec B,C\prec I,
+\qquad
+\min(1,\mu_i)I\preceq D\preceq\max(1,\mu_i)I,
+\qquad
+0\preceq W\preceq I.
+\end{equation}
+Consequently, for fixed $\mu_i>0$, the complementarity-dependent blocks in~(21) remain bounded as $\kappa\downarrow0$. This removes the explicit slack-to-multiplier ratios that occur in standard primal--dual interior-point reductions. It does not, by itself, guarantee that the complete system is well conditioned; conditioning also depends on the problem data, degeneracy, and proximal parameters.
+
+For numerical evaluation, the algebraically equivalent branch
+\begin{equation}
+b_\nu(a)=\frac{2\nu}{\sqrt{a^2+4\nu}-a}
+\qquad (a<0)
+\end{equation}
+avoids cancellation in $a+\sqrt{a^2+4\nu}$.
+
+\section{Relation to ordinary PDAL and scope}
+
+The construction above is a smooth barrier analogue of the primal--dual proximal augmented Lagrangian method underlying ProxQP. Its main distinctions are:
+\begin{itemize}
+\item \textbf{Smoothness.} For fixed $\kappa>0$, the hard projection and discrete active-set changes are replaced by the smooth map $b_{\kappa/\mu_i}$.
+\item \textbf{Relaxed complementarity.} The method solves a barrier QP satisfying $s^\top z=p\kappa$, rather than the original QP with exact complementarity.
+\item \textbf{Linear algebra.} Ordinary PDAL can discard inactive inequality rows after active-set identification. Barrier PDAL generally retains every inequality, but its implicit-complementarity blocks remain bounded.
+\item \textbf{Differentiation.} The fixed-$\kappa$ solution map is smooth and therefore convenient for automatic and implicit differentiation. The resulting derivative is the derivative of the relaxed problem and depends on $\kappa$.
+\end{itemize}
+
+For a fixed $\kappa>0$, the proximal iteration~(7) targets the saddle point of the barrier problem under the usual convexity and existence assumptions. To solve the original QP, one should place this iteration inside an outer schedule $\kappa_j\downarrow0$, warm-starting each barrier problem. Changing $\kappa$ at every PDAL iteration without controlling the proximal-subproblem accuracy is instead an inexact path-following heuristic and requires a separate convergence argument.
+
+An alternative for differentiable optimization is to solve the original QP with ordinary PDAL, relax the converged solution to a chosen $\kappa_{\mathrm{relax}}>0$, and differentiate the relaxed system. This separates nominal solution accuracy from gradient smoothness, following the strategy of~\cite{arrizabalaga2026single}.
+
+\begin{thebibliography}{9}
+
+\bibitem{arrizabalaga2026single}
+J.~Arrizabalaga, K.~Tracy, and Z.~Manchester.
+\newblock A differentiable interior-point method in single precision.
+\newblock \emph{arXiv preprint arXiv:2605.17913}, 2026.
+\newblock \url{https://arxiv.org/abs/2605.17913}.
+
+\bibitem{arrizabalaga2026implicit}
+J.~Arrizabalaga and Z.~Manchester.
+\newblock Implicit primal--dual interior-point methods for quadratic programming.
+\newblock \emph{arXiv preprint arXiv:2604.00364}, 2026.
+
+\bibitem{bambade2022proxqp}
+A.~Bambade, S.~El-Kazdadi, A.~Taylor, and J.~Carpentier.
+\newblock PROX-QP: Yet another quadratic programming solver for robotics and beyond.
+\newblock In \emph{Robotics: Science and Systems}, 2022.
+
+\bibitem{rockafellar1976}
+R.~T. Rockafellar.
+\newblock Augmented Lagrangians and applications of the proximal point algorithm in convex programming.
+\newblock \emph{Mathematics of Operations Research}, 1(2):97--116, 1976.
+
+\bibitem{parikh2014proximal}
+N.~Parikh and S.~Boyd.
+\newblock Proximal algorithms.
+\newblock \emph{Foundations and Trends in Optimization}, 1(3):127--239, 2014.
+\newblock \url{https://doi.org/10.1561/2400000003}.
+
+\end{thebibliography}
+
+\end{document}
