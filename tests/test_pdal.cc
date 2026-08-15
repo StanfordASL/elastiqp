@@ -8,6 +8,7 @@
 // problems, including the kappa-relaxed central point that relax()
 // targets for differentiation
 
+#include <cmath>
 #include <cstdio>
 #include <random>
 
@@ -801,6 +802,73 @@ int main() {
           tight.converged == 1 && rel.converged == 1 && moved > 1e-8 &&
               again.converged == 1 && again.iters <= 2 && dx < 1e-9,
           dx, "|dx|");
+  }
+
+  std::printf("PDAL: relax(warm) chains across data updates\n");
+  {
+    // Warm-started relax (the default): on a drifting problem the next
+    // call continues from the previous relaxed point, whose offset is
+    // dominated by LINEAR residual drift that Newton removes
+    // quadratically; the tight-retraction start instead re-pays the
+    // linear-rate barrier-curvature walk on every call. The chain must
+    // land on the cold-start point and never cost more total iterations.
+    // Dedicated rng: keeps the shared stream's downstream instances
+    // intact (see the fd_rng note below).
+    std::mt19937 wrng(7);
+    QPData qp = problem_gen::InfeasibleEq(wrng, 16, 4, 50, 12);
+    const VectorXd penalty = VectorXd::Constant(50, 10.0);
+    elastiqp::Solver solver;
+    solver.settings = TightSettings();
+    solver.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
+    bool ok = true;
+    double dmax = 0;
+    int warm_iters = 0, cold_iters = 0;
+    for (int tick = 0; tick < 8; ++tick) {
+      if (tick > 0) {  // smooth heterogeneous control-loop-scale drift
+        for (Eigen::Index i = 0; i < qp.q.size(); ++i) {
+          qp.q[i] += 1e-3 * std::sin(0.7 * tick + static_cast<double>(i));
+        }
+        for (Eigen::Index i = 0; i < qp.h.size(); ++i) {
+          qp.h[i] += 1e-3 * std::cos(0.3 * tick + static_cast<double>(i));
+        }
+        solver.set_q(qp.q);
+        solver.set_h(qp.h);
+      }
+      ok = ok && solver.solve().converged == 1;
+      const elastiqp::Solution w = solver.relax(1e-3, 1e-10, 50);  // warm
+      const elastiqp::Solution c =
+          solver.relax(1e-3, 1e-10, 50, /*warm=*/false);
+      ok = ok && w.converged == 1 && c.converged == 1;
+      warm_iters += w.iters;
+      cold_iters += c.iters;
+      dmax = std::max(dmax, (w.x - c.x).lpNorm<Eigen::Infinity>());
+    }
+    // At control-loop drift the chain wins (measured here ~40 vs ~60
+    // iterations; ~5x wall time at robot scale, see bench_diff_robot).
+    // The margin below is deliberate slack, not the expectation: when a
+    // data step flips the activity of many weakly-active rows (drift
+    // ~1e-2 on this instance does), the warm start re-pays the barrier
+    // curvature on the flipped rows and can cost MORE than the
+    // retraction start -- the chain's advantage is regime-dependent, and
+    // this check only pins "same point, no blow-up".
+    std::printf("  warm iters=%d cold iters=%d\n", warm_iters, cold_iters);
+    Check("warm chain lands on the cold-start point",
+          ok && dmax < 1e-7 && warm_iters <= cold_iters + 8, dmax, "|dx|");
+
+    // Gradient-only pattern: a data update followed by relax() with NO
+    // intervening solve() must still converge from the chain (Ruiz
+    // scaling is fixed at setup, so the frame is unchanged).
+    qp.q.array() += 1e-2;
+    solver.set_q(qp.q);
+    const elastiqp::Solution g = solver.relax(1e-3, 1e-10, 50);
+    elastiqp::Solver ref;
+    ref.settings = TightSettings();
+    ref.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
+    ref.solve();
+    const elastiqp::Solution rc = ref.relax(1e-3, 1e-10, 50);
+    const double dg = (g.x - rc.x).lpNorm<Eigen::Infinity>();
+    Check("gradient-only relax (no solve) matches",
+          g.converged == 1 && rc.converged == 1 && dg < 1e-7, dg, "|dx|");
   }
 
   {

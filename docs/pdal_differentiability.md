@@ -204,6 +204,59 @@ many conflicting rows, degenerate/weakly-active, m = 0, p ≫ n), where the
 literal ADMM iteration needed hundreds-to-thousands of sweeps or diverged
 when over-scaled.
 
+### Warm-starting the relaxation across solves (2026-08-15)
+
+`relax()` keeps its converged iterate, and by default (`warm = true`) the
+next call continues from it instead of the tight retraction. In a control
+loop this chains the relaxed points tick to tick, and it is much cheaper
+than restarting from the tight certificate:
+
+- The retraction start has a small O(κ) residual but sits at the boundary
+  of the barrier hyperbola; Newton then pays `log2(res0/κ) + ~3`
+  linear-rate (×0.5/iter) halvings traversing that curvature — the ~10
+  iterations × 1 factorization each that dominate the relax cost at robot
+  scale.
+- The previous tick's relaxed point has a *large* residual after a data
+  update (tick drift ~1e-1 on the robot sequences), but the drift lives in
+  the **linear** residual blocks (F1/F3/F5), which one Newton step removes
+  quadratically. Residual size is not the basin metric — an earlier
+  warm-start design gated adoption on the candidate's residual being
+  within `0.02·sqrt(κ)` and therefore never adopted; do not reintroduce
+  such a gate.
+
+Measured on the robot sequences (`bench_diff_robot`, ruiz, tol 1e-8,
+κ ∈ {1e-3, 1e-4, 1e-6}): the warm chain converges in mean 2.0 / max 3
+Newton iterations vs 8.4–10 from the retraction (hum-wbc: ~67 µs vs
+~310 µs; forward solve ~46 µs), 0/250 failures at every κ, landing on the
+same point (Δx ~2e-6 relative at ~1e10 conditioning, vjp gradients agree
+to ~2e-6 at κ = 1e-3). Stale chains degrade gracefully: warm-starting
+from a relaxed point 25 ticks old still converges in 3–5 iterations.
+
+The advantage is regime-dependent: it requires the smoothed row
+configuration to be mostly stable across calls. When a data step flips
+the activity of many weakly-active rows (measured on a conflicted
+synthetic with per-tick drift ~1e-2, an order larger than the robot
+loops), the warm start re-pays the barrier curvature on every flipped
+row and costs *more* than the retraction start (~1.5× iterations). It
+still converges to the same point — the default stays `warm = true`
+because control loops are the target regime — but for sequences of
+essentially unrelated problems pass `warm = false`.
+
+Semantics:
+
+- The first call after `setup()` uses the retraction; a warm run that
+  fails to converge automatically redoes the solve from the retraction
+  (`iters` then counts both runs), and a non-converged result clears the
+  stored chain.
+- Ruiz scaling is fixed at `setup()`, so the chain survives `set_*()`
+  data updates without an intervening `solve()`: a gradient-only loop can
+  run `set_*()` + `relax()` alone.
+- Changing κ between calls is allowed (the stored `v` re-materializes on
+  the new manifold), at the cost of a few extra iterations.
+- The stateless JAX FFI path builds a fresh solver per call and is
+  unaffected; chaining there would require threading the previous relaxed
+  certificate through the FFI boundary.
+
 ### Limitation shared with the IPM
 
 Rows with `penalty_i = 0` admit no relaxed point: `z_t + z_ineq = 0` cannot

@@ -23,14 +23,20 @@
 //         solve(), then relax()
 // -- and reports per-tick timings for each phase, so cold vs warm and
 // forward vs differentiation (relax + vjp) costs are directly
-// comparable. The warm/cold split applies to the forward solve only;
-// relax() always starts from the retraction of the tick's tight
-// certificate. The vjp cost is identical in both paths and timed once.
+// comparable. The warm/cold split covers the relaxation too: the fresh
+// cold solver starts relax() from the retraction of the tick's tight
+// certificate every time, while the persistent solver's relax() (default
+// warm = true) chains from the previous tick's relaxed point. The vjp
+// cost is identical in both paths and timed once.
 //
 // Measured behavior on this problem (n = 4, p = 8): the warm forward
-// solve cuts mean iterations ~9 -> ~7.7 (~1.4x on wall time, more at
-// finer tick spacing), and relax() converges in ~2 Newton steps (its
-// floor) on both paths.
+// solve cuts mean iterations ~6.8 -> ~4.1 (~1.9x on wall time). The
+// relax chain is a wash here: the retraction start is already at its
+// ~1.6-iteration floor (8 rows, tiny O(kappa) residual) and the rotating
+// contact geometry keeps shifting the smoothed row configuration, so the
+// chained start averages ~1.9 iterations (~1 us either way). The chain's
+// payoff needs the retraction start to be expensive -- at robot scale it
+// is ~10 factorizations vs the chain's ~2 (see bench_diff_robot).
 //
 // A per-tick trace prints distance and gradient; away from corner
 // transitions |d(dist)/d(cx,cy)| ~ 1 (translating a face 1:1 with the

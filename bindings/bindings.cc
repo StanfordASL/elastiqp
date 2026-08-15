@@ -210,15 +210,22 @@ NB_MODULE(_core, m) {
                "KKT factorizations performed by the last solve()")
           .def(
               "relax",
-              [](Solver& s, double kappa, double tol, int max_iter)
-                  -> Solution { return s.relax(kappa, tol, max_iter); },
+              [](Solver& s, double kappa, double tol, int max_iter,
+                 bool warm) -> Solution {
+                return s.relax(kappa, tol, max_iter, warm);
+              },
               nb::arg("kappa"), nb::arg("tol") = 1e-6,
-              nb::arg("max_iter") = 50,
+              nb::arg("max_iter") = 50, nb::arg("warm") = true,
               "Walk the converged solution to the kappa-relaxed central "
               "point (s.z = kappa) for smooth differentiation, via the "
               "log-barrier retraction. Call after solve(); the returned "
               "Solution is the relaxed point, while the solver's own "
-              "iterate (used for warm starts) stays at the tight solution.")
+              "iterate (used for warm starts) stays at the tight solution. "
+              "With warm=True (default), repeated calls on a persistent "
+              "solver continue from the previous relaxed point -- in a "
+              "control loop this converges in ~2 Newton steps vs ~10 from "
+              "the tight retraction -- falling back to the retraction "
+              "start automatically if the warm run does not converge.")
           .def(
               "set_warm_start",
               [](Solver& s, const Eigen::VectorXd& x,

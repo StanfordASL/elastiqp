@@ -5,9 +5,12 @@
 // per tick runs the full differentiable-solve pipeline: warm forward solve,
 // then relax(kappa) to the kappa-relaxed central point, then one KKT vjp
 // (elastiqp/kkt_vjp.hpp) -- the pattern of a differentiable-MPC loop. The
-// relax() always starts from the retraction of the tick's tight certificate
-// (the standard cold start). The robot problems span n=6..46, m=0..18,
-// p=24..132 at drift ~1e-3..1e-4 per tick.
+// relaxation is timed both ways per tick: cold (warm=false, from the
+// retraction of the tick's tight certificate -- the stateless/JAX cost)
+// and warm (the default tick-to-tick chain from the previous relaxed
+// point -- the persistent control-loop cost; the vjp runs at this point).
+// The robot problems span n=6..46, m=0..18, p=24..132 at drift
+// ~1e-3..1e-4 per tick.
 //
 // Usage: bench_diff_robot [sequence_file] [--csv <dir>]
 // With --csv, writes diff_robot_summary.csv (one row per scenario x kappa)
@@ -50,17 +53,20 @@ constexpr int kRelaxMaxIter = 50;
 constexpr double kKappas[] = {1e-3, 1e-4, 1e-6};
 
 struct TickRow {
-  double fwd_us = 0;    // warm forward solve
-  double relax_us = 0;
-  int relax_iters = 0;  // relax() Newton steps
+  double fwd_us = 0;     // warm forward solve
+  double relax_us = 0;   // cold relax (retraction start, warm=false)
+  int relax_iters = 0;
+  double rxw_us = 0;     // warm relax (tick-to-tick chain, the default)
+  int rxw_iters = 0;
   double vjp_us = 0;
 };
 
 struct CellStats {
   std::vector<TickRow> ticks;
-  int fails_relax = 0;  // relax() did not converge
-  int vjp_bad = 0;      // non-finite backward pass
-  int fails() const { return fails_relax + vjp_bad; }
+  int fails_relax = 0;   // cold relax() did not converge
+  int fails_rxw = 0;     // warm relax() did not converge
+  int vjp_bad = 0;       // non-finite backward pass
+  int fails() const { return fails_relax + fails_rxw + vjp_bad; }
 };
 
 double Mean(const std::vector<double>& v) {
@@ -129,16 +135,31 @@ CellStats RunCell(const std::vector<RobotQP>& seq, double kappa) {
     solver.solve();
     row.fwd_us = duration<double, std::micro>(steady_clock::now() - t0).count();
 
+    // Warm chain FIRST: any converged relax (cold included) refreshes the
+    // stored chain iterate, so running the cold probe before the warm
+    // call would hand it an already-converged point for THIS tick and
+    // measure 0 iterations. Warm-first starts from the previous tick's
+    // relaxed point, the genuine control-loop pattern. (The cold probe
+    // after it re-lands on the same point, so the chain entering the next
+    // tick is unaffected.)
     t0 = steady_clock::now();
-    const elastiqp::Solution& rel =
-        solver.relax(kappa, kRelaxTol, kRelaxMaxIter);
+    const elastiqp::Solution rel = solver.relax(kappa, kRelaxTol,
+                                                kRelaxMaxIter);
+    row.rxw_us =
+        duration<double, std::micro>(steady_clock::now() - t0).count();
+    row.rxw_iters = rel.iters;
+    if (rel.converged != 1) st.fails_rxw++;
+
+    t0 = steady_clock::now();
+    const elastiqp::Solution& cold =
+        solver.relax(kappa, kRelaxTol, kRelaxMaxIter, /*warm=*/false);
     row.relax_us =
         duration<double, std::micro>(steady_clock::now() - t0).count();
-    row.relax_iters = rel.iters;
-    if (rel.converged != 1) st.fails_relax++;
+    row.relax_iters = cold.iters;
+    if (cold.converged != 1) st.fails_relax++;
 
-    // Backward pass at the relaxed point, cotangent on x only, as for a
-    // loss 0.5*||x||^2.
+    // Backward pass at the (warm) relaxed point, cotangent on x only, as
+    // for a loss 0.5*||x||^2.
     ct.x = rel.x;
     t0 = steady_clock::now();
     const elastiqp::DataGrads& g =
@@ -155,6 +176,7 @@ CellStats RunCell(const std::vector<RobotQP>& seq, double kappa) {
 struct CellSummary {
   double fwd_mean, fwd_p95;
   double rx_mean, rx_p50, rx_p95, rx_iters;
+  double rxw_mean, rxw_p95, rxw_iters;
   double vjp_mean, amort;
 };
 
@@ -162,17 +184,25 @@ CellSummary Summarize(const CellStats& st) {
   CellSummary s{};
   const std::vector<double> fwd = Extract(st.ticks, &TickRow::fwd_us);
   const std::vector<double> rx = Extract(st.ticks, &TickRow::relax_us);
+  const std::vector<double> rxw = Extract(st.ticks, &TickRow::rxw_us);
   const std::vector<double> vjp = Extract(st.ticks, &TickRow::vjp_us);
   s.fwd_mean = Mean(fwd);
   s.fwd_p95 = Percentile(fwd, 0.95);
   s.rx_mean = Mean(rx);
   s.rx_p50 = Percentile(rx, 0.50);
   s.rx_p95 = Percentile(rx, 0.95);
+  s.rxw_mean = Mean(rxw);
+  s.rxw_p95 = Percentile(rxw, 0.95);
   s.vjp_mean = Mean(vjp);
-  double it = 0;
-  for (const TickRow& r : st.ticks) it += r.relax_iters;
+  double it = 0, itw = 0;
+  for (const TickRow& r : st.ticks) {
+    it += r.relax_iters;
+    itw += r.rxw_iters;
+  }
   s.rx_iters = it / static_cast<double>(st.ticks.size());
-  s.amort = (s.rx_mean + s.vjp_mean) / s.fwd_mean;
+  s.rxw_iters = itw / static_cast<double>(st.ticks.size());
+  // Amortized differentiation overhead of the control-loop (warm) path.
+  s.amort = (s.rxw_mean + s.vjp_mean) / s.fwd_mean;
   return s;
 }
 
@@ -212,9 +242,10 @@ int main(int argc, char** argv) {
       "per tick: warm solve -> relax(kappa) -> kkt vjp\n\n",
       ELASTIQP_ARCH_LABEL, kFwdEps, kRelaxTol, path.c_str());
   std::printf(
-      "%-9s %7s | %8s %8s | %8s %8s %8s (%4s it) | %7s | %5s | %s\n",
-      "scenario", "kappa", "fwd", "fwd p95", "relax", "rx p50", "rx p95", "",
-      "vjp", "amort", "fails (relax/vjp)");
+      "%-9s %7s | %8s %8s | %8s %8s (%4s it) | %8s %8s (%4s it) | %7s | %5s "
+      "| %s\n",
+      "scenario", "kappa", "fwd", "fwd p95", "rx cold", "p95", "",
+      "rx warm", "p95", "", "vjp", "amort", "fails (cold/warm/vjp)");
 
   std::FILE* fsum = nullptr;
   std::FILE* ftick = nullptr;
@@ -230,10 +261,12 @@ int main(int argc, char** argv) {
     std::fprintf(fsum,
                  "scenario,arch,kappa,n,m,p,ticks,fwd_mean_us,fwd_p95_us,"
                  "relax_mean_us,relax_p50_us,relax_p95_us,relax_iters,"
-                 "vjp_mean_us,amort_ratio,fails_relax,vjp_bad\n");
+                 "relax_warm_mean_us,relax_warm_p95_us,relax_warm_iters,"
+                 "vjp_mean_us,amort_ratio,fails_relax,fails_relax_warm,"
+                 "vjp_bad\n");
     std::fprintf(ftick,
                  "scenario,arch,kappa,tick,fwd_us,relax_us,relax_iters,"
-                 "vjp_us\n");
+                 "relax_warm_us,relax_warm_iters,vjp_us\n");
   }
 
   int total_fails = 0;
@@ -244,28 +277,31 @@ int main(int argc, char** argv) {
       const CellSummary s = Summarize(st);
       total_fails += st.fails();
       std::printf(
-          "%-9s %7.0e | %8.1f %8.1f | %8.1f %8.1f %8.1f (%4.1f it) | %7.1f "
-          "| %5.2f | %d/%d%s\n",
-          seq.name.c_str(), kappa, s.fwd_mean, s.fwd_p95, s.rx_mean, s.rx_p50,
-          s.rx_p95, s.rx_iters, s.vjp_mean, s.amort, st.fails_relax,
-          st.vjp_bad, st.fails() ? " (FAILS!)" : "");
+          "%-9s %7.0e | %8.1f %8.1f | %8.1f %8.1f (%4.1f it) | %8.1f %8.1f "
+          "(%4.1f it) | %7.1f | %5.2f | %d/%d/%d%s\n",
+          seq.name.c_str(), kappa, s.fwd_mean, s.fwd_p95, s.rx_mean,
+          s.rx_p95, s.rx_iters, s.rxw_mean, s.rxw_p95, s.rxw_iters,
+          s.vjp_mean, s.amort, st.fails_relax, st.fails_rxw, st.vjp_bad,
+          st.fails() ? " (FAILS!)" : "");
       if (fsum) {
         std::fprintf(
             fsum,
             "%s,%s,%g,%d,%d,%d,%zu,%.3f,%.3f,%.3f,%.3f,%.3f,%.2f,%.3f,%.3f,"
-            "%d,%d\n",
+            "%.2f,%.3f,%.3f,%d,%d,%d\n",
             seq.name.c_str(), ELASTIQP_ARCH_LABEL, kappa,
             static_cast<int>(qp.q.size()), static_cast<int>(qp.b.size()),
             static_cast<int>(qp.h.size()), st.ticks.size(), s.fwd_mean,
-            s.fwd_p95, s.rx_mean, s.rx_p50, s.rx_p95, s.rx_iters, s.vjp_mean,
-            s.amort, st.fails_relax, st.vjp_bad);
+            s.fwd_p95, s.rx_mean, s.rx_p50, s.rx_p95, s.rx_iters, s.rxw_mean,
+            s.rxw_p95, s.rxw_iters, s.vjp_mean, s.amort, st.fails_relax,
+            st.fails_rxw, st.vjp_bad);
       }
       if (ftick) {
         for (std::size_t k = 0; k < st.ticks.size(); ++k) {
           const TickRow& r = st.ticks[k];
-          std::fprintf(ftick, "%s,%s,%g,%zu,%.3f,%.3f,%d,%.3f\n",
+          std::fprintf(ftick, "%s,%s,%g,%zu,%.3f,%.3f,%d,%.3f,%d,%.3f\n",
                        seq.name.c_str(), ELASTIQP_ARCH_LABEL, kappa, k,
-                       r.fwd_us, r.relax_us, r.relax_iters, r.vjp_us);
+                       r.fwd_us, r.relax_us, r.relax_iters, r.rxw_us,
+                       r.rxw_iters, r.vjp_us);
         }
       }
     }

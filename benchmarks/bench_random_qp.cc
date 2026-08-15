@@ -124,12 +124,15 @@ int main() {
         }
         t_solve.push_back(best);
 
-        // Relax per kappa: retraction start each time.
+        // Relax per kappa: retraction start each time (warm=false -- the
+        // default would chain the timing reps on identical data and
+        // measure a trivial 0-iteration re-relax).
         for (int k = 0; k < 3; ++k) {
           double best_rx = 0.0;
           for (int rep = 0; rep < kReps; ++rep) {
             const auto t0 = Clock::now();
-            const auto& rsol = solver.relax(kKappas[k]);
+            const auto& rsol = solver.relax(kKappas[k], 1e-6, 50,
+                                            /*warm=*/false);
             const double us = UsSince(t0);
             if (rep == 0 || us < best_rx) best_rx = us;
             if (rep == 0) it_relax[k].push_back(rsol.iters);

@@ -191,6 +191,7 @@ class Solver {
     h_ = h;
     penalty_ = penalty;
     have_warm_ = false;
+    relax_have_warm_ = false;
     explicit_warm_ = false;
     matrix_dirty_ = true;
     factored_ = false;
@@ -487,20 +488,66 @@ class Solver {
   // this quadratically convergent corrector, whereas the forward solve
   // pays linear-tail iterations for them. The solver's own iterate and
   // factorization cache are untouched: a subsequent warm solve() still
-  // starts from the tight solution. No-op when p == 0, kappa <= 0, or the
-  // previous solve ended in kNumerics. Rows with penalty_i = 0 have no
-  // interior (z_t + z_ineq = 0 cannot hold with z > 0), so the relaxation
-  // cannot converge for them -- drop such rows instead.
-  const Solution& relax(double kappa, double tol = 1e-6, int max_iter = 50) {
-    if (p_ == 0 || !have_warm_ || kappa <= 0.0) return sol_;
+  // starts from the tight solution. No-op when p == 0 or kappa <= 0.
+  // Rows with penalty_i = 0 have no interior (z_t + z_ineq = 0 cannot
+  // hold with z > 0), so the relaxation cannot converge for them -- drop
+  // such rows instead.
+  //
+  // Warm starting (warm = true, the default): after a converged relax(),
+  // the relaxed iterate is kept, and the next call continues from it
+  // instead of the tight retraction. In a control loop this chains the
+  // relaxed points tick to tick, which is much cheaper than restarting
+  // from the tight certificate: tick drift lives in the LINEAR residual
+  // blocks, which Newton removes quadratically (~2 steps), whereas the
+  // retraction start pays ~log2(res0/kappa) linear-rate halvings
+  // traversing the barrier curvature from the boundary. (Do not gate this
+  // on the warm iterate's residual size -- drift makes it large, but it
+  // is not what governs the iteration count.) The first call, and any
+  // call after setup(), starts from the retraction; if a warm-started run
+  // fails to converge, it silently redoes the solve from the retraction
+  // (iters then counts both runs). The stored chain also survives data
+  // updates without an intervening solve(), so a gradient-only loop can
+  // run set_*() + relax() alone. Changing kappa between calls is allowed
+  // (v re-materializes on the new manifold); expect a few extra
+  // iterations. The win is regime-dependent: it needs a mostly-stable
+  // smoothed row configuration across calls, and a data step that flips
+  // many weakly-active rows makes the warm start re-pay the curvature on
+  // each flipped row (costing MORE than the retraction, though it still
+  // converges to the same point). For sequences of essentially unrelated
+  // problems, pass warm = false to force the retraction start.
+  const Solution& relax(double kappa, double tol = 1e-6, int max_iter = 50,
+                        bool warm = true) {
+    if (p_ == 0 || kappa <= 0.0 || (!have_warm_ && !relax_have_warm_)) {
+      return sol_;
+    }
     // kappa is in the user's frame; each s.z pair picks up only the cost
     // factor under Ruiz (s scales with the row, z against it).
     const double kappa_s = c_s_ * kappa;
 
-    // Initialize from the retraction of the tight certificate: the
-    // starting point already sits on the z.s = kappa manifold.
-    relax_init_retraction();
+    if (warm && relax_have_warm_) {
+      // Continue from the previous relaxed iterate, still in the
+      // workspace; on non-convergence redo from the retraction (needs a
+      // tight certificate to reconstruct from).
+      relax_run(kappa_s, tol, max_iter);
+      if (sol_.converged != 1 && have_warm_) {
+        const int warm_iters = sol_.iters;
+        relax_init_retraction();
+        relax_run(kappa_s, tol, max_iter);
+        sol_.iters += warm_iters;
+      }
+    } else {
+      if (!have_warm_) return sol_;
+      // Initialize from the retraction of the tight certificate: the
+      // starting point already sits on the z.s = kappa manifold.
+      relax_init_retraction();
+      relax_run(kappa_s, tol, max_iter);
+    }
+    relax_have_warm_ = sol_.converged == 1;
+    return sol_;
+  }
 
+ private:
+  const Solution& relax_run(double kappa_s, double tol, int max_iter) {
     double rho = settings.relax_reg;
     double delta = settings.relax_reg;
     int retries = 0;
@@ -1291,6 +1338,9 @@ class Solver {
   Eigen::LLT<MatrixXd, Eigen::Lower> llt_r_;
   double relax_primal_res_ = 0, relax_dual_res_ = 0;
   double relax_merit_ = 0;  // squared 2-norm of the relaxed-KKT residual
+  // True while (xr_, tr_, yr_, v1r_, v2r_) holds a converged relaxed
+  // iterate usable as the next relax() warm start; cleared by setup().
+  bool relax_have_warm_ = false;
 
   Solution sol_;
 };
