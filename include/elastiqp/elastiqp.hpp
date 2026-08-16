@@ -49,8 +49,12 @@
 // [0, penalty], along with mu/rho and the cached factorization.
 //
 // Omitted from proxsuite: GPDAL merit, incremental LDLT updates + iterative
-// refinement, infeasibility detection, box specialization, nonconvex handling.
-// Equalities hold to solver tolerance (~eps_abs).
+// refinement, box specialization, nonconvex handling. Proxsuite's
+// Farkas-style infeasibility detection is replaced by a direct
+// equality-consistency certificate (Settings::check_eq_consistency):
+// inconsistent Ax = b is the only way the elastic problem can be
+// infeasible, and that is a property of (A, b) alone, checkable at data
+// ingestion. Equalities hold to solver tolerance (~eps_abs).
 //
 // Differentiability: relax(kappa) walks the converged solution to a
 // kappa-relaxed central point (complementarity s.z = kappa) for smooth
@@ -76,6 +80,11 @@ enum class Status {
   kSolved = 1,
   kMaxIter = 2,
   kNumerics = 3,
+  // Certified inconsistent equalities: Ax = b has no solution, the only
+  // way the elastic problem can be infeasible (every inequality row has a
+  // slack). Returned by solve() without spending iterations; see
+  // Settings::check_eq_consistency.
+  kInfeasible = 4,
 };
 
 // The elastic KKT certificate. One slack/dual pair per constraint block:
@@ -113,6 +122,23 @@ struct Settings {
   double eps_duality_gap_abs = 1e-5;
   double eps_duality_gap_rel = 0;
   int max_factor_retries = 10;
+
+  // Certified equality-consistency gate (elastic departure from proxsuite,
+  // whose Farkas-based detection was dropped wholesale). In the elastic
+  // form the inequality rows cannot cause infeasibility, so the problem
+  // is infeasible iff Ax = b is inconsistent -- a property of (A, b)
+  // alone. At data ingestion (setup() / set_A() / set_b()) the solver
+  // rank-checks the UNSCALED A: full row rank certifies consistency for
+  // every b (so vector updates in a control loop cost nothing); for
+  // rank-deficient A each new b pays one cached-QR least-squares solve,
+  // whose residual gives a certified lower bound on the equality residual
+  // ANY iterate can reach (see eq_infeasibility()). solve() then returns
+  // kInfeasible immediately when the bound exceeds eps_abs, instead of
+  // burning the full max_outer_iter budget on an unreachable tolerance.
+  // Only the absolute clause of the termination test can be certified
+  // impossible, so runs with eps_rel > 0 are never gated. Read at
+  // ingestion time (the QR) and at solve() time (the gate).
+  bool check_eq_consistency = true;
 
   // Reuse the previous solve's (x, y, z_ineq) and cached factorization from
   // the second solve() on, resetting rho/mu to the values below.
@@ -326,6 +352,9 @@ class Solver {
     dv2r_.resize(p_);
     llt_r_ = Eigen::LLT<MatrixXd, Eigen::Lower>(n_);
 
+    check_eq_A(A_);  // A_, b_ are still unscaled here
+    check_eq_b(b_);
+
     ruiz_ = settings.ruiz && p_ > 0;
     dx_s_ = VectorXd::Ones(n_);
     de_s_ = VectorXd::Ones(m_);
@@ -371,11 +400,14 @@ class Solver {
     q_ = ruiz_ ? VectorXd(c_s_ * q.cwiseProduct(dx_s_)) : q;
   }
   void set_A(const MatrixXd& A) {
+    check_eq_A(A);
+    check_eq_b(ruiz_ ? VectorXd(b_.cwiseProduct(inv_de_)) : b_);
     A_ = ruiz_ ? MatrixXd(de_s_.asDiagonal() * A * dx_s_.asDiagonal()) : A;
     compute_AtA();
     matrix_dirty_ = true;
   }
   void set_b(const VectorXd& b) {
+    check_eq_b(b);
     b_ = ruiz_ ? VectorXd(b.cwiseProduct(de_s_)) : b;
   }
   void set_G(const MatrixXd& G) {
@@ -422,6 +454,12 @@ class Solver {
   // Settings::cold_reset_limit).
   int cold_resets() const { return cold_resets_; }
 
+  // Certified lower bound on the unscaled equality residual ||Ax - b||_inf
+  // that ANY x can reach, from the ingestion-time consistency check
+  // (Settings::check_eq_consistency). 0 when A has full row rank, when the
+  // current b is consistent, or when the check is disabled.
+  double eq_infeasibility() const { return eq_infeas_; }
+
   const Solution& solve() {
     const bool explicit_ws = explicit_warm_;
     explicit_warm_ = false;
@@ -429,6 +467,28 @@ class Solver {
     iters_total_ = 0;
     factor_retries_ = 0;
     cold_resets_ = 0;
+
+    // Fail fast on certified infeasibility: eq_infeas_ lower-bounds the
+    // equality residual any iterate can reach (see check_eq_b), so once it
+    // exceeds eps_abs the absolute primal test can never pass and the
+    // solve would run to kMaxIter. Only the absolute clause is certified
+    // (the relative denominator depends on the iterate), so eps_rel > 0
+    // runs are never gated. The stored iterate is untouched: a transient
+    // inconsistent tick in a control loop keeps its warm start.
+    if (settings.check_eq_consistency && settings.eps_rel <= 0 &&
+        eq_infeas_ > settings.eps_abs) {
+      if (!have_warm_ && !explicit_ws) {
+        rho_ = settings.rho;
+        mu_eq_ = settings.mu_eq_init;
+        mu_in_ = settings.mu_in_init;
+        x_.setZero();
+        y_.setZero();
+        z_.setZero();
+      }
+      z_ = z_.cwiseMax(0.0).cwiseMin(penalty_);
+      update_residuals();
+      return finish(Status::kInfeasible);
+    }
 
     if (p_ == 0) {
       return solve_no_inequalities();
@@ -760,6 +820,54 @@ class Solver {
       AtA_.setZero();
       AtA_.selfadjointView<Eigen::Lower>().rankUpdate(A_.transpose());
     }
+  }
+
+  // ---- equality-consistency certificate (Settings::check_eq_consistency)
+  // check_eq_A caches a rank-revealing QR of the UNSCALED A at ingestion.
+  // Full row rank certifies b-independence (any b is consistent) and makes
+  // set_b() free; otherwise the unscaled A is copied so check_eq_b can
+  // evaluate least-squares residuals against later b updates.
+  void check_eq_A(const MatrixXd& A) {
+    eq_infeas_ = 0.0;
+    eq_rank_deficient_ = false;
+    if (m_ == 0 || !settings.check_eq_consistency) return;
+    // Fast path for the control-loop case (set_A every tick with a
+    // well-conditioned full-row-rank A, e.g. a dynamics Jacobian): an
+    // LDLT of the m x m Gram matrix A A^T certifies full row rank -- and
+    // hence consistency for every b -- whenever its pivot ratio is
+    // clearly away from the Gram formation noise (~eps * d_max). A
+    // rank-deficient A cannot pass this test, so the only cost of the
+    // 1e-10 margin is that near-singular full-rank A falls through to
+    // the careful (5-10x slower) column-pivoted QR below.
+    if (m_ <= n_) {
+      gram_A_.resize(m_, m_);
+      gram_A_.setZero();
+      gram_A_.selfadjointView<Eigen::Lower>().rankUpdate(A);
+      ldlt_gram_.compute(gram_A_);
+      if (ldlt_gram_.info() == Eigen::Success) {
+        const auto& d = ldlt_gram_.vectorD();
+        const double dmax = d.maxCoeff();
+        if (std::isfinite(dmax) && d.minCoeff() > 1e-10 * dmax) {
+          return;  // certified full row rank
+        }
+      }
+    }
+    qr_A_.compute(A);
+    eq_rank_deficient_ = qr_A_.rank() < m_;
+    if (eq_rank_deficient_) Aus_ = A;
+  }
+
+  // Certified lower bound on the reachable equality residual: for any x,
+  // ||Ax - b||_inf >= ||Ax - b||_2 / sqrt(m) >= ||r_ls||_2 / sqrt(m),
+  // where r_ls is the least-squares residual (the 2-norm minimum over all
+  // x). Computed on unscaled data, so the bound is in the same frame as
+  // the termination test regardless of Ruiz.
+  void check_eq_b(const VectorXd& b) {
+    eq_infeas_ = 0.0;
+    if (!eq_rank_deficient_ || !settings.check_eq_consistency) return;
+    const VectorXd xls = qr_A_.solve(b);
+    eq_infeas_ =
+        (Aus_ * xls - b).norm() / std::sqrt(static_cast<double>(m_));
   }
 
   // PIQP's limit_scaling guard (dense/preconditioner.tpp): a norm below
@@ -1408,7 +1516,12 @@ class Solver {
     sol_.primal_res = primal_res_;
     sol_.dual_res = dual_res_;
     sol_.duality_gap = duality_gap_;
-    have_warm_ = status != Status::kNumerics;
+    // kInfeasible exits early without touching the iterate: keep the
+    // warm-start state as it was (a transient inconsistent tick keeps its
+    // warm start; a cold fail stays cold).
+    if (status != Status::kInfeasible) {
+      have_warm_ = status != Status::kNumerics;
+    }
     return sol_;
   }
 
@@ -1433,6 +1546,14 @@ class Solver {
   VectorXd dx_s_, de_s_, di_s_;             // cumulative scale factors
   VectorXd inv_cdx_, inv_de_, inv_di_;      // residual unscaling
   VectorXd y_us_, z_us_;                    // dual unscaling (de/c, di/c)
+
+  // Equality-consistency certificate state (check_eq_A / check_eq_b)
+  Eigen::ColPivHouseholderQR<MatrixXd> qr_A_;
+  MatrixXd gram_A_;  // A A^T staging for the fast full-rank certificate
+  Eigen::LDLT<MatrixXd> ldlt_gram_;
+  MatrixXd Aus_;  // unscaled A copy, kept only when rank-deficient
+  bool eq_rank_deficient_ = false;
+  double eq_infeas_ = 0.0;
 
   // Factorization cache
   bool matrix_dirty_ = true, factored_ = false;

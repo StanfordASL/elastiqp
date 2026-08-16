@@ -147,7 +147,8 @@ NB_MODULE(_core, m) {
       .value("Unsolved", Status::kUnsolved)
       .value("Solved", Status::kSolved)
       .value("MaxIter", Status::kMaxIter)
-      .value("Numerics", Status::kNumerics);
+      .value("Numerics", Status::kNumerics)
+      .value("Infeasible", Status::kInfeasible);
 
   nb::class_<Solution>(m, "Solution")
       .def_prop_ro("x", [](const Solution& s) { return s.x; })
@@ -188,6 +189,7 @@ NB_MODULE(_core, m) {
       .def_rw("eps_abs", &Settings::eps_abs)
       .def_rw("eps_rel", &Settings::eps_rel)
       .def_rw("check_duality_gap", &Settings::check_duality_gap)
+      .def_rw("check_eq_consistency", &Settings::check_eq_consistency)
       .def_rw("eps_duality_gap_abs", &Settings::eps_duality_gap_abs)
       .def_rw("eps_duality_gap_rel", &Settings::eps_duality_gap_rel)
       .def_rw("max_outer_iter", &Settings::max_outer_iter)
@@ -209,6 +211,9 @@ NB_MODULE(_core, m) {
                [](const Solver& s) -> Solution { return s.solution(); })
           .def("factorizations", &Solver::factorizations,
                "KKT factorizations performed by the last solve()")
+          .def("eq_infeasibility", &Solver::eq_infeasibility,
+               "certified lower bound on the reachable ||Ax - b||_inf "
+               "(0 when consistent or unchecked)")
           .def(
               "relax",
               [](Solver& s, double kappa, double tol, int max_iter,

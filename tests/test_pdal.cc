@@ -334,6 +334,85 @@ int main() {
           "primal_res");
   }
 
+  // The two blocks above run at eps_rel > 0, where the ingestion-time
+  // consistency certificate cannot gate (only the absolute clause is
+  // certifiable) -- they exercise the run-to-failure path. This block
+  // exercises the gate itself at the library default eps_rel = 0.
+  std::printf("PDAL: certified equality-infeasibility gate\n");
+  {
+    // Local generator: keeps the shared rng stream (and every downstream
+    // random instance) identical to the pre-gate suite.
+    std::mt19937 gate_rng(2026);
+    const int n = 10, p = 20;
+    const QPData qp = problem_gen::Feasible(gate_rng, n, p);
+    MatrixXd Ai(2, n);
+    Ai.row(0) = problem_gen::Randn(gate_rng, 1, n);
+    Ai.row(1) = Ai.row(0);  // rank-deficient by construction
+    VectorXd bc(2), bi(2);
+    bc << 0.5, 0.5;  // consistent (duplicated row, same rhs)
+    bi << 0.0, 1.0;  // inconsistent
+
+    elastiqp::Solver solver;  // default settings: eps_abs 1e-5, eps_rel 0
+    solver.setup(qp.Q, qp.q, Ai, bi, qp.G, qp.h, 10.0);
+    const auto fail = solver.solve();
+    Check("inconsistent b fails fast (0 iters)",
+          fail.status == elastiqp::Status::kInfeasible &&
+              fail.converged == 0 && fail.iters == 0 &&
+              solver.eq_infeasibility() > 0.1,
+          solver.eq_infeasibility(), "eq_infeas");
+
+    solver.set_b(bc);
+    const auto good = solver.solve();
+    Check("consistent b, rank-deficient A solves",
+          good.status == elastiqp::Status::kSolved &&
+              solver.eq_infeasibility() < 1e-10,
+          good.primal_res, "primal_res");
+
+    solver.set_b(bi);
+    const auto fail2 = solver.solve();
+    Check("set_b to inconsistent fails fast",
+          fail2.status == elastiqp::Status::kInfeasible && fail2.iters == 0,
+          solver.eq_infeasibility(), "eq_infeas");
+
+    solver.set_b(bc);
+    const auto good2 = solver.solve();
+    Check("warm start survives transient bad tick",
+          good2.status == elastiqp::Status::kSolved &&
+              good2.iters <= good.iters,
+          static_cast<double>(good2.iters), "iters");
+
+    // Certificate is computed on unscaled data: gate must fire under Ruiz.
+    elastiqp::Solver rz;
+    rz.settings.ruiz = true;
+    rz.setup(qp.Q, qp.q, Ai, bi, qp.G, qp.h, 10.0);
+    const auto rzfail = rz.solve();
+    Check("gate fires with ruiz on",
+          rzfail.status == elastiqp::Status::kInfeasible &&
+              rzfail.iters == 0 && rz.eq_infeasibility() > 0.1,
+          rz.eq_infeasibility(), "eq_infeas");
+
+    // p = 0 path shares the gate (previously fell through to a singular
+    // KKT solve reporting kNumerics).
+    elastiqp::Solver p0;
+    p0.setup(qp.Q, qp.q, Ai, bi, MatrixXd(0, n), VectorXd(0), VectorXd(0));
+    const auto p0fail = p0.solve();
+    Check("p=0 inconsistent eq gated",
+          p0fail.status == elastiqp::Status::kInfeasible &&
+              p0fail.iters == 0,
+          p0.eq_infeasibility(), "eq_infeas");
+
+    // Opt-out restores the run-to-failure behavior.
+    elastiqp::Solver off;
+    off.settings.check_eq_consistency = false;
+    off.settings.max_outer_iter = 5;
+    off.setup(qp.Q, qp.q, Ai, bi, qp.G, qp.h, 10.0);
+    const auto offsol = off.solve();
+    Check("check_eq_consistency=false not gated",
+          offsol.status != elastiqp::Status::kInfeasible &&
+              offsol.converged == 0 && off.eq_infeasibility() == 0.0,
+          offsol.primal_res, "primal_res");
+  }
+
   std::printf("PDAL: warm start with equalities (drift q, h, b)\n");
   {
     const int n = 30, m = 8, p = 200, ticks = 20;
@@ -578,7 +657,7 @@ int main() {
     }
     std::printf("  cold iters=%d warm iters=%d worst_kkt=%9.2e\n", cold_iters,
                 warm_iters, worst_kkt);
-    Check("n=30 m=8 p=200 ruiz 20 ticks",
+Check("n=30 m=8 p=200 ruiz 20 ticks",
           all_conv && worst_dx < 1e-4 && worst_kkt < 1e-5 &&
               warm_iters < cold_iters,
           worst_dx, "|dx|");

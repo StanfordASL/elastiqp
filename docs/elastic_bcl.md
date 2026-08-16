@@ -91,7 +91,12 @@ removal; cold infeasible solves improve 6–9%; large-drift
 high-penalty cells improve up to 18%; feasible/degenerate cells are
 unchanged (±3%); genuinely inconsistent equalities fail identically
 to classic BCL (same status, same irreducible residual, comparable
-iterations). The full test suite (including the pinned
+iterations — though at the default `eps_rel = 0` they are now caught
+before the loop by the ingestion-time consistency certificate,
+`Settings::check_eq_consistency`, and return `kInfeasible` without
+spending iterations). The full test suite (including the pinned
 finite-difference vs VJP cross-validation) and every benchmark
 (random-QP families, robot control, differentiability, collision,
 warm-start grids) pass unchanged with the split enabled.
+
+
