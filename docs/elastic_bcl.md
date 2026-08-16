@@ -147,3 +147,24 @@ early), an ungated jump (+3-6% at low-penalty mid drift), and shrinking
 high-penalty warm cells — the lockstep is essential, re-confirming the
 gating result above from the other direction).
 
+## Warm-start eta seeding
+
+The third departure (`Settings::bcl_warm_eta`, default on) treats the
+other half of the warm-tick replay. A warm solve resets mu to the inits
+*and* restarts the BCL ladder at `eta_ext_init ~ 0.79` — but the iterate
+is near-converged, so a small-drift tick spends several "good" rounds
+merely tightening eta down to its actual residual before any mu action
+starts. With the seed, a warm start sets
+`eta_ext = min(eta_ext_init, 0.5 * pri0)` — but only when that skips at
+least a decade of ladder: a marginal seed at moderate drift forces bad
+steps while `x` is still far from the new optimum, over-tightening mu
+early (measured +5-15% warm on badly row-scaled tight-eps cells without
+the guard). Measured on top of the jump: −9 to −14% on warm
+saturation-creep cells, −1 to −4% broadly, ~0 at large drift, cold
+untouched.
+
+A fixed deeper warm `mu_in_init` was evaluated for the same regime and
+rejected: −22-28% on creep cells but +30-120% at large drift and
++20-83% cold. The right depth is drift-dependent — which is exactly what
+the seeded eta plus the stall-gated jump discover per tick, at the cost
+of one probing round.

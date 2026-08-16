@@ -208,6 +208,26 @@ struct Settings {
   // were measured worse and rejected. Set false for the classic
   // fixed-factor ladder.
   bool bcl_mu_jump = true;
+  // Warm-start eta seeding (elastic reinterpretation of the warm mu
+  // reset). A warm tick resets mu to the inits (below) AND restarts the
+  // BCL ladder at eta_ext_init ~ 0.79 -- but the iterate is already
+  // near-converged, so a small-drift tick spends several "good" rounds
+  // merely tightening eta down to its actual residual before any mu
+  // action starts (the eta-ladder replay; on saturation-creep ticks this
+  // is most of the warm cost). With this on, a warm (or explicit) start
+  // seeds eta_ext at min(eta_ext_init, 0.5 * initial primal residual):
+  // large drift keeps proxsuite behavior (the seed clamps at
+  // eta_ext_init), small drift skips straight to the first meaningful
+  // bad step, where the creep jump (bcl_mu_jump) takes over. Cold solves
+  // are untouched. Measured on top of bcl_mu_jump: -9 to -14% on
+  // warm saturation-creep cells, -1 to -4% broadly, worst case +0.5%
+  // (a couple of iterations); identical at eps 1e-5 and 1e-8.
+  // (A fixed deeper warm mu_in_init was also evaluated for this regime
+  // and rejected: -22-28% on creep cells but +30-120% at large drift
+  // and +20-83% cold -- the right depth is drift-dependent, which is
+  // exactly what the seeded eta + stall-gated jump discover per tick
+  // at the cost of one probing round.)
+  bool bcl_warm_eta = true;
   // Cold restart of over-tightened mu (proxsuite's escape hatch for stuck
   // problems). It only fires while the residuals are still ABOVE
   // cold_reset_residual: proxsuite's thresholds are tuned for its 1e-5
@@ -522,6 +542,7 @@ class Solver {
       return solve_no_inequalities();
     }
 
+    bool warm_path = true;
     if (explicit_ws) {
       z_ = z_.cwiseMax(0.0).cwiseMin(penalty_);
     } else if (settings.warm_start && have_warm_) {
@@ -537,6 +558,7 @@ class Solver {
       rho_ = settings.rho;
       z_ = z_.cwiseMax(0.0).cwiseMin(penalty_);
     } else {
+      warm_path = false;
       if (!cold_init()) {
         update_residuals();
         return finish(Status::kNumerics);
@@ -551,6 +573,17 @@ class Solver {
 
     update_residuals();
     if (converged()) return finish(Status::kSolved);
+    // Seed the ladder at the measured residual on warm starts (see
+    // Settings::bcl_warm_eta): skip the eta-tightening replay and get to
+    // the first meaningful bad step -- and the creep jump -- immediately.
+    // Only when the skip is substantial (>= a decade of ladder): a
+    // marginal seed at moderate drift forces bad steps while x is still
+    // far from the new optimum, over-tightening mu early (measured +5-15%
+    // warm on badly row-scaled tight-eps cells without this guard).
+    if (warm_path && settings.bcl_warm_eta &&
+        0.5 * primal_res_ < 0.1 * eta_ext) {
+      eta_ext = 0.5 * primal_res_;
+    }
 
     // ------------- outer loop (PMM + BCL, proxsuite qp_solve) -------------
     for (int oiter = 0; oiter < settings.max_outer_iter; ++oiter) {
