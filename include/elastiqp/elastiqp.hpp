@@ -144,19 +144,28 @@ struct Settings {
   // accuracy target, and letting the reset fire in the 1e-8 endgame (where
   // the dual residual sits at machine noise and "not improving" is a coin
   // flip) creates a mu limit cycle that plateaus the primal residual.
-  // cold_reset_limit caps how many times the reset may fire per solve():
-  // a warm start whose drift pushes weakly-active rows toward elastic
-  // saturation resolves them by multiplier creep (~r/mu per outer round),
-  // which looks "non-improving" to the reset test exactly when the mu
-  // ladder finally reaches creep-resolving depth -- an uncapped reset
-  // then re-slows the creep by 5 orders of magnitude and limit-cycles to
-  // kMaxIter (13-22% of ticks on small-drift high-penalty trajectories).
-  // After the cap the mu ladder descends to its floor, where the creep
-  // becomes a jump and saturation resolves.
+  // cold_reset_limit caps how many times the reset may fire per solve(),
+  // and defaults to 0: DISABLED. Measured 2026-08: the reset never fired
+  // on any cold solve (720 random instances across every structure /
+  // penalty / accuracy tier, plus the 144 Maros-Meszaros small-dense
+  // elastic solves) -- it fired only on warm starts, where it is
+  // actively harmful. A warm start whose drift pushes weakly-active rows
+  // toward elastic saturation resolves them by multiplier creep (~r/mu
+  // per outer round), which looks "non-improving" to the reset test
+  // exactly when the mu ladder finally reaches creep-resolving depth --
+  // the reset then re-slows the creep by 5 orders of magnitude, and
+  // uncapped it limit-cycles to kMaxIter (13-22% of ticks on small-drift
+  // high-penalty trajectories; capped at 1 it still wastes an eta_ext
+  // ladder cycle on ~a third of such ticks, ~1.8x mean iterations).
+  // With the reset off, a stuck solve rides the mu ladder to its floor
+  // (mu_min_in / mu_min_eq), where the creep becomes a jump and
+  // saturation resolves; a genuinely stiff problem at the floor either
+  // finishes or fails fast through the factorization-retry path instead
+  // of cycling. Set a positive limit to restore the escape hatch.
   double cold_reset_mu = 1.0 / 1.1;
   double cold_reset_threshold = 1e-5;
   double cold_reset_residual = 1e-5;
-  int cold_reset_limit = 1;
+  int cold_reset_limit = 0;
   int safe_guard = 10000;  // total-Newton-iteration escape for BCL
 
   // Ruiz equilibration of the stacked [Q A' G'; A 0 0; G 0 0] structure
