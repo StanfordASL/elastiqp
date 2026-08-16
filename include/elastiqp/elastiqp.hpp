@@ -184,6 +184,30 @@ struct Settings {
   // measured neutral-to-worse on the full warm/cold grid; see
   // docs/elastic_bcl.md. The shared worst-block ladder stays.)
   bool bcl_split = true;
+  // Creep-resolving mu jump (elastic departure from proxsuite's blind
+  // ladder; only read when bcl_split is true). Classic BCL must shrink
+  // mu by a fixed factor per bad round because for a hard QP no target
+  // depth exists. In the elastic reading, a row lagging toward
+  // saturation with violation r and dual gap w - z snaps to saturation
+  // once mu_in <= r / (w - z) -- all known at the iterate. On an
+  // inequality-driven bad step whose residual is STALLED (improved by
+  // less than 20% this round -- a working ladder shrinks it ~10x, so
+  // slow improvement is the creep signature), jump mu_in directly to
+  // the worst-residual row's target instead of paying one inner solve +
+  // refactorization per 10x rung. The classic shrink is the ceiling
+  // (never a smaller step), mu_min_in the floor, and mu_eq follows by
+  // the same ratio -- the lockstep is essential: shrinking mu_eq by
+  // only the classic factor while mu_in jumps was measured
+  // catastrophically slower (+25-58% on high-penalty warm cells).
+  // Measured (5-seed warm drift grid, cold families, robot replay, all
+  // at eps 1e-5): -7 to -20% iterations on high-penalty (1e4) warm
+  // cells at every drift size and on all sigma=1e-4 creep cells; ~0%
+  // elsewhere warm; <= +4% on cold feasible solves (sub-iteration per
+  // solve absolute); robot sequences unchanged; no failures introduced.
+  // Deeper variants (resolve-all-rows, uncapped) and an ungated jump
+  // were measured worse and rejected. Set false for the classic
+  // fixed-factor ladder.
+  bool bcl_mu_jump = true;
   // Cold restart of over-tightened mu (proxsuite's escape hatch for stuck
   // problems). It only fires while the residuals are still ABOVE
   // cold_reset_residual: proxsuite's thresholds are tuned for its 1e-5
@@ -568,10 +592,33 @@ class Solver {
         // measurably slows equality-dual convergence on cold
         // infeasible+eq problems).
         if (m_ > 0 && eq_res_ > eta_ext) y_ = yk_;
-        mu_in_ = std::max(mu_in_ * settings.mu_update_factor,
-                          settings.mu_min_in);
-        mu_eq_ = std::max(mu_eq_ * settings.mu_update_factor,
-                          settings.mu_min_eq);
+        double mu_new = mu_in_ * settings.mu_update_factor;
+        if (settings.bcl_mu_jump && in_res_ > eta_ext &&
+            pri_new > 0.8 * pri_old) {
+          // Creep-resolving jump (Settings::bcl_mu_jump): the
+          // worst-residual lagging row snaps to saturation once
+          // mu_in <= r / (w - z); jump straight to that target instead
+          // of descending one rung per round. Gated on a stalled
+          // residual -- a working ladder shrinks it ~10x per round, so
+          // <20% improvement is the creep signature; the gate is what
+          // keeps the jump out of cold/large-drift solves where the
+          // classic descent is already sufficient (ungated, those
+          // cells measured +3-6%).
+          double worst = 0.0;
+          for (Eigen::Index i = 0; i < p_; ++i) {
+            const double res_i = (r_[i] - t_[i]) * inv_di_[i];
+            if (res_i <= settings.eps_abs || res_i <= worst) continue;
+            const double den = penalty_[i] - z_[i];
+            if (!(den > 0.0) || r_[i] <= 0.0) continue;
+            worst = res_i;
+            mu_new = std::min(mu_in_ * settings.mu_update_factor,
+                              r_[i] / den);
+          }
+        }
+        // mu_eq follows by the same ratio (lockstep; see Settings).
+        const double ratio = mu_new / mu_in_;
+        mu_in_ = std::max(mu_new, settings.mu_min_in);
+        mu_eq_ = std::max(mu_eq_ * ratio, settings.mu_min_eq);
         eta_ext = eta_ext_init * std::pow(mu_in_, settings.alpha_bcl);
         eta_in = std::max(mu_in_, eps_in_min);
         update_residuals();  // mu_in changes the t reconstruction

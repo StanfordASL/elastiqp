@@ -121,4 +121,29 @@ tightening schedule mostly de-synchronizes the ladder from the mu
 schedule that actually governs progress. The threshold split is
 rejected; only the *revert* is split (above).
 
+## Creep-resolving mu jump
+
+The second adopted departure (2026-08-15, `Settings::bcl_mu_jump`,
+default on) cashes in the dual-step reinterpretation directly. Classic
+BCL must shrink mu blindly — a fixed `mu_update_factor` per bad round —
+because for a hard QP no target depth exists. In the elastic reading the
+target is explicit: a row lagging toward saturation with violation `r`
+and dual gap `w - z` snaps once `mu_in <= r / (w - z)`, all known at the
+iterate. On an inequality-driven bad step whose residual is *stalled*
+(improved by less than 20% this round — a working ladder shrinks it ~10x,
+so slow improvement is the creep signature), the solver jumps `mu_in`
+straight to the worst-residual row's target instead of paying one inner
+solve plus refactorization per 10x rung. The classic shrink is the
+ceiling, `mu_min_in` the floor, and `mu_eq` follows by the same ratio.
+
+Measured (5-seed warm drift grid, cold families, robot replay, eps 1e-5
+and 1e-8): −7 to −20% iterations on every high-penalty (1e4) warm cell
+and on all sigma=1e-4 creep cells; ~0% elsewhere warm; ≤ +4% on cold
+feasible solves (sub-iteration per solve); robot sequences unchanged; no
+failures introduced. Rejected variants, all measured worse: resolving
+*all* lagging rows per jump (+20-46% nearly everywhere — too deep too
+early), an ungated jump (+3-6% at low-penalty mid drift), and shrinking
+`mu_eq` by only the classic factor while `mu_in` jumps (+25-58% on
+high-penalty warm cells — the lockstep is essential, re-confirming the
+gating result above from the other direction).
 
