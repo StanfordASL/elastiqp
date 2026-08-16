@@ -178,7 +178,11 @@ struct Settings {
   // convergence). Measured: -5-9% iterations on warm creep cells and
   // cold infeasible families, big-drift cells up to -18%, elsewhere
   // neutral; inconsistent hard equalities fail identically to classic.
-  // Set false for proxsuite-parity outer-loop behavior.
+  // Set false for proxsuite-parity outer-loop behavior. (A further split
+  // of the eta_ext THRESHOLDS per block -- classifying and resetting each
+  // block against its own ladder -- was evaluated 2026-08 and rejected:
+  // measured neutral-to-worse on the full warm/cold grid; see
+  // docs/elastic_bcl.md. The shared worst-block ladder stays.)
   bool bcl_split = true;
   // Cold restart of over-tightened mu (proxsuite's escape hatch for stuck
   // problems). It only fires while the residuals are still ABOVE

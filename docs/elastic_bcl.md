@@ -99,4 +99,26 @@ finite-difference vs VJP cross-validation) and every benchmark
 (random-QP families, robot control, differentiability, collision,
 warm-start grids) pass unchanged with the split enabled.
 
+A further split of the *thresholds* was evaluated and rejected
+(2026-08-15). Per-block `eta_eq`/`eta_ineq` ladders — each block
+classified against its own threshold, tightened on its own good rounds,
+reset on its own bad rounds, with the y-revert gated on the equality
+ladder — were benchmarked in two keyings over the full warm drift grid
+(structure x penalty x sigma), cold families, and the robot replay:
+
+* `eta_eq` keyed to `mu_eq`: wins 5–18% at small drift (sigma 1e-4)
+  but loses 8–15% at large drift and on cold high-penalty families —
+  the aggressive equality tightening (`mu_eq^0.9` per good round)
+  drives both effects.
+* both etas keyed to `mu_in` (pure per-block classification): the
+  effects shrink toward neutral, net slightly negative (+2–6% on most
+  warm cells, small wins only at sigma 1e-4).
+
+Conclusion: the shared worst-block ladder is load-bearing, not an
+inherited artifact — an inequality-lag "bad" round's mu shrink is
+useful *global* dual acceleration, and letting each block keep its own
+tightening schedule mostly de-synchronizes the ladder from the mu
+schedule that actually governs progress. The threshold split is
+rejected; only the *revert* is split (above).
+
 
