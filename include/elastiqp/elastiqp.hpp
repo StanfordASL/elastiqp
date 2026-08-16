@@ -144,9 +144,19 @@ struct Settings {
   // accuracy target, and letting the reset fire in the 1e-8 endgame (where
   // the dual residual sits at machine noise and "not improving" is a coin
   // flip) creates a mu limit cycle that plateaus the primal residual.
+  // cold_reset_limit caps how many times the reset may fire per solve():
+  // a warm start whose drift pushes weakly-active rows toward elastic
+  // saturation resolves them by multiplier creep (~r/mu per outer round),
+  // which looks "non-improving" to the reset test exactly when the mu
+  // ladder finally reaches creep-resolving depth -- an uncapped reset
+  // then re-slows the creep by 5 orders of magnitude and limit-cycles to
+  // kMaxIter (13-22% of ticks on small-drift high-penalty trajectories).
+  // After the cap the mu ladder descends to its floor, where the creep
+  // becomes a jump and saturation resolves.
   double cold_reset_mu = 1.0 / 1.1;
   double cold_reset_threshold = 1e-5;
   double cold_reset_residual = 1e-5;
+  int cold_reset_limit = 1;
   int safe_guard = 10000;  // total-Newton-iteration escape for BCL
 
   // Ruiz equilibration of the stacked [Q A' G'; A 0 0; G 0 0] structure
@@ -383,12 +393,17 @@ class Solver {
   // re-solve with an unchanged active set and unchanged Q/G/A/mu needs 0).
   int factorizations() const { return factor_count_; }
 
+  // Number of BCL cold resets the last solve() fired (capped by
+  // Settings::cold_reset_limit).
+  int cold_resets() const { return cold_resets_; }
+
   const Solution& solve() {
     const bool explicit_ws = explicit_warm_;
     explicit_warm_ = false;
     factor_count_ = 0;
     iters_total_ = 0;
     factor_retries_ = 0;
+    cold_resets_ = 0;
 
     if (p_ == 0) {
       return solve_no_inequalities();
@@ -468,12 +483,15 @@ class Solver {
       }
 
       // Cold restart of stalled, over-tightened penalties (guarded so it
-      // cannot fire in the endgame, see Settings::cold_reset_residual).
+      // cannot fire in the endgame, see Settings::cold_reset_residual, and
+      // capped per solve, see Settings::cold_reset_limit).
       if (pri_new >= pri_old && dua_new >= dua_old &&
           mu_in_ <= settings.cold_reset_threshold &&
-          std::max(pri_new, dua_new) > settings.cold_reset_residual) {
+          std::max(pri_new, dua_new) > settings.cold_reset_residual &&
+          cold_resets_ < settings.cold_reset_limit) {
         mu_in_ = settings.cold_reset_mu;
         mu_eq_ = settings.cold_reset_mu;
+        cold_resets_++;
       }
     }
 
@@ -1375,6 +1393,7 @@ class Solver {
   double f_rho_ = 0, f_mu_eq_ = 0, f_mu_in_ = 0;
   std::vector<signed char> f_active_;
   int factor_retries_ = 0, factor_count_ = 0, iters_total_ = 0;
+  int cold_resets_ = 0;
 
   // Row states: 0 inactive, 1 active, 2 saturated
   std::vector<signed char> state_;
