@@ -138,6 +138,22 @@ struct Settings {
   // reverts the multipliers and shrinks mu by mu_update_factor.
   double alpha_bcl = 0.1;
   double beta_bcl = 0.9;
+
+  // Block-split BCL bad step (docs/elastic_bcl.md; the elastic-specific
+  // departure from proxsuite's bcl_update). Classic BCL's bad step is
+  // infeasibility-fighting medicine: revert BOTH dual blocks, shrink
+  // both penalties. In the elastic setting only the equality block
+  // Ax = b is hard; the inequality-block residual measures multiplier
+  // lag (slack-reconstruction inconsistency), for which z-movement is
+  // always progress. With the split (default), a bad step reverts y
+  // only when eq_res is itself above eta_ext, never reverts z, and
+  // still shrinks both mu in lockstep (1/mu is each block's dual step
+  // size; gating the mu_eq shrink measurably slows equality-dual
+  // convergence). Measured: -5-9% iterations on warm creep cells and
+  // cold infeasible families, big-drift cells up to -18%, elsewhere
+  // neutral; inconsistent hard equalities fail identically to classic.
+  // Set false for proxsuite-parity outer-loop behavior.
+  bool bcl_split = true;
   // Cold restart of over-tightened mu (proxsuite's escape hatch for stuck
   // problems). It only fires while the residuals are still ABOVE
   // cold_reset_residual: proxsuite's thresholds are tuned for its 1e-5
@@ -476,6 +492,25 @@ class Solver {
       if (pri_new <= eta_ext || iters_total_ > settings.safe_guard) {
         eta_ext *= std::pow(mu_in_, settings.beta_bcl);
         eta_in = std::max(eta_in * mu_in_, eps_in_min);
+      } else if (settings.bcl_split) {
+        // Bad step, block-split (docs/elastic_bcl.md): the dual REVERT
+        // -- classic BCL's "multipliers estimated at an infeasible
+        // point are untrustworthy" -- applies only to the HARD equality
+        // block, and only when its residual is the offender. The
+        // elastic inequality block always keeps z: its movement is
+        // dual progress toward the box target, never infeasibility
+        // drift. Both mu still shrink in lockstep (1/mu is each
+        // block's dual step size; gating the mu_eq shrink on eq_res
+        // measurably slows equality-dual convergence on cold
+        // infeasible+eq problems).
+        if (m_ > 0 && eq_res_ > eta_ext) y_ = yk_;
+        mu_in_ = std::max(mu_in_ * settings.mu_update_factor,
+                          settings.mu_min_in);
+        mu_eq_ = std::max(mu_eq_ * settings.mu_update_factor,
+                          settings.mu_min_eq);
+        eta_ext = eta_ext_init * std::pow(mu_in_, settings.alpha_bcl);
+        eta_in = std::max(mu_in_, eps_in_min);
+        update_residuals();  // mu_in changes the t reconstruction
       } else {
         // Bad step: revert the multipliers (x is kept) and increase the
         // penalties. The factorization cache invalidates via the mu
@@ -1325,6 +1360,8 @@ class Solver {
       primal_rel_norm = std::max(
           {primal_rel_norm, inf_us(wAx_, inv_de_), inf_us(b_, inv_de_)});
     }
+    in_res_ = in_res;
+    eq_res_ = eq_res;
     primal_res_ = std::max(in_res, eq_res);
     primal_res_rel_ = primal_res_ / std::max(1.0, primal_rel_norm);
 
@@ -1409,6 +1446,7 @@ class Solver {
 
   // Residual scalars
   double primal_res_ = 0, dual_res_ = 0;
+  double in_res_ = 0, eq_res_ = 0;  // primal_res_ = max of these
   double primal_res_rel_ = 0, dual_res_rel_ = 0;
   double primal_obj_ = 0, duality_gap_ = 0, duality_gap_rel_ = 0;
 
