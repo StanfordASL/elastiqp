@@ -19,6 +19,8 @@ NOT required to run them:
 | `bench_collision_2d` | differentiable collision distance (qpax closest-point QP), cold-vs-warm solver over a 2D sweep; deliberate small-scale contrast to `bench_diff_robot` |
 | `bench_robot_control` | per-tick solve-time distribution, cold vs warm, on realistic robot control loops (diff-ik / arm-osc / hum-wbc) |
 | `bench_diff_robot` | cost of differentiability at robot scale: relax(kappa), KKT vjp, amortization vs the forward solve |
+| `bench_relax_warm` | relax() warm chain vs cold retraction start across structure / penalty / drift composition on drifting random QPs (regime map for `relax(warm=true)` and the predicted-flip gate) |
+| `bench_fwd_warm` | forward solve() warm vs cold start on the same drifting-QP grid; tracks activity changes, factorization reuse, and BCL cold-reset firings (warm-start pathology watch) |
 
 The **cross-solver** benchmarks are enabled with
 `-DELASTIQP_BENCH_EXTERNAL_SOLVERS=ON`, which downloads pinned release

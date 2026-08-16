@@ -39,6 +39,7 @@ elastiqp_bench(bench_random_qp     bench_random_qp.cc)
 elastiqp_bench(bench_collision_2d  bench_collision_2d.cc)
 elastiqp_bench(bench_robot_control bench_robot_control.cc)
 elastiqp_bench(bench_relax_warm    bench_relax_warm.cc)
+elastiqp_bench(bench_fwd_warm      bench_fwd_warm.cc)
 elastiqp_bench(bench_diff_robot    bench_diff_robot.cc)
 
 # --- robotics generator + correctness tests (need Pinocchio) -----------------
