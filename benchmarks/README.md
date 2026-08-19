@@ -21,7 +21,7 @@ NOT required to run them:
 | `bench_diff_robot` | cost of differentiability at robot scale: relax(kappa), KKT vjp, amortization vs the forward solve |
 | `bench_relax_warm` | relax() warm chain vs cold retraction start across structure / penalty / drift composition on drifting random QPs (regime map for `relax(warm=true)` and the predicted-flip gate) |
 | `bench_fwd_warm` | forward solve() warm vs cold start on the same drifting-QP grid; tracks activity changes, factorization reuse, and BCL cold-reset firings (warm-start pathology watch) |
-| `bench_bcl_strategies` | the saturation-creep failure regime (isolated from `bench_relax_warm` @ b995082) replayed under each BCL strategy generation, proxqp parity through the shipped elastic BCL; validates the `bcl_split` / `bcl_mu_jump` / `bcl_warm_eta` / `cold_reset_limit` defaults |
+| `bench_bcl_strategies` | the saturation-creep failure regime (isolated from `bench_relax_warm` @ b995082) replayed under each BCL strategy generation, proxqp parity through the shipped elastic BCL, plus mixed per-row penalty cells (alt/spike/dip w = {10, 1e4}); validates the `bcl_split` / `bcl_mu_jump` / `bcl_warm_eta` / `cold_reset_limit` defaults and the shallowest-first jump target |
 
 The **cross-solver** benchmarks are enabled with
 `-DELASTIQP_BENCH_EXTERNAL_SOLVERS=ON`, which downloads pinned release

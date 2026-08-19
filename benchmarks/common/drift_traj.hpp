@@ -61,9 +61,11 @@ struct Trajectory {
   std::vector<MatrixXd> Q;  // empty unless DriftsQ
 };
 
-inline Trajectory MakeTrajectory(Size sz, Structure st, double penalty_w,
-                                 double sigma, Drift drift, unsigned seed,
-                                 int ticks) {
+// penalty may be per-row (mixed penalties); the scalar overload below
+// keeps the historical uniform-penalty call sites unchanged.
+inline Trajectory MakeTrajectory(Size sz, Structure st,
+                                 const VectorXd& penalty, double sigma,
+                                 Drift drift, unsigned seed, int ticks) {
   std::mt19937 rng(seed);
   Trajectory traj;
   switch (st) {
@@ -84,7 +86,7 @@ inline Trajectory MakeTrajectory(Size sz, Structure st, double penalty_w,
       break;
     }
   }
-  traj.penalty = VectorXd::Constant(sz.p, penalty_w);
+  traj.penalty = penalty;
 
   const double qs = sigma * traj.base.q.lpNorm<Eigen::Infinity>();
   const double hs = sigma * traj.base.h.lpNorm<Eigen::Infinity>();
@@ -127,6 +129,13 @@ inline Trajectory MakeTrajectory(Size sz, Structure st, double penalty_w,
     traj.b.push_back(b);
   }
   return traj;
+}
+
+inline Trajectory MakeTrajectory(Size sz, Structure st, double penalty_w,
+                                 double sigma, Drift drift, unsigned seed,
+                                 int ticks) {
+  return MakeTrajectory(sz, st, VectorXd::Constant(sz.p, penalty_w), sigma,
+                        drift, seed, ticks);
 }
 
 }  // namespace drift_traj

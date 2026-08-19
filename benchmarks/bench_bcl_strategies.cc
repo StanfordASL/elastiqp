@@ -20,8 +20,11 @@
 //   eta      + warm-start eta seeding = SHIPPED    (4a21686, defaults)
 //
 // Cells: the creep regime (penalty 1e4, sigma 1e-4 / 1e-3, all three
-// structures, both eps tiers) plus control cells where the strategies
-// must NOT differ (penalty 10; large drift sigma 1e-1). Trajectories
+// structures, both eps tiers); the same regime with MIXED per-row
+// penalties (w in {10, 1e4}: alt / spike / dip patterns -- the
+// bcl_mu_jump target is read off the single worst-residual row, so a
+// soft row winning that argmax while stiff rows creep is the suspected
+// weak spot); and control cells (penalty 10; large drift sigma 1e-1). Trajectories
 // use the same generator and seed formula as bench_relax_warm /
 // bench_fwd_warm, so the proxqp rows reproduce the b995082 failures on
 // the identical tick sequences. Reported per cell (100 warm ticks):
@@ -130,42 +133,72 @@ std::FILE* g_csv = nullptr;
 
 void Header() {
   std::printf(
-      "  %-6s %3s %3s %4s %6s %6s %-8s | %8s %6s %5s %6s %4s %s\n", "struct",
-      "n", "m", "p", "sigma", "eps", "strategy", "us", "it", "fac", "max it",
-      "rst", "fails");
+      "  %-6s %3s %3s %4s %-6s %6s %6s %-8s | %8s %6s %5s %6s %4s %s\n",
+      "struct", "n", "m", "p", "pen", "sigma", "eps", "strategy", "us", "it",
+      "fac", "max it", "rst", "fails");
 }
 
-void ReportRow(const char* group, Size sz, Structure st, double penalty_w,
-               double sigma, double eps, const char* strategy,
-               const ChainResult& r) {
-  std::printf("  %-6s %3d %3d %4d %6.0e %6.0e %-8s | %8.1f %6.1f %5.1f %6d "
-              "%4d %d%s\n",
-              Name(st), sz.n, sz.m, sz.p, sigma, eps, strategy, r.us, r.it,
-              r.fac, r.max_it, r.resets, r.fails, r.fails ? " (FAILS)" : "");
+void ReportRow(const char* group, Size sz, Structure st,
+               const char* pen_label, double sigma, double eps,
+               const char* strategy, const ChainResult& r) {
+  std::printf("  %-6s %3d %3d %4d %-6s %6.0e %6.0e %-8s | %8.1f %6.1f %5.1f "
+              "%6d %4d %d%s\n",
+              Name(st), sz.n, sz.m, sz.p, pen_label, sigma, eps, strategy,
+              r.us, r.it, r.fac, r.max_it, r.resets, r.fails,
+              r.fails ? " (FAILS)" : "");
   if (g_csv) {
-    std::fprintf(g_csv, "%s,%s,%d,%d,%d,%g,%g,%g,%s,%.3f,%.3f,%.3f,%d,%d,%d\n",
-                 group, Name(st), sz.n, sz.m, sz.p, penalty_w, sigma, eps,
+    std::fprintf(g_csv, "%s,%s,%d,%d,%d,%s,%g,%g,%s,%.3f,%.3f,%.3f,%d,%d,%d\n",
+                 group, Name(st), sz.n, sz.m, sz.p, pen_label, sigma, eps,
                  strategy, r.us, r.it, r.fac, r.max_it, r.resets, r.fails);
   }
 }
 
-void RunCell(const char* group, Size sz, Structure st, double penalty_w,
+void RunCell(const char* group, Size sz, Structure st,
+             const Eigen::VectorXd& penalty, const char* pen_label,
              double sigma, double eps) {
-  const bool ruiz = penalty_w >= 1e4;
+  const bool ruiz = penalty.maxCoeff() >= 1e4;
   const unsigned seed = 91u * static_cast<unsigned>(sz.n) +
                         static_cast<unsigned>(sz.p) +
                         7u * static_cast<unsigned>(st);
-  const Trajectory traj = drift_traj::MakeTrajectory(sz, st, penalty_w, sigma,
+  const Trajectory traj = drift_traj::MakeTrajectory(sz, st, penalty, sigma,
                                                      Drift::kQH, seed, kTicks);
   for (const Strategy& strat : kStrategies) {
-    ReportRow(group, sz, st, penalty_w, sigma, eps, strat.name,
+    ReportRow(group, sz, st, pen_label, sigma, eps, strat.name,
               RunChain(traj, strat, eps, ruiz, /*warm=*/true));
   }
   // Cold reference: shipped defaults, no warm start. The pathologies
   // above are warm-only; this line gives the per-tick cost floor.
-  ReportRow(group, sz, st, penalty_w, sigma, eps, "cold-ref",
+  ReportRow(group, sz, st, pen_label, sigma, eps, "cold-ref",
             RunChain(traj, kStrategies[5], eps, ruiz, /*warm=*/false));
   std::printf("\n");
+}
+
+void RunCell(const char* group, Size sz, Structure st, double penalty_w,
+             double sigma, double eps) {
+  char label[16];
+  std::snprintf(label, sizeof(label), "%g", penalty_w);
+  RunCell(group, sz, st, Eigen::VectorXd::Constant(sz.p, penalty_w), label,
+          sigma, eps);
+}
+
+// Mixed penalty patterns (period 8). The bcl_mu_jump target is read off
+// the single worst-residual row, so the mix decides whether a soft row
+// can win that argmax while stiff rows creep:
+//   alt    every other row soft (50/50)
+//   spike  1 stiff row in 8 (stiff minority carries all the creep)
+//   dip    1 soft row in 8 (a soft-row argmax winner degrades the jump
+//          to the classic ladder -- the suspected worst case)
+Eigen::VectorXd MixedPenalty(int p, const char* pattern, double lo,
+                             double hi) {
+  Eigen::VectorXd w(p);
+  for (int i = 0; i < p; ++i) {
+    bool stiff = true;
+    if (std::string(pattern) == "alt") stiff = i % 2 == 0;
+    if (std::string(pattern) == "spike") stiff = i % 8 == 0;
+    if (std::string(pattern) == "dip") stiff = i % 8 != 0;
+    w[i] = stiff ? hi : lo;
+  }
+  return w;
 }
 
 }  // namespace
@@ -203,6 +236,23 @@ int main(int argc, char** argv) {
         for (const double sigma : {1e-4, 1e-3}) {
           RunCell("creep", sz, st, 1e4, sigma, eps);
         }
+      }
+    }
+  }
+
+  std::printf(
+      "=== mixed penalties: creep regime, per-row w in {10, 1e4} ===\n"
+      "alt = 50/50 | spike = 1 stiff row in 8 | dip = 1 soft row in 8\n"
+      "(dip is the suspected jump worst case: a soft row can win the\n"
+      "worst-residual argmax while the stiff majority creeps).\n");
+  Header();
+  for (const char* pattern : {"alt", "spike", "dip"}) {
+    for (const Structure st :
+         {Structure::kFeas, Structure::kInfeas, Structure::kDegen}) {
+      for (const double sigma : {1e-4, 1e-3}) {
+        const Size sz{30, 8, 200};
+        RunCell("mixed", sz, st, MixedPenalty(sz.p, pattern, 10.0, 1e4),
+                pattern, sigma, 1e-5);
       }
     }
   }

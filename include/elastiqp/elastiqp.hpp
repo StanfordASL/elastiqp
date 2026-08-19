@@ -192,21 +192,35 @@ struct Settings {
   // once mu_in <= r / (w - z) -- all known at the iterate. On an
   // inequality-driven bad step whose residual is STALLED (improved by
   // less than 20% this round -- a working ladder shrinks it ~10x, so
-  // slow improvement is the creep signature), jump mu_in directly to
-  // the worst-residual row's target instead of paying one inner solve +
-  // refactorization per 10x rung. The classic shrink is the ceiling
-  // (never a smaller step), mu_min_in the floor, and mu_eq follows by
-  // the same ratio -- the lockstep is essential: shrinking mu_eq by
-  // only the classic factor while mu_in jumps was measured
+  // slow improvement is the creep signature), jump mu_in to the
+  // SHALLOWEST target among the rows that are individually above
+  // tolerance and individually stalled (same 20% margin per row),
+  // instead of paying one inner solve + refactorization per 10x rung.
+  // Depth is self-pacing: rows resolve shallowest-first and leave the
+  // candidate set, and a genuinely creeping row gets its full depth on
+  // the next round. (The original variant jumped to the single
+  // worst-residual row's target; with mixed per-row penalties a stiff
+  // row far from saturation can win that argmax while the soft
+  // majority is still settling, and its 3-5-decade target then
+  // over-tightens the whole problem: measured +40-60% iterations and
+  // ~2x worst-tick on 1-stiff-in-8 w = {10, 1e4} mixes. The
+  // shallowest-first rule removes that regression, keeps the uniform
+  // creep wins, and is never worse than the plain split ladder beyond
+  // noise; see bench_bcl_strategies.) The classic shrink is the
+  // ceiling (never a smaller step), mu_min_in the floor, and mu_eq
+  // follows by the same ratio -- the lockstep is essential: shrinking
+  // mu_eq by only the classic factor while mu_in jumps was measured
   // catastrophically slower (+25-58% on high-penalty warm cells).
-  // Measured (5-seed warm drift grid, cold families, robot replay, all
-  // at eps 1e-5): -7 to -20% iterations on high-penalty (1e4) warm
-  // cells at every drift size and on all sigma=1e-4 creep cells; ~0%
+  // Measured (warm drift grid, cold families, robot replay, all at
+  // eps 1e-5): -7 to -20% iterations on high-penalty (1e4) warm cells
+  // at every drift size and on all sigma=1e-4 creep cells; ~0%
   // elsewhere warm; <= +4% on cold feasible solves (sub-iteration per
-  // solve absolute); robot sequences unchanged; no failures introduced.
-  // Deeper variants (resolve-all-rows, uncapped) and an ungated jump
-  // were measured worse and rejected. Set false for the classic
-  // fixed-factor ladder.
+  // solve absolute); robot sequences and cold random families
+  // unchanged; no failures introduced. Deeper variants
+  // (resolve-all-rows, uncapped), an ungated jump, and a per-row stall
+  // gate ALONE (kept: necessary but not sufficient for the mixed
+  // regression) were measured worse and rejected. Set false for the
+  // classic fixed-factor ladder.
   bool bcl_mu_jump = true;
   // Warm-start eta seeding (elastic reinterpretation of the warm mu
   // reset). A warm tick resets mu to the inits (below) AND restarts the
@@ -348,6 +362,8 @@ class Solver {
     din_.resize(p_);
     pv_.resize(p_);
     tp_.resize(p_);
+    jump_res_prev_.resize(p_);
+    jump_res_cur_.resize(p_);
     verr_.resize(n_);
     dyrhs_.resize(m_);
     rhs_x_.resize(n_);
@@ -585,6 +601,14 @@ class Solver {
       eta_ext = 0.5 * primal_res_;
     }
 
+    // Seed the jump's per-row stall reference from the starting iterate:
+    // a row whose residual the first inner solve barely moves is already
+    // creeping, so the jump may fire on the first bad round.
+    const bool track_jump_res = settings.bcl_split && settings.bcl_mu_jump;
+    if (track_jump_res) {
+      jump_res_prev_ = (r_ - t_).cwiseProduct(inv_di_);
+    }
+
     // ------------- outer loop (PMM + BCL, proxsuite qp_solve) -------------
     for (int oiter = 0; oiter < settings.max_outer_iter; ++oiter) {
       const double pri_old = primal_res_;
@@ -606,6 +630,12 @@ class Solver {
       if (converged()) return finish(Status::kSolved);
       const double pri_new = primal_res_;
       const double dua_new = dual_res_;
+      // This round's per-row residuals, taken before any mu update
+      // changes the t reconstruction; swapped into jump_res_prev_ after
+      // the BCL branch below has consumed the previous round's values.
+      if (track_jump_res) {
+        jump_res_cur_ = (r_ - t_).cwiseProduct(inv_di_);
+      }
 
       // BCL update (proxsuite bcl_update): the elastic primal feasibility
       // (equality residual + inequality violation beyond the reconstructed
@@ -637,15 +667,33 @@ class Solver {
           // keeps the jump out of cold/large-drift solves where the
           // classic descent is already sufficient (ungated, those
           // cells measured +3-6%).
-          double worst = 0.0;
+          // Candidate rows: residual above tolerance AND stalled at row
+          // level (same 20% margin as the round-level gate;
+          // jump_res_prev_ is seeded from the pre-loop iterate, so a
+          // genuine creep row fires on the first bad round). The jump
+          // lands at the SHALLOWEST target among the candidates, still
+          // capped by the classic shrink: depth is then self-pacing --
+          // rows resolve shallowest-first and leave the candidate set,
+          // and a genuinely creeping row gets its full depth on the
+          // next round. Taking the single worst-residual row's target
+          // instead was measured +40-60% iterations on mixed-penalty
+          // (1-stiff-in-8) cells: a stiff row far from saturation wins
+          // the argmax while the soft majority is still settling, and
+          // its 3-5-decade target over-tightens the whole problem.
+          double shallowest = 0.0;
           for (Eigen::Index i = 0; i < p_; ++i) {
-            const double res_i = (r_[i] - t_[i]) * inv_di_[i];
-            if (res_i <= settings.eps_abs || res_i <= worst) continue;
+            const double res_i = jump_res_cur_[i];
+            if (res_i <= settings.eps_abs ||
+                res_i <= 0.8 * jump_res_prev_[i]) {
+              continue;
+            }
             const double den = penalty_[i] - z_[i];
             if (!(den > 0.0) || r_[i] <= 0.0) continue;
-            worst = res_i;
+            shallowest = std::max(shallowest, r_[i] / den);
+          }
+          if (shallowest > 0.0) {
             mu_new = std::min(mu_in_ * settings.mu_update_factor,
-                              r_[i] / den);
+                              shallowest);
           }
         }
         // mu_eq follows by the same ratio (lockstep; see Settings).
@@ -669,6 +717,8 @@ class Solver {
         eta_in = std::max(mu_in_, eps_in_min);
         update_residuals();
       }
+
+      if (track_jump_res) jump_res_prev_.swap(jump_res_cur_);
 
       // Cold restart of stalled, over-tightened penalties (guarded so it
       // cannot fire in the endgame, see Settings::cold_reset_residual, and
@@ -1657,6 +1707,10 @@ class Solver {
 
   // Workspace (allocated in setup, reused every iteration)
   VectorXd S_, zhat_, t_, s2_, r_, din_, pv_, tp_;
+  // Previous / current outer-round per-row inequality residuals for the
+  // bcl_mu_jump per-row stall gate (only maintained while the jump is
+  // enabled).
+  VectorXd jump_res_prev_, jump_res_cur_;
   VectorXd verr_, dyrhs_, rhs_x_, dx_, dy_, dz_, Qdx_, Adx_, Gdx_;
   VectorXd wQx_, wGtz_, wGtd_, wAty_, wAx_, wGx_;
   MatrixXd GS_, K_;

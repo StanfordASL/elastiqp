@@ -131,10 +131,36 @@ target is explicit: a row lagging toward saturation with violation `r`
 and dual gap `w - z` snaps once `mu_in <= r / (w - z)`, all known at the
 iterate. On an inequality-driven bad step whose residual is *stalled*
 (improved by less than 20% this round — a working ladder shrinks it ~10x,
-so slow improvement is the creep signature), the solver jumps `mu_in`
-straight to the worst-residual row's target instead of paying one inner
-solve plus refactorization per 10x rung. The classic shrink is the
-ceiling, `mu_min_in` the floor, and `mu_eq` follows by the same ratio.
+so slow improvement is the creep signature), the solver jumps `mu_in` to
+the *shallowest* target among the rows that are individually above
+tolerance and individually stalled (same 20% margin per row), instead of
+paying one inner solve plus refactorization per 10x rung. The classic
+shrink is the ceiling, `mu_min_in` the floor, and `mu_eq` follows by the
+same ratio.
+
+The shallowest-first rule is a 2026-08-18 refinement driven by mixed
+per-row penalties. The original variant jumped to the single
+worst-residual row's target. With mixed penalties (measured on
+1-stiff-in-8 `w = {10, 1e4}` mixes, the `spike` cells of
+`bench_bcl_strategies`) a stiff row far from saturation can win that
+argmax while the soft majority is still settling; its target prices the
+travel to saturation — 3-5 decades of mu — for a row that will end
+interior, and the whole problem over-tightens: +40-60% iterations and
+~2x worst-tick versus the plain split ladder, i.e. the jump was WORSE
+than its own fallback there. Two candidate fixes were measured. A
+per-row stall gate alone (jump only off a row whose own residual
+stalled) did not help — the stiff argmax rows in the mixed cells are
+genuinely stalled too, they are just converging to an interior dual,
+which is indistinguishable from creep at the iterate. Selecting the
+shallowest stalled target fixes it structurally: depth is self-pacing
+(rows resolve shallowest-first and leave the candidate set; a genuinely
+creeping row gets its full depth on the next round), the `spike`
+regression disappears (−18 to −38%), the uniform-penalty creep wins are
+retained, and across the full strategy grid the jump is never worse
+than the split ladder beyond noise (worst cell +2.1%, sub-iteration).
+On the `bench_fwd_warm` grid the refinement is net +0.5%: cost-drift
+creep cells improve up to −29%, mid-drift (sigma 1e-2) infeasible cells
+pay +5-7%.
 
 Measured (5-seed warm drift grid, cold families, robot replay, eps 1e-5
 and 1e-8): −7 to −20% iterations on every high-penalty (1e4) warm cell
@@ -193,7 +219,21 @@ degen, 18 feas), and are identical at eps 1e-5 and 1e-8: the limit
 cycle fires above `cold_reset_residual`, so the production tolerance
 is equally exposed. In the control cells (penalty 10; sigma 1e-1) the
 reset never fires and the three reset variants are identical, while
-the elastic departures stay neutral-to-better. The regression test
-`elastiqp.bcl_creep` (tests/test_bcl_creep.cc) pins the shipped
-behavior on the two worst cells with bounds that discriminate every
-rejected generation.
+the elastic departures stay neutral-to-better.
+
+The benchmark also carries a mixed-penalty group (per-row
+`w = {10, 1e4}`: `alt` 50/50, `spike` 1 stiff in 8, `dip` 1 soft in 8),
+added 2026-08-18 for warm control loops with heterogeneous penalties.
+Two findings. First, the 50/50 mix is the one regime where the classic
+BCL fails even with the reset off (1 tick to kMaxIter on the feas
+sigma-1e-4 cell) — the block split itself, not just the reset removal,
+is load-bearing there. Second, the `spike` mix exposed the
+worst-residual-row jump regression fixed by the shallowest-first rule
+(see the mu-jump section). Ladder on the worst mixed cell
+(degen `spike`, sigma 1e-4, mean it / worst tick): split 34.1 / 76,
+worst-residual jump 46.4 / 99, shallowest-first shipped 33.2 / 80.
+
+The regression test `elastiqp.bcl_creep` (tests/test_bcl_creep.cc) pins
+the shipped behavior on the two worst uniform cells plus the `spike`
+mixed cell, with bounds that discriminate every rejected generation
+(proxqp parity, capped reset, worst-residual-row jump).
