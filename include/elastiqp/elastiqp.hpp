@@ -112,12 +112,13 @@ struct Solution {
 // control: on the robot-control benchmarks, warm-started solves deliver
 // ~1e-6 KKT residuals at this setting, while asking for 1e-8 costs 2-3x
 // the iterations. High-accuracy use can tighten eps_abs; 1e-8 converges
-// fine, just slower. (Unlike proxsuite we keep the duality-gap check on
-// by default -- it is a stricter stop and cheap to evaluate.)
+// fine, just slower.
 struct Settings {
   // Termination, on the unscaled elastic-KKT residuals.
   double eps_abs = 1e-5;
   double eps_rel = 0;
+  // Note: recommend leaving check_duality_gap=true for ensuring
+  // complementarity holds for the elastic problem
   bool check_duality_gap = true;
   double eps_duality_gap_abs = 1e-5;
   double eps_duality_gap_rel = 0;
