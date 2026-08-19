@@ -168,3 +168,32 @@ rejected: −22-28% on creep cells but +30-120% at large drift and
 +20-83% cold. The right depth is drift-dependent — which is exactly what
 the seeded eta plus the stall-gated jump discover per tick, at the cost
 of one probing round.
+
+## Validation
+
+`benchmarks/bench_bcl_strategies.cc` isolates the failure regime that
+motivated all of the above (penalty 1e4, sigma 1e-4/1e-3 qh drift, all
+three structures — first seen as forward warm-solve failures in
+`bench_relax_warm` at commit b995082) and replays it under each
+strategy generation via the settings flags, on the exact original
+trajectories (same generator, same seeds). Measured ladder on the
+worst cell (degen n=14 p=100, sigma 1e-4, 100 warm ticks):
+
+| generation | fails | reset ticks | mean it | worst tick |
+|---|---|---|---|---|
+| proxqp parity (uncapped reset) | 19 | 41 | 101.5 | 269 |
+| reset capped at 1 | 0 | 47 | 67.8 | 149 |
+| reset off | 0 | 0 | 38.5 | 77 |
+| + block split | 0 | 0 | 35.6 | 73 |
+| + mu jump | 0 | 0 | 26.2 | 52 |
+| + eta seed (shipped) | 0 | 0 | 25.0 | 52 |
+
+The fail counts under proxqp parity reproduce b995082 exactly (19
+degen, 18 feas), and are identical at eps 1e-5 and 1e-8: the limit
+cycle fires above `cold_reset_residual`, so the production tolerance
+is equally exposed. In the control cells (penalty 10; sigma 1e-1) the
+reset never fires and the three reset variants are identical, while
+the elastic departures stay neutral-to-better. The regression test
+`elastiqp.bcl_creep` (tests/test_bcl_creep.cc) pins the shipped
+behavior on the two worst cells with bounds that discriminate every
+rejected generation.

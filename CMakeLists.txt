@@ -36,6 +36,16 @@ if(NOT SKBUILD)
   target_link_libraries(test_pdal PRIVATE elastiqp::elastiqp)
   add_test(NAME elastiqp.pdal_cross_validation COMMAND test_pdal)
 
+  # Regression watch for the warm-start saturation-creep failure mode
+  # (see benchmarks/bench_bcl_strategies.cc). Needs only Eigen; the
+  # trajectory generator lives in benchmarks/common but is header-only.
+  add_executable(test_bcl_creep tests/test_bcl_creep.cc)
+  target_include_directories(test_bcl_creep PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/common
+    ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/common)
+  target_link_libraries(test_bcl_creep PRIVATE elastiqp::elastiqp)
+  add_test(NAME elastiqp.bcl_creep COMMAND test_bcl_creep)
+
   add_executable(test_ipm_reference tests/test_ipm_reference.cc)
   target_include_directories(test_ipm_reference PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/tests
