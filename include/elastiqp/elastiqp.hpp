@@ -5,24 +5,14 @@
 //               G x - t <= h      (soft, slack s_ineq, dual z_ineq)
 //               t >= 0            (slack s_t, dual z_t)
 //
-// Every inequality gets its own L1-penalized slack t_i. As such, the
-// inequalities cannot cause infeasibility, and the problem is feasible
-// iff the equality constraints are consistent. The slacks are handled
-// analytically rather than added as explicit decision variables.
-//
-// The solver is a primal-dual augmented Lagrangian (PDAL) method based on
-// ProxQP, adapted to the elastic form above.
-//
-// Notes:
-//
-// Eliminating the elastic slacks t analytically turns the problem
-// into  min 0.5 x'Qx + q'x + sum_i penalty_i [G_i x - h_i]_+
-// s.t. Ax = b, and the AL treatment of each inequality row becomes the
-// Moreau envelope of the weighted l1 penalty: quadratic with curvature
-// 1/mu_in near the boundary, linear with slope penalty_i past the kink.
-// On the dual side the multiplier estimate is projected onto [0, penalty]
-// instead of the nonnegative ray (bounded multipliers <=> exact l1
-// penalty), so ProxQP's active-set test gains a third state:
+// Each inequality row has its own L1-penalized slack t_i, so the
+// inequalities can never cause infeasibility: the problem is feasible iff
+// Ax = b is consistent. The slacks are eliminated analytically rather
+// than added as decision variables -- the AL treatment of each row
+// becomes the Moreau envelope of the weighted l1 penalty, and the
+// multiplier is projected onto [0, penalty] instead of the nonnegative
+// ray (bounded multipliers <=> exact l1 penalty). ProxQP's active-set
+// test then gains a third state:
 //
 //   S_i = G_i x - h_i + mu_in * z_prev_i          (shifted row value)
 //   inactive   S <= 0                  row out, dual snaps to 0
@@ -30,35 +20,25 @@
 //   saturated  S >= mu_in*penalty      row out, constant gradient
 //                                      penalty_i*G_i, dual snaps to penalty_i
 //
-// Everything else mirrors proxsuite's dense backend (PDAL merit with nu=1,
-// exact line search on the piecewise-quadratic merit, BCL outer loop with
-// multiplier revert on bad steps, equality-constrained cold start), with the
-// linear algebra condensed onto the n x n SPD system
-//   K = Q + rho*I + (1/mu_eq) A^T A + (1/mu_in) G_act^T G_act
-// (proxsuite's PrimalLDLT shape). The factorization is cached across Newton
-// iterations AND across solve() calls: it is rebuilt only when Q/A/G, the
-// active set, or (rho, mu) change -- so re-solves in a control loop where
-// only vectors (q, b, h, penalty) drift and the active set is stable cost
-// zero factorizations.
+// The method is a primal-dual augmented Lagrangian (PDAL) that mirrors
+// proxsuite's dense backend (PDAL merit with nu=1, exact line search, BCL
+// outer loop, equality-constrained cold start), condensed onto the
+// n x n SPD system K = Q + rho*I + (1/mu_eq) A^T A + (1/mu_in) G_act^T G_act.
+// The factorization is cached across Newton iterations AND across solve()
+// calls: control-loop re-solves where only vectors drift and the active
+// set is stable cost zero factorizations.
 //
-// Because the penalty is exact (no barrier), an unsaturated solution matches
-// the hard-constrained QP exactly, and the reconstructed elastic certificate
-// satisfies the t-block dual feasibility penalty - z_t - z_ineq = 0 exactly.
-// Warm starting needs no slack/dual flooring: there is no interior to
-// protect; the previous (x, y, z_ineq) is reused as-is, with z_ineq clamped to
-// [0, penalty], along with mu/rho and the cached factorization.
+// The penalty is exact (no barrier): an unsaturated solution matches the
+// hard-constrained QP, and warm starting needs no slack flooring -- the
+// previous (x, y, z_ineq) is reused as-is, z_ineq clamped to [0, penalty].
 //
-// Omitted from proxsuite: GPDAL merit, incremental LDLT updates + iterative
-// refinement, box specialization, nonconvex handling. Proxsuite's
-// Farkas-style infeasibility detection is replaced by a direct
-// equality-consistency certificate (Settings::check_eq_consistency):
-// inconsistent Ax = b is the only way the elastic problem can be
-// infeasible, and that is a property of (A, b) alone, checkable at data
-// ingestion. Equalities hold to solver tolerance (~eps_abs).
-//
-// Differentiability: relax(kappa) walks the converged solution to a
-// kappa-relaxed central point (complementarity s.z = kappa) for smooth
-// implicit differentiation, using a log-barrier retraction
+// Departures from proxsuite: GPDAL merit, incremental LDLT, box
+// specialization, and nonconvex handling are omitted; Farkas
+// infeasibility detection is replaced by an equality-consistency
+// certificate (Settings::check_eq_consistency); the BCL outer loop is
+// adapted to the elastic setting (docs/elastic_bcl.md). For smooth
+// implicit differentiation, relax(kappa) walks the converged solution to
+// a kappa-relaxed central point (docs/pdal_differentiability.md).
 
 #pragma once
 
@@ -80,26 +60,17 @@ enum class Status {
   kSolved = 1,
   kMaxIter = 2,
   kNumerics = 3,
-  // Certified inconsistent equalities: Ax = b has no solution, the only
-  // way the elastic problem can be infeasible (every inequality row has a
-  // slack). Returned by solve() without spending iterations; see
-  // Settings::check_eq_consistency.
-  kInfeasible = 4,
+  kInfeasible = 4,  // Only if inequalities are inconsistent
 };
 
-// The elastic KKT certificate. One slack/dual pair per constraint block:
-// _t for the bound t >= 0, _ineq for the elastic rows Gx - t <= h. Both
-// pairs have length p; y (length m) is the equality dual. At a solution
-// z_t = penalty - z_ineq, so z_ineq in [0, penalty] -- the bounded
-// multiplier that makes the L1 penalty exact.
 struct Solution {
   VectorXd x;
-  VectorXd t;               // per-constraint elastic slacks (= violations)
+  VectorXd t;               // per-constraint elastic slacks
   VectorXd y;               // equality duals
   VectorXd s_t, s_ineq;     // slacks for t >= 0 and Gx - t <= h
   VectorXd z_t, z_ineq;     // duals for t >= 0 and Gx - t <= h
   Status status = Status::kUnsolved;
-  int converged = 0;  // 1 iff status == kSolved
+  int converged = 0;  // if status == kSolved
   int iters = 0;      // total inner semismooth Newton steps
   double primal_obj = 0.0;
   double primal_res = 0.0;
@@ -107,52 +78,28 @@ struct Solution {
   double duality_gap = 0.0;
 };
 
-// Primal-dual augmented Lagrangian settings -- every knob the solver has.
-// The 1e-5 accuracy target matches proxsuite's default and is sized for
-// control: on the robot-control benchmarks, warm-started solves deliver
-// ~1e-6 KKT residuals at this setting, while asking for 1e-8 costs 2-3x
-// the iterations. High-accuracy use can tighten eps_abs; 1e-8 converges
-// fine, just slower.
 struct Settings {
-  // Termination, on the unscaled elastic-KKT residuals.
-  double eps_abs = 1e-5;
-  double eps_rel = 0;
+  // Termination criteria
   // Note: recommend leaving check_duality_gap=true for ensuring
   // complementarity holds for the elastic problem
+  double eps_abs = 1e-5;
+  double eps_rel = 0;
   bool check_duality_gap = true;
   double eps_duality_gap_abs = 1e-5;
   double eps_duality_gap_rel = 0;
   int max_factor_retries = 10;
 
-  // Certified equality-consistency gate (elastic departure from proxsuite,
-  // whose Farkas-based detection was dropped wholesale). In the elastic
-  // form the inequality rows cannot cause infeasibility, so the problem
-  // is infeasible iff Ax = b is inconsistent -- a property of (A, b)
-  // alone. At data ingestion (setup() / set_A() / set_b()) the solver
-  // rank-checks the UNSCALED A: full row rank certifies consistency for
-  // every b (so vector updates in a control loop cost nothing); for
-  // rank-deficient A each new b pays one cached-QR least-squares solve,
-  // whose residual gives a certified lower bound on the equality residual
-  // ANY iterate can reach (see eq_infeasibility()). solve() then returns
-  // kInfeasible immediately when the bound exceeds eps_abs, instead of
-  // burning the full max_outer_iter budget on an unreachable tolerance.
-  // Only the absolute clause of the termination test can be certified
-  // impossible, so runs with eps_rel > 0 are never gated. Read at
-  // ingestion time (the QR) and at solve() time (the gate).
+  // Check if equalities are inconsistent (only infeasibility case)
   bool check_eq_consistency = true;
 
-  // Reuse the previous solve's (x, y, z_ineq) and cached factorization from
-  // the second solve() on, resetting rho/mu to the values below.
+  // Warm-start from a previous solution + cached factorization
   bool warm_start = true;
 
-  // Iteration budget. The outer BCL loop runs max_outer_iter rounds; each
-  // round runs up to max_iter_in semismooth Newton steps, and Solution::iters
-  // reports their total (so it is not bounded by max_outer_iter).
-  int max_outer_iter = 250;
-  int max_iter_in = 1500;
+  // Iteration budget
+  int max_outer_iter = 250;  // BCL rounds
+  int max_iter_in = 1500;  // semismooth Newton steps
 
-  // Proximal regularization (primal) and AL penalties / dual prox (mu).
-  // proxsuite defaults.
+  // Proximal regularization and AL penalties (proxsuite defaults)
   double rho = 1e-6;
   double mu_eq_init = 1e-3;
   double mu_in_init = 1e-1;
@@ -160,168 +107,42 @@ struct Settings {
   double mu_min_in = 1e-8;
   double mu_update_factor = 0.1;
 
-  // BCL outer-loop schedule (proxsuite defaults). eta_ext starts at
-  // 0.1^alpha_bcl and tightens by mu_in^beta_bcl on good steps; a bad step
-  // reverts the multipliers and shrinks mu by mu_update_factor.
+  // BCL outer-loop schedule (proxsuite defaults)
   double alpha_bcl = 0.1;
   double beta_bcl = 0.9;
 
-  // Block-split BCL bad step (docs/elastic_bcl.md; the elastic-specific
-  // departure from proxsuite's bcl_update). Classic BCL's bad step is
-  // infeasibility-fighting medicine: revert BOTH dual blocks, shrink
-  // both penalties. In the elastic setting only the equality block
-  // Ax = b is hard; the inequality-block residual measures multiplier
-  // lag (slack-reconstruction inconsistency), for which z-movement is
-  // always progress. With the split (default), a bad step reverts y
-  // only when eq_res is itself above eta_ext, never reverts z, and
-  // still shrinks both mu in lockstep (1/mu is each block's dual step
-  // size; gating the mu_eq shrink measurably slows equality-dual
-  // convergence). Measured: -5-9% iterations on warm creep cells and
-  // cold infeasible families, big-drift cells up to -18%, elsewhere
-  // neutral; inconsistent hard equalities fail identically to classic.
-  // Set false for proxsuite-parity outer-loop behavior. (A further split
-  // of the eta_ext THRESHOLDS per block -- classifying and resetting each
-  // block against its own ladder -- was evaluated 2026-08 and rejected:
-  // measured neutral-to-worse on the full warm/cold grid; see
-  // docs/elastic_bcl.md. The shared worst-block ladder stays.)
+  // ElastiQP BCL strategy (modified from proxsuite)
+  // On a BCL bad step, revert only the equality duals, never the inequality duals
   bool bcl_split = true;
-  // Creep-resolving mu jump (elastic departure from proxsuite's blind
-  // ladder; only read when bcl_split is true). Classic BCL must shrink
-  // mu by a fixed factor per bad round because for a hard QP no target
-  // depth exists. In the elastic reading, a row lagging toward
-  // saturation with violation r and dual gap w - z snaps to saturation
-  // once mu_in <= r / (w - z) -- all known at the iterate. On an
-  // inequality-driven bad step whose residual is STALLED (improved by
-  // less than 20% this round -- a working ladder shrinks it ~10x, so
-  // slow improvement is the creep signature), jump mu_in to the
-  // SHALLOWEST target among the rows that are individually above
-  // tolerance and individually stalled (same 20% margin per row),
-  // instead of paying one inner solve + refactorization per 10x rung.
-  // Depth is self-pacing: rows resolve shallowest-first and leave the
-  // candidate set, and a genuinely creeping row gets its full depth on
-  // the next round. (The original variant jumped to the single
-  // worst-residual row's target; with mixed per-row penalties a stiff
-  // row far from saturation can win that argmax while the soft
-  // majority is still settling, and its 3-5-decade target then
-  // over-tightens the whole problem: measured +40-60% iterations and
-  // ~2x worst-tick on 1-stiff-in-8 w = {10, 1e4} mixes. The
-  // shallowest-first rule removes that regression, keeps the uniform
-  // creep wins, and is never worse than the plain split ladder beyond
-  // noise; see bench_bcl_strategies.) The classic shrink is the
-  // ceiling (never a smaller step), mu_min_in the floor, and mu_eq
-  // follows by the same ratio -- the lockstep is essential: shrinking
-  // mu_eq by only the classic factor while mu_in jumps was measured
-  // catastrophically slower (+25-58% on high-penalty warm cells).
-  // Measured (warm drift grid, cold families, robot replay, all at
-  // eps 1e-5): -7 to -20% iterations on high-penalty (1e4) warm cells
-  // at every drift size and on all sigma=1e-4 creep cells; ~0%
-  // elsewhere warm; <= +4% on cold feasible solves (sub-iteration per
-  // solve absolute); robot sequences and cold random families
-  // unchanged; no failures introduced. Deeper variants
-  // (resolve-all-rows, uncapped), an ungated jump, and a per-row stall
-  // gate ALONE (kept: necessary but not sufficient for the mixed
-  // regression) were measured worse and rejected. Set false for the
-  // classic fixed-factor ladder.
+  // Jump mu to known (shallowest) saturation point among stalled inequalities
   bool bcl_mu_jump = true;
-  // Warm-start eta seeding (elastic reinterpretation of the warm mu
-  // reset). A warm tick resets mu to the inits (below) AND restarts the
-  // BCL ladder at eta_ext_init ~ 0.79 -- but the iterate is already
-  // near-converged, so a small-drift tick spends several "good" rounds
-  // merely tightening eta down to its actual residual before any mu
-  // action starts (the eta-ladder replay; on saturation-creep ticks this
-  // is most of the warm cost). With this on, a warm (or explicit) start
-  // seeds eta_ext at min(eta_ext_init, 0.5 * initial primal residual):
-  // large drift keeps proxsuite behavior (the seed clamps at
-  // eta_ext_init), small drift skips straight to the first meaningful
-  // bad step, where the creep jump (bcl_mu_jump) takes over. Cold solves
-  // are untouched. Measured on top of bcl_mu_jump: -9 to -14% on
-  // warm saturation-creep cells, -1 to -4% broadly, worst case +0.5%
-  // (a couple of iterations); identical at eps 1e-5 and 1e-8.
-  // (A fixed deeper warm mu_in_init was also evaluated for this regime
-  // and rejected: -22-28% on creep cells but +30-120% at large drift
-  // and +20-83% cold -- the right depth is drift-dependent, which is
-  // exactly what the seeded eta + stall-gated jump discover per tick
-  // at the cost of one probing round.)
+  // Warm-start eta seeding
   bool bcl_warm_eta = true;
-  // Cold restart of over-tightened mu (proxsuite's escape hatch for stuck
-  // problems). It only fires while the residuals are still ABOVE
-  // cold_reset_residual: proxsuite's thresholds are tuned for its 1e-5
-  // accuracy target, and letting the reset fire in the 1e-8 endgame (where
-  // the dual residual sits at machine noise and "not improving" is a coin
-  // flip) creates a mu limit cycle that plateaus the primal residual.
-  // cold_reset_limit caps how many times the reset may fire per solve(),
-  // and defaults to 0: DISABLED. Measured 2026-08: the reset never fired
-  // on any cold solve (720 random instances across every structure /
-  // penalty / accuracy tier, plus the 144 Maros-Meszaros small-dense
-  // elastic solves) -- it fired only on warm starts, where it is
-  // actively harmful. A warm start whose drift pushes weakly-active rows
-  // toward elastic saturation resolves them by multiplier creep (~r/mu
-  // per outer round), which looks "non-improving" to the reset test
-  // exactly when the mu ladder finally reaches creep-resolving depth --
-  // the reset then re-slows the creep by 5 orders of magnitude, and
-  // uncapped it limit-cycles to kMaxIter (13-22% of ticks on small-drift
-  // high-penalty trajectories; capped at 1 it still wastes an eta_ext
-  // ladder cycle on ~a third of such ticks, ~1.8x mean iterations).
-  // With the reset off, a stuck solve rides the mu ladder to its floor
-  // (mu_min_in / mu_min_eq), where the creep becomes a jump and
-  // saturation resolves; a genuinely stiff problem at the floor either
-  // finishes or fails fast through the factorization-retry path instead
-  // of cycling. Set a positive limit to restore the escape hatch.
+
+  // Cold restart of over-tightened mu (proxsuite logic, mainly)
+  // Disabled by default for ElastiQP (reset limit 0)
   double cold_reset_mu = 1.0 / 1.1;
   double cold_reset_threshold = 1e-5;
   double cold_reset_residual = 1e-5;
   int cold_reset_limit = 0;
   int safe_guard = 10000;  // total-Newton-iteration escape for BCL
 
-  // Ruiz equilibration of the stacked [Q A' G'; A 0 0; G 0 0] structure
-  // plus cost normalization. Read at setup() time (ignored when p == 0);
-  // set_*() updates are rescaled with the setup()-time scaling (call
-  // setup() again to re-equilibrate). The iterates live in the scaled
-  // space, but termination and every reported residual stay on the
-  // unscaled elastic KKT, and Solution is returned unscaled. The penalty
-  // transforms as w_scaled = c * w / delta_row, which keeps the dual box
-  // [0, w] and the saturation test consistent in scaled space.
+  // Ruiz equilibration (at problem setup)
   bool ruiz = false;
   int ruiz_max_iter = 10;
   double ruiz_tol = 1e-3;
 
-  // Proximal regularization of the relax() Newton system (primal diagonal
-  // and equality dual). The prox centers sit
-  // at the current iterate, so the value only damps the step -- it does not
-  // perturb the relaxed point -- and it is escalated x100 on factorization
-  // failure like the main loop's rho.
+  // Regularization added to the relax() Newton system
   double relax_reg = 1e-9;
 
-  // Iteration budget for a relax() WARM attempt before it gives up and
-  // restarts from the tight retraction (see relax()). A healthy warm
-  // start converges in 1-10 iterations (bench_relax_warm, bench_diff_
-  // robot); a warm start whose smoothed configuration flipped on
-  // high-penalty rows stalls instead of converging, and without this cap
-  // it burns the full max_iter before the fallback. The effective budget
-  // is min(relax_warm_budget, max_iter).
+  // relax() / backward-pass warm-starting
+  // Attempts for warm-starting relax() before restarting from the tight sol
   int relax_warm_budget = 15;
-
-  // Predicted-flip gate for a relax() warm attempt. Before continuing
-  // from the stored chain iterate, count the rows whose smoothed-
-  // configuration sign (which side of the s.z = kappa hyperbola, per
-  // block) under the retraction of the CURRENT tight certificate
-  // disagrees with the stored iterate; if more than this many disagree,
-  // skip the warm attempt and start from the retraction directly --
-  // each such flip re-pays the barrier curvature walk, and at high
-  // penalty a flipped warm start stalls to the budget fallback anyway
-  // (bench_relax_warm). Only well-separated rows count: a near-corner
-  // row (|v_old * v_new| <= 100 kappa) flips cheaply, and its converged
-  // relaxed sign can chronically disagree with its retraction sign
-  // without any tick-to-tick flip. The gate needs a tight certificate
-  // from solve(), so gradient-only chains (set_*() + relax() with no
-  // solve()) are not gated. Set negative to disable.
+  // Skip warm relax() if more than these rows flip sides of the s.z = kappa
+  // hyperbola between solves
   int relax_warm_flip_tol = 0;
 };
 
-// Reusable ProxQP-style elastic solver. setup() once, then alternate
-// set_*() / solve(). All workspace is allocated in setup(); solve() is
-// allocation-free on the warm path (up to std::sort of the preallocated
-// line-search breakpoint buffer).
 class Solver {
  public:
   Settings settings;
@@ -329,16 +150,19 @@ class Solver {
   void setup(const MatrixXd& Q, const VectorXd& q, const MatrixXd& A,
              const VectorXd& b, const MatrixXd& G, const VectorXd& h,
              const VectorXd& penalty) {
+    // Dimensions and problem data
     n_ = q.size();
     m_ = b.size();
     p_ = h.size();
-    Q_ = 0.5 * (Q + Q.transpose());
+    Q_ = 0.5 * (Q + Q.transpose());  // symmetrize
     q_ = q;
     A_ = A;
     b_ = b;
     G_ = G;
     h_ = h;
     penalty_ = penalty;
+
+    // Reset warm-start, factorization-cache, and proximal state
     have_warm_ = false;
     relax_have_warm_ = false;
     explicit_warm_ = false;
@@ -348,6 +172,7 @@ class Solver {
     mu_eq_ = 0.0;
     mu_in_ = 0.0;
 
+    // Iterates and prox centers
     x_.resize(n_);
     y_.resize(m_);
     z_.resize(p_);
@@ -355,6 +180,7 @@ class Solver {
     yk_.resize(m_);
     zk_.resize(p_);
 
+    // solve() workspace, preallocated
     S_.resize(p_);
     zhat_.resize(p_);
     t_.resize(p_);
@@ -381,15 +207,18 @@ class Solver {
     wAx_.resize(m_);
     wGx_.resize(p_);
 
+    // Active-set state and line-search breakpoint buffer
     state_.assign(static_cast<size_t>(p_), 0);
     f_active_.assign(static_cast<size_t>(p_), 0);
     bp_.clear();
     bp_.reserve(static_cast<size_t>(2 * p_));
 
+    // Condensed KKT staging and its factorization
     GS_.resize(p_, n_);
     K_.resize(n_, n_);
     llt_ = Eigen::LLT<MatrixXd, Eigen::Lower>(n_);
 
+    // relax() iterate and workspace
     xr_.resize(n_);
     tr_.resize(p_);
     yr_.resize(m_);
@@ -417,9 +246,11 @@ class Solver {
     dv2r_.resize(p_);
     llt_r_ = Eigen::LLT<MatrixXd, Eigen::Lower>(n_);
 
-    check_eq_A(A_);  // A_, b_ are still unscaled here
+    // Equality-consistency certificate, on the still-unscaled (A_, b_)
+    check_eq_A(A_);
     check_eq_b(b_);
 
+    // Scaling state (identity unless Ruiz runs) and the A^T A cache
     ruiz_ = settings.ruiz && p_ > 0;
     dx_s_ = VectorXd::Ones(n_);
     de_s_ = VectorXd::Ones(m_);
@@ -452,10 +283,7 @@ class Solver {
   Eigen::Index m() const { return m_; }
   Eigen::Index p() const { return p_; }
 
-  // Data updates between solves (dimensions must not change). Vector
-  // updates keep the cached factorization; matrix updates invalidate it.
-  // Inputs are unscaled; with Ruiz active they are rescaled into the
-  // setup()-time scaled frame on ingestion.
+  // Data updates between solves
   void set_Q(const MatrixXd& Q) {
     Q_ = 0.5 * (Q + Q.transpose());
     if (ruiz_) Q_ = c_s_ * dx_s_.asDiagonal() * Q_ * dx_s_.asDiagonal();
@@ -486,17 +314,7 @@ class Solver {
     penalty_ = ruiz_ ? VectorXd(c_s_ * penalty.cwiseQuotient(di_s_)) : penalty;
   }
 
-  // Explicitly seed the next solve()'s starting iterate, replacing the
-  // automatic warm start. (x, y, z_ineq) is the whole iterate this method
-  // carries -- Solution's t, s_t, s_ineq and z_t are reconstructed from it
-  // (see update_residuals), so there is nothing else to seed. Unlike an
-  // interior-point method there are no slacks to keep strictly positive, so
-  // any point is valid (z_ineq is clamped into [0, penalty]). rho/mu > 0
-  // override the proximal parameters for the next solve; when <= 0 the
-  // settings defaults are used (NOT the converged values of the previous
-  // solve, which sit at their floors and make a drifted problem's first AL
-  // subproblem needlessly stiff). Takes effect once, for the next solve()
-  // only, regardless of settings.warm_start.
+  // Explicitly set the warm-start for the next solve
   void set_warm_start(const VectorXd& x, const VectorXd& y,
                       const VectorXd& z_ineq, double rho = 0.0,
                       double mu_eq = 0.0, double mu_in = 0.0) {
@@ -511,19 +329,14 @@ class Solver {
 
   const Solution& solution() const { return sol_; }
 
-  // Number of KKT factorizations performed by the last solve() (a warm
-  // re-solve with an unchanged active set and unchanged Q/G/A/mu needs 0).
+  // Number of KKT factorizations performed by the last solve()
   int factorizations() const { return factor_count_; }
 
-  // Number of BCL cold resets the last solve() fired (capped by
-  // Settings::cold_reset_limit).
+  // Number of BCL cold resets performed by the last solve()
   int cold_resets() const { return cold_resets_; }
 
-  // Certified lower bound on the unscaled equality residual ||Ax - b||_inf
-  // that ANY x can reach, from the ingestion-time consistency check
-  // (Settings::check_eq_consistency). 0 when A has full row rank, when the
-  // current b is consistent, or when the check is disabled.
-  double eq_infeasibility() const { return eq_infeas_; }
+  // Lower bound on reachable equality residual. 0 if consistent or check disabled
+  double eq_infeasibility() const { return eq_infeas_lb_; }
 
   const Solution& solve() {
     const bool explicit_ws = explicit_warm_;
@@ -533,15 +346,9 @@ class Solver {
     factor_retries_ = 0;
     cold_resets_ = 0;
 
-    // Fail fast on certified infeasibility: eq_infeas_ lower-bounds the
-    // equality residual any iterate can reach (see check_eq_b), so once it
-    // exceeds eps_abs the absolute primal test can never pass and the
-    // solve would run to kMaxIter. Only the absolute clause is certified
-    // (the relative denominator depends on the iterate), so eps_rel > 0
-    // runs are never gated. The stored iterate is untouched: a transient
-    // inconsistent tick in a control loop keeps its warm start.
+    // Throw infeasibile if checks on latest A/b data indicated inconsistent
     if (settings.check_eq_consistency && settings.eps_rel <= 0 &&
-        eq_infeas_ > settings.eps_abs) {
+        eq_infeas_lb_ > settings.eps_abs) {
       if (!have_warm_ && !explicit_ws) {
         rho_ = settings.rho;
         mu_eq_ = settings.mu_eq_init;
@@ -563,13 +370,8 @@ class Solver {
     if (explicit_ws) {
       z_ = z_.cwiseMax(0.0).cwiseMin(penalty_);
     } else if (settings.warm_start && have_warm_) {
-      // Keep (x, y, z) and the cached factorization from the previous
-      // solve, but reset the AL penalties to their defaults (proxsuite's
-      // warm-start path does the same): the converged mu sit at their
-      // floors, and starting a drifted problem with a ~1e8-stiff AL term
-      // makes the first subproblems thrash. The BCL loop re-tightens mu
-      // cheaply from a near-optimal iterate. z is re-clamped in case the
-      // penalty changed.
+      // Keep (x, y, z) and the cached factorization, reset AL penalties
+      // z is re-clamped in case the penalty changed
       mu_eq_ = settings.mu_eq_init;
       mu_in_ = settings.mu_in_init;
       rho_ = settings.rho;
@@ -582,105 +384,74 @@ class Solver {
       }
     }
 
-    // BCL state (proxsuite: bcl_eta_ext_init = 0.1^alpha_bcl, eta_in = 1).
+    // BCL state (proxsuite defaults)
     const double eta_ext_init = std::pow(0.1, settings.alpha_bcl);
     const double eps_in_min = std::min(settings.eps_abs, 1e-9);
     double eta_ext = eta_ext_init;
     double eta_in = 1.0;
 
+    // Initial termination check
     update_residuals();
     if (converged()) return finish(Status::kSolved);
-    // Seed the ladder at the measured residual on warm starts (see
-    // Settings::bcl_warm_eta): skip the eta-tightening replay and get to
-    // the first meaningful bad step -- and the creep jump -- immediately.
-    // Only when the skip is substantial (>= a decade of ladder): a
-    // marginal seed at moderate drift forces bad steps while x is still
-    // far from the new optimum, over-tightening mu early (measured +5-15%
-    // warm on badly row-scaled tight-eps cells without this guard).
-    if (warm_path && settings.bcl_warm_eta &&
-        0.5 * primal_res_ < 0.1 * eta_ext) {
-      eta_ext = 0.5 * primal_res_;
+
+    // If warm-starting, start eta_ext around the current residual level
+    // But, only do so if it results in a 10x skip. Smaller skips might lead
+    // to a bad step / mu-shrink that makes it no longer worth it
+    const double eta_warm = 0.5 * primal_res_;
+    if (warm_path && settings.bcl_warm_eta && eta_warm < 0.1 * eta_ext) {
+      eta_ext = eta_warm;
     }
 
-    // Seed the jump's per-row stall reference from the starting iterate:
-    // a row whose residual the first inner solve barely moves is already
-    // creeping, so the jump may fire on the first bad round.
+    // Store initial residuals to track slow convergence across outer rounds
     const bool track_jump_res = settings.bcl_split && settings.bcl_mu_jump;
     if (track_jump_res) {
       jump_res_prev_ = (r_ - t_).cwiseProduct(inv_di_);
     }
 
-    // ------------- outer loop (PMM + BCL, proxsuite qp_solve) -------------
+    // Outer loop (PMM + BCL) 
     for (int oiter = 0; oiter < settings.max_outer_iter; ++oiter) {
       const double pri_old = primal_res_;
       const double dua_old = dual_res_;
 
-      // The PMM "multiplier update" is implicit: snapshot the prox centers
-      // and let the inner primal-dual Newton move (x, y, z) jointly.
+      // PMM: Center proximal terms on current iterate;
+      // update shifted constraint value for new center
       xk_ = x_;
       if (m_ > 0) yk_ = y_;
       zk_ = z_;
       wGx_.noalias() = G_ * x_;
       S_ = wGx_ - h_ + mu_in_ * zk_;
 
+      // PMM: newton solve for subproblem
       if (!inner_loop(eta_in)) {
         return finish(Status::kNumerics);
       }
 
+      // Termination check after newton solve
       update_residuals();
       if (converged()) return finish(Status::kSolved);
+
       const double pri_new = primal_res_;
       const double dua_new = dual_res_;
-      // This round's per-row residuals, taken before any mu update
-      // changes the t reconstruction; swapped into jump_res_prev_ after
-      // the BCL branch below has consumed the previous round's values.
+
+      // Store residuals for convergence tracking for this round
       if (track_jump_res) {
         jump_res_cur_ = (r_ - t_).cwiseProduct(inv_di_);
       }
 
-      // BCL update (proxsuite bcl_update): the elastic primal feasibility
-      // (equality residual + inequality violation beyond the reconstructed
-      // slack) decides between a dual update and a mu shrink.
+      // BCL: accept the step and tighten tolerances, or shrink mu on a bad step
       if (pri_new <= eta_ext || iters_total_ > settings.safe_guard) {
         eta_ext *= std::pow(mu_in_, settings.beta_bcl);
         eta_in = std::max(eta_in * mu_in_, eps_in_min);
       } else if (settings.bcl_split) {
-        // Bad step, block-split (docs/elastic_bcl.md): the dual REVERT
-        // -- classic BCL's "multipliers estimated at an infeasible
-        // point are untrustworthy" -- applies only to the HARD equality
-        // block, and only when its residual is the offender. The
-        // elastic inequality block always keeps z: its movement is
-        // dual progress toward the box target, never infeasibility
-        // drift. Both mu still shrink in lockstep (1/mu is each
-        // block's dual step size; gating the mu_eq shrink on eq_res
-        // measurably slows equality-dual convergence on cold
-        // infeasible+eq problems).
+        // Bad step: revert y if equalities are at fault, not z, and shrink mu
+        // (split handling for elastic structure -- hard eq, elastic ineq)
         if (m_ > 0 && eq_res_ > eta_ext) y_ = yk_;
         double mu_new = mu_in_ * settings.mu_update_factor;
         if (settings.bcl_mu_jump && in_res_ > eta_ext &&
             pri_new > 0.8 * pri_old) {
-          // Creep-resolving jump (Settings::bcl_mu_jump): the
-          // worst-residual lagging row snaps to saturation once
-          // mu_in <= r / (w - z); jump straight to that target instead
-          // of descending one rung per round. Gated on a stalled
-          // residual -- a working ladder shrinks it ~10x per round, so
-          // <20% improvement is the creep signature; the gate is what
-          // keeps the jump out of cold/large-drift solves where the
-          // classic descent is already sufficient (ungated, those
-          // cells measured +3-6%).
-          // Candidate rows: residual above tolerance AND stalled at row
-          // level (same 20% margin as the round-level gate;
-          // jump_res_prev_ is seeded from the pre-loop iterate, so a
-          // genuine creep row fires on the first bad round). The jump
-          // lands at the SHALLOWEST target among the candidates, still
-          // capped by the classic shrink: depth is then self-pacing --
-          // rows resolve shallowest-first and leave the candidate set,
-          // and a genuinely creeping row gets its full depth on the
-          // next round. Taking the single worst-residual row's target
-          // instead was measured +40-60% iterations on mixed-penalty
-          // (1-stiff-in-8) cells: a stiff row far from saturation wins
-          // the argmax while the soft majority is still settling, and
-          // its 3-5-decade target over-tightens the whole problem.
+          // If an inequality row is slowly improving (< 20% per round), it needs
+          // mu_in <= r / (penalty - z) for its dual to snap to the penalty cap.
+          // Drop mu_in by the smallest amount that resolves one stuck row.
           double shallowest = 0.0;
           for (Eigen::Index i = 0; i < p_; ++i) {
             const double res_i = jump_res_cur_[i];
@@ -697,17 +468,16 @@ class Solver {
                               shallowest);
           }
         }
-        // mu_eq follows by the same ratio (lockstep; see Settings).
+        // Shrink mu_eq_ at same ratio as mu_in_
         const double ratio = mu_new / mu_in_;
         mu_in_ = std::max(mu_new, settings.mu_min_in);
         mu_eq_ = std::max(mu_eq_ * ratio, settings.mu_min_eq);
+        // Reset BCL tolerances to the new mu
         eta_ext = eta_ext_init * std::pow(mu_in_, settings.alpha_bcl);
         eta_in = std::max(mu_in_, eps_in_min);
-        update_residuals();  // mu_in changes the t reconstruction
+        update_residuals();
       } else {
-        // Bad step: revert the multipliers (x is kept) and increase the
-        // penalties. The factorization cache invalidates via the mu
-        // fingerprint.
+        // Bad step [no elastic BCL split logic] -- same as proxqp
         if (m_ > 0) y_ = yk_;
         z_ = zk_;
         mu_in_ = std::max(mu_in_ * settings.mu_update_factor,
@@ -719,11 +489,11 @@ class Solver {
         update_residuals();
       }
 
+      // Keep track of residuals for the next round
       if (track_jump_res) jump_res_prev_.swap(jump_res_cur_);
 
-      // Cold restart of stalled, over-tightened penalties (guarded so it
-      // cannot fire in the endgame, see Settings::cold_reset_residual, and
-      // capped per solve, see Settings::cold_reset_limit).
+      // Cold restart of stalled, over-tightened penalties
+      // Proxqp has this on, we keep this normally off (limit=0)
       if (pri_new >= pri_old && dua_new >= dua_old &&
           mu_in_ <= settings.cold_reset_threshold &&
           std::max(pri_new, dua_new) > settings.cold_reset_residual &&
@@ -737,104 +507,32 @@ class Solver {
     return finish(Status::kMaxIter);
   }
 
-  // Re-solve from the converged solution to a kappa-relaxed central point of
-  // the elastic QP: the same KKT conditions, but with the complementarity
-  // pairs relaxed to s_t.z_t = s_ineq.z_ineq = kappa (the point an interior
-  // point method would reach by stopping its central path at kappa).
-  // Differentiating the KKT system
-  // there instead of at the exact solution yields gradients whose backward
-  // solve stays well-conditioned near degenerate (weakly-active)
-  // constraints: the complementarity margins are bounded below by ~kappa.
-  //
-  // Method (see docs/log_barrier_admm_note.tex): replacing the slack indicator
-  // with the barrier -kappa*sum log(s) turns the slack update into the
-  // smooth retraction b_k(v) = (v + sqrt(v^2 + 4 kappa))/2, and the paired
-  // update z = b_k(v), s = b_k(-v) satisfies z.s = kappa and z, s > 0
-  // EXACTLY for any v (the note's ADMM produces exactly this pair with
-  // v = z - s). relax() therefore parametrizes each slack/dual pair by its
-  // v and Newton-iterates the remaining smooth conditions -- stationarity
-  // in x and t, Ax = b, s_t = t, s_ineq = h + t - Gx -- in
-  // (x, t, y, v_t, v_ineq), started from the tight solution through the
-  // same retraction. Complementarity and positivity hold by construction
-  // at every iterate, so there is no fraction-to-boundary safeguard, just
-  // a residual backtracking line search; from the retraction start this
-  // typically converges in 2-9 Newton steps (one n x n factorization
-  // each, reusing the solve() condensation shape with weights
-  // Lambda = z1 z2 / (z1 s2 + z2 s1), qpax's elastic weight).
-  //
-  // Call after solve(); the returned Solution (and solution()) is the
-  // RELAXED point, not the optimum, with tol on the unscaled relaxed-KKT
-  // residuals. The default tol is tighter than the solver's eps_abs on
-  // purpose: gradient accuracy is governed by this residual (the implicit
-  // differentiation linearizes here), and extra digits are nearly free in
-  // this quadratically convergent corrector, whereas the forward solve
-  // pays linear-tail iterations for them. The solver's own iterate and
-  // factorization cache are untouched: a subsequent warm solve() still
-  // starts from the tight solution. No-op when p == 0 or kappa <= 0.
-  // Rows with penalty_i = 0 have no interior (z_t + z_ineq = 0 cannot
-  // hold with z > 0), so the relaxation cannot converge for them -- drop
-  // such rows instead.
-  //
-  // Warm starting (warm = true, the default): after a converged relax(),
-  // the relaxed iterate is kept, and the next call continues from it
-  // instead of the tight retraction. In a control loop this chains the
-  // relaxed points tick to tick, which is much cheaper than restarting
-  // from the tight certificate: tick drift lives in the LINEAR residual
-  // blocks, which Newton removes quadratically (~2 steps), whereas the
-  // retraction start pays ~log2(res0/kappa) linear-rate halvings
-  // traversing the barrier curvature from the boundary. (Do not gate this
-  // on the warm iterate's residual size -- drift makes it large, but it
-  // is not what governs the iteration count.) The first call, and any
-  // call after setup(), starts from the retraction; if a warm-started run
-  // fails to converge, it silently redoes the solve from the retraction
-  // (iters then counts both runs). When a tight certificate is
-  // available, a predicted-flip gate (Settings::relax_warm_flip_tol)
-  // skips the warm attempt outright when the data step flipped the
-  // smoothed configuration of well-separated rows -- the regime where
-  // the warm start pays the curvature walk per flipped row and loses to
-  // the retraction. The stored chain also survives data
-  // updates without an intervening solve(), so a gradient-only loop can
-  // run set_*() + relax() alone. Changing kappa between calls is allowed
-  // (v re-materializes on the new manifold); expect a few extra
-  // iterations. The win is regime-dependent: it needs a mostly-stable
-  // smoothed row configuration across calls, and a data step that flips
-  // many weakly-active rows makes the warm start re-pay the curvature on
-  // each flipped row (costing MORE than the retraction, though it still
-  // converges to the same point). For sequences of essentially unrelated
-  // problems, pass warm = false to force the retraction start.
+  // Differentiability / backward pass -- relax the tight solution to a
+  // kappa-relaxed point for smooth gradient evals
+  // (qpax style, with PDAL + log barrier tweaks)
   const Solution& relax(double kappa, double tol = 1e-6, int max_iter = 50,
                         bool warm = true) {
     if (p_ == 0 || kappa <= 0.0 || (!have_warm_ && !relax_have_warm_)) {
       return sol_;
     }
-    // kappa is in the user's frame; each s.z pair picks up only the cost
-    // factor under Ruiz (s scales with the row, z against it).
+    // Update kappa to account for Ruiz scaling (note: di factors cancel out here)
     const double kappa_s = c_s_ * kappa;
 
     if (warm && relax_have_warm_ &&
         !(have_warm_ && settings.relax_warm_flip_tol >= 0 &&
           relax_predict_flips(kappa_s) > settings.relax_warm_flip_tol)) {
-      // Continue from the previous relaxed iterate, still in the
-      // workspace; on non-convergence redo from the retraction (needs a
-      // tight certificate to reconstruct from). The attempt is capped at
-      // relax_warm_budget: a healthy warm start converges well inside it,
-      // and a doomed one (smoothed configuration flipped on high-penalty
-      // rows) stalls rather than converges, so extra iterations before
-      // the fallback are pure waste (measured in bench_relax_warm). The
-      // predicted-flip gate above catches most doomed starts before they
-      // spend the budget (see Settings::relax_warm_flip_tol).
+      // Warm-start the relax path from the previous relaxed iterate
       relax_run(kappa_s, tol,
                 std::min(max_iter, settings.relax_warm_budget));
+      // If warm starting relax failed to converge (stalled), retry from tight sol
       if (sol_.converged != 1 && have_warm_) {
         const int warm_iters = sol_.iters;
         relax_init_retraction();
         relax_run(kappa_s, tol, max_iter);
         sol_.iters += warm_iters;
       }
-    } else {
-      if (!have_warm_) return sol_;
-      // Initialize from the retraction of the tight certificate: the
-      // starting point already sits on the z.s = kappa manifold.
+    } else { // Cold start relax path
+      if (!have_warm_) return sol_;  // no usable tight solve to start from
       relax_init_retraction();
       relax_run(kappa_s, tol, max_iter);
     }
@@ -911,12 +609,7 @@ class Solver {
                    retraction_dcomp(v2r_[i], kappa_s);
       }
 
-      // Full Newton step, then halve until the merit 0.5||F||^2 stops
-      // increasing (the retraction keeps every trial point feasible, so
-      // plain backtracking is the only safeguard needed). The accept test
-      // MUST use the 2-norm merit, for which the Newton step is a descent
-      // direction -- see relax_residual(); termination stays on the max
-      // norm.
+      // Backtrack on the 2-norm merit; terminate on max norm
       const double merit_prev = relax_merit_;
       xr_ += dxr_;
       tr_ += dtr_;
@@ -939,8 +632,7 @@ class Solver {
       }
       res = res_new;
     }
-    // The loop tests res BEFORE each step; credit a final step that landed
-    // inside tol.
+    // The loop tests res before stepping, check if the final step is in tol
     if (status == Status::kMaxIter && std::isfinite(res) && res < tol) {
       status = Status::kSolved;
     }
@@ -957,23 +649,14 @@ class Solver {
     }
   }
 
-  // ---- equality-consistency certificate (Settings::check_eq_consistency)
-  // check_eq_A caches a rank-revealing QR of the UNSCALED A at ingestion.
-  // Full row rank certifies b-independence (any b is consistent) and makes
-  // set_b() free; otherwise the unscaled A is copied so check_eq_b can
-  // evaluate least-squares residuals against later b updates.
+  // Equality consistency: For (unscaled) A, check rank. 
+  // Full rank = consistent for any b
+  // Otherwise, use check on b to determine consistency
   void check_eq_A(const MatrixXd& A) {
-    eq_infeas_ = 0.0;
+    eq_infeas_lb_ = 0.0;
     eq_rank_deficient_ = false;
     if (m_ == 0 || !settings.check_eq_consistency) return;
-    // Fast path for the control-loop case (set_A every tick with a
-    // well-conditioned full-row-rank A, e.g. a dynamics Jacobian): an
-    // LDLT of the m x m Gram matrix A A^T certifies full row rank -- and
-    // hence consistency for every b -- whenever its pivot ratio is
-    // clearly away from the Gram formation noise (~eps * d_max). A
-    // rank-deficient A cannot pass this test, so the only cost of the
-    // 1e-10 margin is that near-singular full-rank A falls through to
-    // the careful (5-10x slower) column-pivoted QR below.
+    // Fast path: an LDLT of the m x m Gram matrix A A^T
     if (m_ <= n_) {
       gram_A_.resize(m_, m_);
       gram_A_.setZero();
@@ -987,39 +670,30 @@ class Solver {
         }
       }
     }
+    // Slower path: use QR for rank check
     qr_A_.compute(A);
     eq_rank_deficient_ = qr_A_.rank() < m_;
     if (eq_rank_deficient_) Aus_ = A;
   }
 
-  // Certified lower bound on the reachable equality residual: for any x,
-  // ||Ax - b||_inf >= ||Ax - b||_2 / sqrt(m) >= ||r_ls||_2 / sqrt(m),
-  // where r_ls is the least-squares residual (the 2-norm minimum over all
-  // x). Computed on unscaled data, so the bound is in the same frame as
-  // the termination test regardless of Ruiz.
+  // Equality consistency: For (also unscaled) b, compute lower bound on
+  // reachable equality residual. Inconsistent if lb > eps
   void check_eq_b(const VectorXd& b) {
-    eq_infeas_ = 0.0;
+    eq_infeas_lb_ = 0.0;
     if (!eq_rank_deficient_ || !settings.check_eq_consistency) return;
     const VectorXd xls = qr_A_.solve(b);
-    eq_infeas_ =
+    eq_infeas_lb_ =
         (Aus_ * xls - b).norm() / std::sqrt(static_cast<double>(m_));
   }
 
-  // PIQP's limit_scaling guard (dense/preconditioner.tpp): a norm below
-  // 1e-4 is treated as 1, so the row/column is left unscaled -- a row at
-  // the numerical noise floor would otherwise be amplified by 1/sqrt(nrm)
-  // >= 100x per sweep while its penalty shrinks toward zero; a norm above
-  // 1e4 is capped so one sweep's scale factor stays in [1e-2, 100]. The
-  // trade-off (accepted by PIQP) is that legitimately tiny rows are not
-  // equilibrated; they are at most 1e-4 and barely affect conditioning.
+  // PIQP preconditioning logic: Clamp row norms to [1e-4, 1e4] so each scale factor
+  // 1/sqrt(nrm) stays in [1e-2, 100]; rows too small to matter are left unscaled 
   static double limit_scaling(double nrm) {
     return nrm < 1e-4 ? 1.0 : std::min(nrm, 1e4);
   }
 
-  // Ruiz sweeps on the stacked symmetric structure [Q A' G'; A 0 0; G 0 0]
-  // (proxsuite ruiz.hpp, plus PIQP's limit_scaling clamp above), applied in
-  // place to the stored data, with the per-sweep cost normalization
-  // gamma = 1/max(1, mean |Q| column norm).
+  // Ruiz equilibration of the stacked (Q, A, G) system
+  // proxqp ruiz logic + piqp limit_scaling + elastic penalty scaling
   void equilibrate() {
     VectorXd dx(n_), de(m_), di(p_);
     for (int iter = 0; iter < settings.ruiz_max_iter; ++iter) {
@@ -1051,7 +725,7 @@ class Solver {
       }
       G_ = di.asDiagonal() * G_ * dx.asDiagonal();
       h_ = h_.cwiseProduct(di);
-      penalty_ = penalty_.cwiseQuotient(di);
+      penalty_ = penalty_.cwiseQuotient(di);  // elastiqp addition
       dx_s_ = dx_s_.cwiseProduct(dx);
       di_s_ = di_s_.cwiseProduct(di);
       double mean = 0.0;
@@ -1062,7 +736,7 @@ class Solver {
       const double gamma = 1.0 / std::max(1.0, mean);
       Q_ *= gamma;
       q_ *= gamma;
-      penalty_ *= gamma;
+      penalty_ *= gamma;  // elastiqp addition
       c_s_ *= gamma;
     }
   }
@@ -1075,8 +749,8 @@ class Solver {
     z_us_ = di_s_ / c_s_;
   }
 
-  // No inequality constraints: plain (in)equality-constrained QP; solve the
-  // KKT system directly and report kSolved/kNumerics from its residuals.
+  // No inequality constraints: plain equality-constrained (or unconstrained)
+  // QP, just solve the KKT system directly + report status from residuals
   const Solution& solve_no_inequalities() {
     if (m_ == 0) {
       x_ = Eigen::LDLT<MatrixXd>(Q_).solve(-q_);
@@ -1160,13 +834,9 @@ class Solver {
   bool inner_loop(double eps_int) {
     for (int it = 0; it < settings.max_iter_in; ++it) {
       const double err = compute_inner_terms();
-      // The mismatch ||zhat - z|| enters err weighted by mu_in, so at the
-      // mu floor a subproblem can pass this test while the multipliers are
-      // still far from their clamp targets. The outer loop only runs while
-      // the true elastic KKT is unsatisfied, so never accept a subproblem
-      // without taking at least one Newton step (which snaps the
-      // multipliers) -- otherwise the outer loop can spin to kMaxIter with
-      // an unchanged iterate.
+      // For very small mu_in, err can be <= eps_int even if the duals are
+      // still wrong (mismatch is scaled by mu_in). Take at least one
+      // step to fix them, or the outer loop retries forever with no progress.
       if (err <= eps_int && it > 0) return true;
 
       // Three-state row classification on the shifted value S (elastic
@@ -1233,12 +903,9 @@ class Solver {
       x_ += alpha * dx_;
       if (m_ > 0) y_ += alpha * dy_;
       z_ += alpha * dz_;
-      // The exact line search is unclamped (alpha can exceed 1, mirroring
-      // proxsuite), so a snap direction dz = -z or w - z can overshoot the
-      // dual box. Project back: the merit's z-terms are separable quadratics
-      // with minimizers zhat in [0, w], so this never increases the merit,
-      // and it preserves the solver invariant z in [0, penalty] that the
-      // residuals, duality gap, and reported certificate all rely on.
+      // alpha is unclamped, so the step can push z outside [0, penalty].
+      // So, project it back. Note: this never increases the merit
+      // (merit z terms are separable quadratics with minimizers in range)
       z_ = z_.cwiseMax(0.0).cwiseMin(penalty_);
       S_ += alpha * Gdx_;
       if (alpha == 0.0) return true;
@@ -1422,13 +1089,10 @@ class Solver {
   // identically and the complementarity rows never appear):
   //   F1 = Q x + q + A'y + G'z2      F2 = penalty - z1 - z2
   //   F3 = A x - b                   F4 = s1 - t     F5 = s2 - (h + t - Gx)
-  // Returns the max unscaled norm (termination metric); norms are unscaled
-  // componentwise exactly as in update_residuals(). Also fills
-  // relax_merit_, the squared 2-norm of the same unscaled residual stack:
-  // the Newton step is a guaranteed descent direction for 0.5||F||_2^2
-  // (grad = J'F, step = -J^{-1}F, slope = -F'F < 0) but NOT for the max
-  // norm, so the line search must accept on the 2-norm merit or it stalls
-  // whenever a full step trades residual between rows.
+  // Returns the max unscaled norm (termination metric) and fills
+  // relax_merit_, the squared 2-norm of the same stack: the Newton step
+  // is a guaranteed descent direction for 0.5||F||_2^2 but NOT for the
+  // max norm, so the line search must accept on the 2-norm merit.
   double relax_residual(double kappa_s) {
     const auto inf_us = [](const VectorXd& v, const VectorXd& s) {
       return v.size() > 0 ? v.cwiseAbs().cwiseProduct(s).maxCoeff() : 0.0;
@@ -1467,12 +1131,10 @@ class Solver {
   }
 
   // Predicted expensive flips for a warm relax() attempt: rows whose
-  // retraction v-sign (from the current tight certificate, same map as
-  // relax_init_retraction()) disagrees with the stored chain iterate's,
-  // counting only pairs well clear of the hyperbola corner
-  // (|v_old * v_new| > 100 kappa_s, i.e. a traversal of >~ 7 halvings).
-  // O(p n); does not touch the chain iterate (wGx_ is recomputed by
-  // both relax entry paths).
+  // retraction v-sign (same map as relax_init_retraction()) disagrees
+  // with the stored chain iterate's, counting only pairs well clear of
+  // the hyperbola corner (|v_old * v_new| > 100 kappa_s). O(p n); does
+  // not touch the chain iterate.
   int relax_predict_flips(double kappa_s) {
     const double corner2 = 100.0 * kappa_s;
     wGx_.noalias() = G_ * x_;
@@ -1556,12 +1218,11 @@ class Solver {
   // point:
   //   t = [Gx - h + mu_in (z - penalty)]_+   (argmin of the folded slack)
   //   z_ineq = z, z_t = penalty - z, s_t = t, s_ineq = [t - (Gx - h)]_+
-  // The t-block dual residual penalty - z_t - z_ineq vanishes identically,
-  // and z_t, z_ineq >= 0 exactly (z is kept in [0, penalty]).
-  // All internal quantities are in the (possibly Ruiz-scaled) frame; every
-  // norm below is unscaled componentwise, so the reported residuals and
-  // the termination test are on the true elastic KKT regardless of
-  // equilibration (with Ruiz off, all unscale vectors are ones).
+  // The t-block dual residual penalty - z_t - z_ineq vanishes identically
+  // and z_t, z_ineq >= 0 exactly (z is kept in [0, penalty]). Internal
+  // quantities are in the (possibly Ruiz-scaled) frame; every norm below
+  // is unscaled componentwise, so the reported residuals and termination
+  // test are on the true elastic KKT.
   void update_residuals() {
     const auto inf_us = [](const VectorXd& v, const VectorXd& s) {
       return v.size() > 0 ? v.cwiseAbs().cwiseProduct(s).maxCoeff() : 0.0;
@@ -1652,8 +1313,7 @@ class Solver {
     sol_.dual_res = dual_res_;
     sol_.duality_gap = duality_gap_;
     // kInfeasible exits early without touching the iterate: keep the
-    // warm-start state as it was (a transient inconsistent tick keeps its
-    // warm start; a cold fail stays cold).
+    // warm-start state as it was.
     if (status != Status::kInfeasible) {
       have_warm_ = status != Status::kNumerics;
     }
@@ -1688,7 +1348,7 @@ class Solver {
   Eigen::LDLT<MatrixXd> ldlt_gram_;
   MatrixXd Aus_;  // unscaled A copy, kept only when rank-deficient
   bool eq_rank_deficient_ = false;
-  double eq_infeas_ = 0.0;
+  double eq_infeas_lb_ = 0.0;
 
   // Factorization cache
   bool matrix_dirty_ = true, factored_ = false;
@@ -1708,9 +1368,8 @@ class Solver {
 
   // Workspace (allocated in setup, reused every iteration)
   VectorXd S_, zhat_, t_, s2_, r_, din_, pv_, tp_;
-  // Previous / current outer-round per-row inequality residuals for the
-  // bcl_mu_jump per-row stall gate (only maintained while the jump is
-  // enabled).
+  // Per-row inequality residuals across outer rounds, for the bcl_mu_jump
+  // stall gate (maintained only while the jump is enabled).
   VectorXd jump_res_prev_, jump_res_cur_;
   VectorXd verr_, dyrhs_, rhs_x_, dx_, dy_, dz_, Qdx_, Adx_, Gdx_;
   VectorXd wQx_, wGtz_, wGtd_, wAty_, wAx_, wGx_;
