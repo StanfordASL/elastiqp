@@ -60,7 +60,7 @@ enum class Status {
   kSolved = 1,
   kMaxIter = 2,
   kNumerics = 3,
-  kInfeasible = 4,  // Only if inequalities are inconsistent
+  kInfeasible = 4,  // Only if equalities are inconsistent
 };
 
 struct Solution {
@@ -70,7 +70,7 @@ struct Solution {
   VectorXd s_t, s_ineq;     // slacks for t >= 0 and Gx - t <= h
   VectorXd z_t, z_ineq;     // duals for t >= 0 and Gx - t <= h
   Status status = Status::kUnsolved;
-  int converged = 0;  // if status == kSolved
+  int converged = 0;  // 1 iff status == kSolved
   int iters = 0;      // total inner semismooth Newton steps
   double primal_obj = 0.0;
   double primal_res = 0.0;
@@ -89,7 +89,8 @@ struct Settings {
   double eps_duality_gap_rel = 0;
   int max_factor_retries = 10;
 
-  // Check if equalities are inconsistent (only infeasibility case)
+  // Check if equalities are inconsistent (the only infeasibility case).
+  // Runs when A/b data is set; only applies if eps_rel = 0
   bool check_eq_consistency = true;
 
   // Warm-start from a previous solution + cached factorization
@@ -112,7 +113,8 @@ struct Settings {
   double beta_bcl = 0.9;
 
   // ElastiQP BCL strategy (modified from proxsuite)
-  // On a BCL bad step, revert only the equality duals, never the inequality duals
+  // On a BCL bad step, revert the equality duals (only if their residual
+  // is at fault); never revert the inequality duals
   bool bcl_split = true;
   // Jump mu to known (shallowest) saturation point among stalled inequalities
   bool bcl_mu_jump = true;
@@ -139,7 +141,7 @@ struct Settings {
   // Attempts for warm-starting relax() before restarting from the tight sol
   int relax_warm_budget = 15;
   // Skip warm relax() if more than these rows flip sides of the s.z = kappa
-  // hyperbola between solves
+  // hyperbola between solves. Set negative to disable
   int relax_warm_flip_tol = 0;
 };
 
@@ -284,6 +286,7 @@ class Solver {
   Eigen::Index p() const { return p_; }
 
   // Data updates between solves
+  // Vector-only updates keep the cached factorization
   void set_Q(const MatrixXd& Q) {
     Q_ = 0.5 * (Q + Q.transpose());
     if (ruiz_) Q_ = c_s_ * dx_s_.asDiagonal() * Q_ * dx_s_.asDiagonal();
@@ -315,6 +318,7 @@ class Solver {
   }
 
   // Explicitly set the warm-start for the next solve
+  // Set rho/mu <= 0 to use the default settings
   void set_warm_start(const VectorXd& x, const VectorXd& y,
                       const VectorXd& z_ineq, double rho = 0.0,
                       double mu_eq = 0.0, double mu_in = 0.0) {
@@ -346,7 +350,8 @@ class Solver {
     factor_retries_ = 0;
     cold_resets_ = 0;
 
-    // Throw infeasibile if checks on latest A/b data indicated inconsistent
+    // Return infeasibile if checks on latest A/b data indicated
+    // inconsistent (eps_abs unreachable)
     if (settings.check_eq_consistency && settings.eps_rel <= 0 &&
         eq_infeas_lb_ > settings.eps_abs) {
       if (!have_warm_ && !explicit_ws) {
@@ -408,7 +413,7 @@ class Solver {
       jump_res_prev_ = (r_ - t_).cwiseProduct(inv_di_);
     }
 
-    // Outer loop (PMM + BCL) 
+    // Outer loop (PMM + BCL)
     for (int oiter = 0; oiter < settings.max_outer_iter; ++oiter) {
       const double pri_old = primal_res_;
       const double dua_old = dual_res_;
@@ -451,7 +456,7 @@ class Solver {
             pri_new > 0.8 * pri_old) {
           // If an inequality row is slowly improving (< 20% per round), it needs
           // mu_in <= r / (penalty - z) for its dual to snap to the penalty cap.
-          // Drop mu_in by the smallest amount that resolves one stuck row.
+          // Drop mu_in just enough to resolve one stuck row
           double shallowest = 0.0;
           for (Eigen::Index i = 0; i < p_; ++i) {
             const double res_i = jump_res_cur_[i];
@@ -509,7 +514,8 @@ class Solver {
 
   // Differentiability / backward pass -- relax the tight solution to a
   // kappa-relaxed point for smooth gradient evals
-  // (qpax style, with PDAL + log barrier tweaks)
+  // (qpax style, with PDAL + log barrier retraction tweaks)
+  // The returned Solution is at the relaxed point
   const Solution& relax(double kappa, double tol = 1e-6, int max_iter = 50,
                         bool warm = true) {
     if (p_ == 0 || kappa <= 0.0 || (!have_warm_ && !relax_have_warm_)) {
@@ -649,8 +655,8 @@ class Solver {
     }
   }
 
-  // Equality consistency: For (unscaled) A, check rank. 
-  // Full rank = consistent for any b
+  // Equality consistency: For (unscaled) A, check rank.
+  // Full row rank = consistent for any b
   // Otherwise, use check on b to determine consistency
   void check_eq_A(const MatrixXd& A) {
     eq_infeas_lb_ = 0.0;
@@ -687,7 +693,7 @@ class Solver {
   }
 
   // PIQP preconditioning logic: Clamp row norms to [1e-4, 1e4] so each scale factor
-  // 1/sqrt(nrm) stays in [1e-2, 100]; rows too small to matter are left unscaled 
+  // 1/sqrt(nrm) stays in [1e-2, 100]; rows too small to matter are left unscaled
   static double limit_scaling(double nrm) {
     return nrm < 1e-4 ? 1.0 : std::min(nrm, 1e4);
   }
