@@ -60,11 +60,15 @@ def style(ax):
     ax.tick_params(labelsize=9)
 
 
-def save(fig, name):
-    out = bc.RESULTS_DIR / name
-    fig.savefig(out, dpi=180, bbox_inches="tight")
+def save(fig, name, formats=None):
+    """Write name (as given) or, if formats is set, one file per format
+    with name's extension swapped (e.g. ("png", "svg"))."""
+    outs = ([bc.RESULTS_DIR / name] if not formats else
+            [(bc.RESULTS_DIR / name).with_suffix("." + f) for f in formats])
+    for out in outs:
+        fig.savefig(out, dpi=300, bbox_inches="tight")
+        print(f"wrote {out}")
     plt.close(fig)
-    print(f"wrote {out}")
 
 
 # ------------------------------------------------- robot cold/warm timing
@@ -187,8 +191,16 @@ def plot_multisolver():
 
 # --------------------------------------------- Maros-Meszaros profile
 
-def _mm_profile(rows, routes, route_key, time_key, title, outname, styles):
-    """Dolan-More performance profile over one Maros-Meszaros CSV."""
+def _mm_profile(rows, routes, route_key, time_key, title, outname, styles,
+                figsize=(6, 3.4), xmax=3e4, fontsize=9, labels=None,
+                formats=("png",)):
+    """Dolan-More performance profile over one Maros-Meszaros CSV.
+
+    title=None omits the in-figure title (for paper figures, where the
+    caption carries it). labels maps route name -> legend text (defaults
+    to the route name). One file per entry in formats (outname's
+    extension is replaced)."""
+    labels = labels or {}
     routes = [s for s in routes if any(r[route_key] == s for r in rows)]
     problems = sorted({r["name"] for r in rows})
     times = {}
@@ -198,8 +210,8 @@ def _mm_profile(rows, routes, route_key, time_key, title, outname, styles):
         times[(r["name"], r[route_key])] = t if ok else np.inf
     best = {p: min(times.get((p, s), np.inf) for s in routes)
             for p in problems}
-    taus = np.logspace(0, 4, 400)
-    fig, ax = plt.subplots(figsize=(6, 3.4))
+    taus = np.logspace(0, np.log10(xmax), 400)
+    fig, ax = plt.subplots(figsize=figsize)
     for s in routes:
         ratios = np.array([times.get((p, s), np.inf) / best[p]
                            for p in problems if np.isfinite(best[p])])
@@ -208,20 +220,22 @@ def _mm_profile(rows, routes, route_key, time_key, title, outname, styles):
         # Legend only: several curves saturate at 1.0, so end-of-line
         # labels would collide there.
         ax.step(taus, frac, styles.get(s, "-"), where="post", color=col,
-                lw=2, label=s)
+                lw=1.25, label=labels.get(s, s))
     ax.set_xscale("log")
-    ax.set_xlim(1, 3e4)
+    ax.set_xlim(1, xmax)
     ax.set_ylim(0, 1.02)
-    ax.set_xlabel("performance ratio τ (time / best route's time)",
-                  fontsize=9)
-    ax.set_ylabel("fraction of problems solved", fontsize=9)
-    ax.set_title(title, fontsize=10)
+    ax.set_xlabel("Performance ratio τ",
+                  fontsize=fontsize) #, labelpad=-4)
+    ax.set_ylabel("Ratio of problems solved", fontsize=fontsize)
+    if title:
+        ax.set_title(title, fontsize=fontsize + 1)
+    ax.tick_params(labelsize=fontsize)
     ax.grid(True, color="#e5e4dc", linewidth=0.8)
     ax.set_axisbelow(True)
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
-    ax.legend(frameon=False, fontsize=9, loc="lower right")
-    save(fig, outname)
+    ax.legend(frameon=False, fontsize=fontsize, loc="lower right")
+    save(fig, outname, formats)
 
 
 def plot_mm_profile():
@@ -236,17 +250,23 @@ def plot_mm_profile():
                     "maros_meszaros_profile.png",
                     {"piqp-expanded": "--"})
     # Python harness (paper Table III subset; run_maros_meszaros.py) --
-    # includes the qpax routes.
+    # includes the qpax routes. Sized for a single ieeeconf column
+    # (~3.5in); the caption carries the title.
     rows = read_csv("maros_meszaros_py_results.csv")
     if rows:
         _mm_profile(rows,
                     ["elastiqp", "piqp", "proxqp", "qpax-elastic",
                      "qpax-hard"],
                     "solver", "time_ms",
-                    "Maros-Meszaros robotics-relevant subset: performance "
-                    "profile (eps=1e-6)",
+                    None,
                     "maros_meszaros_py_profile.png",
-                    {"qpax-hard": "--"})
+                    {"qpax-hard": "--"},
+                    figsize=(3.4, 1.5), xmax=10, fontsize=6,
+                    labels={"elastiqp": "ElastiQP", "piqp": "PIQP",
+                            "proxqp": "ProxQP",
+                            "qpax-elastic": "qpax (elastic)",
+                            "qpax-hard": "qpax (hard)"},
+                    formats=("png", "svg"))
 
 
 # --------------------------------------------------- diff timing lines
