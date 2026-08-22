@@ -38,6 +38,8 @@ SOLVER_OF = {  # route name -> palette entity
     "piqp-hard": "piqp", "piqp-slack": "piqp", "piqp-expanded": "piqp",
     "proxqp-hard": "proxqp", "proxqp-clfeas": "proxqp",
     "proxqp-slack": "proxqp",
+    "piqp": "piqp", "proxqp": "proxqp",
+    "qpax-hard": "qpax", "qpax-elastic": "qpax",
 }
 
 
@@ -185,23 +187,19 @@ def plot_multisolver():
 
 # --------------------------------------------- Maros-Meszaros profile
 
-def plot_mm_profile():
-    rows = read_csv("maros_meszaros_results.csv")
-    if not rows:
-        return
-    routes = ["elastiqp", "piqp-hard", "proxqp-hard", "piqp-expanded"]
-    routes = [s for s in routes if any(r["route"] == s for r in rows)]
+def _mm_profile(rows, routes, route_key, time_key, title, outname, styles):
+    """Dolan-More performance profile over one Maros-Meszaros CSV."""
+    routes = [s for s in routes if any(r[route_key] == s for r in rows)]
     problems = sorted({r["name"] for r in rows})
     times = {}
     for r in rows:
-        t = float(r["time_us"]) if r["time_us"] not in ("nan", "") else np.inf
+        t = float(r[time_key]) if r[time_key] not in ("nan", "") else np.inf
         ok = r["ok"] == "1"
-        times[(r["name"], r["route"])] = t if ok else np.inf
+        times[(r["name"], r[route_key])] = t if ok else np.inf
     best = {p: min(times.get((p, s), np.inf) for s in routes)
             for p in problems}
     taus = np.logspace(0, 4, 400)
     fig, ax = plt.subplots(figsize=(6, 3.4))
-    styles = {"piqp-expanded": "--"}
     for s in routes:
         ratios = np.array([times.get((p, s), np.inf) / best[p]
                            for p in problems if np.isfinite(best[p])])
@@ -217,14 +215,38 @@ def plot_mm_profile():
     ax.set_xlabel("performance ratio τ (time / best route's time)",
                   fontsize=9)
     ax.set_ylabel("fraction of problems solved", fontsize=9)
-    ax.set_title("Maros-Meszaros small dense subset: performance profile "
-                 "(eps=1e-6)", fontsize=10)
+    ax.set_title(title, fontsize=10)
     ax.grid(True, color="#e5e4dc", linewidth=0.8)
     ax.set_axisbelow(True)
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
     ax.legend(frameon=False, fontsize=9, loc="lower right")
-    save(fig, "maros_meszaros_profile.png")
+    save(fig, outname)
+
+
+def plot_mm_profile():
+    # C++ harness (n<=200 subset; bench_maros_meszaros --csv results/).
+    rows = read_csv("maros_meszaros_results.csv")
+    if rows:
+        _mm_profile(rows,
+                    ["elastiqp", "piqp-hard", "proxqp-hard", "piqp-expanded"],
+                    "route", "time_us",
+                    "Maros-Meszaros small dense subset: performance profile "
+                    "(eps=1e-6)",
+                    "maros_meszaros_profile.png",
+                    {"piqp-expanded": "--"})
+    # Python harness (paper Table III subset; run_maros_meszaros.py) --
+    # includes the qpax routes.
+    rows = read_csv("maros_meszaros_py_results.csv")
+    if rows:
+        _mm_profile(rows,
+                    ["elastiqp", "piqp", "proxqp", "qpax-elastic",
+                     "qpax-hard"],
+                    "solver", "time_ms",
+                    "Maros-Meszaros robotics-relevant subset: performance "
+                    "profile (eps=1e-6)",
+                    "maros_meszaros_py_profile.png",
+                    {"qpax-hard": "--"})
 
 
 # --------------------------------------------------- diff timing lines
