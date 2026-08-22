@@ -175,6 +175,9 @@ if(ELASTIQP_BENCH_EXTERNAL_SOLVERS)
     external/bench_condensed_vs_expanded.cc)
   elastiqp_bench_ext(bench_proxqp_closest
     external/bench_proxqp_closest.cc)
+  # Paper experiment (examples/experiments): all routes, feasible + conflict.
+  elastiqp_bench_ext(robot_solver_comparison
+    ${CMAKE_SOURCE_DIR}/examples/experiments/robot_solver_comparison.cc)
 
   # Maros-Meszaros: the .mat files ship inside the proxsuite release; a
   # build-time Python script (needs scipy) packs the n <= 200 subset into a

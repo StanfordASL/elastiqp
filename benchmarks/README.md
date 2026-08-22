@@ -31,6 +31,7 @@ hash-verified; nothing is vendored into the repo):
 | binary | measures |
 |---|---|
 | `bench_robot_multisolver` | every solver route (elastic, hard, l1-slack, l2 closest-feasible) on the robot sequences, feasible AND conflict variants |
+| `robot_solver_comparison` | paper table (`examples/experiments/robot_solver_comparison.cc`): every route on the robot sequences, feasible + conflict variant (one row tightened past what the remaining constraints admit, via an auxiliary LP); `--csv benchmarks/results` |
 | `bench_condensed_vs_expanded` | ElastiQP's condensed `O(n^3 + p n^2)` formulation vs vanilla PIQP on the expanded `(n+p)` elastic problem |
 | `bench_proxqp_closest` | elastic (l1) resolution vs ProxQP's `primal_infeasibility_solving` (l2 closest-feasible): shift structure and cost |
 | `bench_maros_meszaros` | Maros-Meszaros small dense subset (n <= 200): elastiqp / piqp-hard / piqp-expanded / proxqp-hard (needs python3 + scipy at build time to pack the data) |
