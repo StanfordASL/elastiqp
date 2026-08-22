@@ -147,7 +147,7 @@ def plot_multisolver():
         return
     order = ["elastiqp", "elastiqp-warm", "piqp-hard", "piqp-slack",
              "proxqp-hard", "proxqp-clfeas", "proxqp-slack"]
-    scenarios = ["diff-ik", "arm-osc", "hum-wbc"]
+    scenarios = ["diff-ik", "arm-osc", "biman-ik", "hum-wbc"]
     scenarios = [s for s in scenarios if any(r["scenario"] == s for r in rows)]
     fig, axes = plt.subplots(1, len(scenarios),
                              figsize=(3.2 * len(scenarios), 3.2),

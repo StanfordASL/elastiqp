@@ -4,7 +4,7 @@
 // inequalities, and (for the floating-base humanoid) the unactuated dynamics
 // and contact constraints as hard equalities.
 //
-// Three problem families, all with the elastic-QP shape
+// Four problem families, all with the elastic-QP shape
 //   minimize    0.5 x^T Q x + q^T x + penalty^T t
 //   subject to  A x == b (hard),  G x - t <= h,  t >= 0
 //
@@ -17,7 +17,12 @@
 //               fully actuated: qdd = M^-1 (tau - nle)), so x = tau
 //               (n = 6, no equalities, p = 24: velocity-limit rows in
 //               tau and the torque box)
-//  3. HumanoidWBC — floating-base whole-body control on Pinocchio's sample
+//  3. BimanualDiffIK — two of the sample manipulators mounted side by side,
+//               both holding one rigid object; x = [qd1; qd2] (n = 12) with
+//               the rigid grasp as m = 6 hard equality rows coupling the two
+//               EE twists and p = 48 elastic rows (per-arm dampers and
+//               velocity boxes)
+//  4. HumanoidWBC — floating-base whole-body control on Pinocchio's sample
 //               humanoid, standing on two 6D "foot" contacts. The actuated
 //               torques are eliminated through the actuated dynamics rows
 //               (tau = [M qdd + nle - Jc^T f]_actuated), leaving
@@ -160,6 +165,7 @@ struct ArmParams {
   double tau_cap = -1.0;     // torque cap; < 0 uses the model limit
   double soft_penalty = 1e3;   // dampers / velocity-limit rows
   double limit_penalty = 1e5;  // velocity box / torque box
+  double grasp_gain = 10.0;    // bimanual rigid-grasp servo gain [1/s]
 };
 
 struct TaskTarget {
@@ -303,6 +309,153 @@ inline Eigen::Matrix<double, 6, 1> TaskAcceleration(
   a.tail<3>() = -kp_rot * OrientationError(arm.ee_rot(), target.rot) +
                 kd_rot * (target.omega - twist.tail<3>());
   return a;
+}
+
+// ---------------------------------------------------------------------------
+// Bimanual differential IK (two manipulators, rigid grasp)
+// ---------------------------------------------------------------------------
+//
+// Two sample manipulators mounted side by side (arm 2's base translated by
+// base2_offset, no base rotation), both holding one rigid object. The grasp
+// is the relative EE pose captured at grasp time and the coupling is enforced
+// at the velocity level as 6 HARD equality rows on x = [qd1; qd2] (world-
+// aligned twists, lever arm a = R1 * r12):
+//   position:  v2 - v1 - w1 x a = -k e_pos      (rigid-body point velocity)
+//   rotation:  w2 - w1          = -k e_rot
+// with a proportional servo (grasp_gain) on the relative-pose error so the
+// velocity-level constraint does not drift under integration. b is therefore
+// state-dependent, like every other matrix in the problem.
+
+// Relative EE pose at grasp time, fixed in arm 1's EE frame.
+struct BimanualGrasp {
+  Vector3d r12;  // p2 - p1, expressed in arm-1 EE frame
+  Matrix3d R12;  // R1^T R2
+};
+
+// World position of arm 2's EE (its base is translated, not rotated).
+inline Vector3d Arm2WorldPos(const Manipulator& arm2,
+                             const Vector3d& base2_offset) {
+  return base2_offset + arm2.ee_pos();
+}
+
+// Captures the grasp from the current (Compute()d) arm states.
+inline BimanualGrasp MakeGrasp(const Manipulator& arm1,
+                               const Manipulator& arm2,
+                               const Vector3d& base2_offset) {
+  BimanualGrasp g;
+  g.r12 = arm1.ee_rot().transpose() *
+          (Arm2WorldPos(arm2, base2_offset) - arm1.ee_pos());
+  g.R12 = arm1.ee_rot().transpose() * arm2.ee_rot();
+  return g;
+}
+
+// Arm-2 task target rigidly consistent with an arm-1 (object) target: the
+// object moves with target1's twist, so the second grasp frame follows with
+// the transported velocity.
+inline TaskTarget GraspConsistentTarget(const BimanualGrasp& grasp,
+                                        const TaskTarget& target1) {
+  const Vector3d a = target1.rot * grasp.r12;  // desired world lever arm
+  TaskTarget t2;
+  t2.pos = target1.pos + a;
+  t2.rot = target1.rot * grasp.R12;
+  t2.vel = target1.vel + target1.omega.cross(a);
+  t2.omega = target1.omega;
+  return t2;
+}
+
+// --- Bimanual differential IK, n = 12, m = 6, p = 48 ----------------------
+//
+// minimize 0.5 ||J1 qd1 - v1_des||^2 + 0.5 ||J2 qd2 - v2_des||^2
+//          + 0.5 w_n ||qd||^2   subject to the rigid-grasp rows above,
+// with per-arm elastic rows [dampers arm1 (12); dampers arm2 (12);
+// velocity box arm1 (12); velocity box arm2 (12)]. Dampers use soft_penalty,
+// the boxes limit_penalty. Both arms must be Compute()d at (q1, q2).
+inline RobotQP BuildBimanualDiffIK(const Manipulator& arm1,
+                                   const Manipulator& arm2,
+                                   const Vector3d& base2_offset,
+                                   const BimanualGrasp& grasp,
+                                   const ArmParams& prm,
+                                   const Manipulator::Vector6d& q1,
+                                   const Manipulator::Vector6d& q2,
+                                   const TaskTarget& target1,
+                                   const TaskTarget& target2) {
+  const int na = Manipulator::kNv;
+  const int n = 2 * na;
+  const int p = 8 * na;
+
+  const Vector3d p1 = arm1.ee_pos();
+  const Vector3d p2 = Arm2WorldPos(arm2, base2_offset);
+
+  RobotQP qp;
+  // Objective: both EEs track their (rigid-consistent) task twists, plus a
+  // small uniform damping term.
+  auto task_twist = [&prm](const Manipulator& arm, const Vector3d& p_world,
+                           const TaskTarget& tg) {
+    Eigen::Matrix<double, 6, 1> v;
+    v.head<3>() = tg.vel + prm.kp_pos * (tg.pos - p_world);
+    v.tail<3>() = tg.omega - prm.kp_rot * OrientationError(arm.ee_rot(), tg.rot);
+    return v;
+  };
+  const Eigen::Matrix<double, 6, 1> v1_des = task_twist(arm1, p1, target1);
+  const Eigen::Matrix<double, 6, 1> v2_des = task_twist(arm2, p2, target2);
+  const double w_n = 1e-2;
+  const MatrixXd& J1 = arm1.J_ee();
+  const MatrixXd& J2 = arm2.J_ee();
+  qp.Q = w_n * MatrixXd::Identity(n, n);
+  qp.Q.topLeftCorner(na, na) += J1.transpose() * J1;
+  qp.Q.bottomRightCorner(na, na) += J2.transpose() * J2;
+  qp.q.resize(n);
+  qp.q.head(na) = -J1.transpose() * v1_des;
+  qp.q.tail(na) = -J2.transpose() * v2_des;
+
+  // Hard rigid-grasp rows. On arm 1's twist the position rows carry the
+  // lever-arm term (-w1 x a = skew(a) w1); arm 2's twist enters plainly.
+  const Vector3d a = arm1.ee_rot() * grasp.r12;
+  const Vector3d e_pos = (p2 - p1) - a;
+  const Vector3d e_rot =
+      OrientationError(arm2.ee_rot(), arm1.ee_rot() * grasp.R12);
+  Eigen::Matrix<double, 6, 6> C1 = -Eigen::Matrix<double, 6, 6>::Identity();
+  C1.block<3, 3>(0, 3) << 0, -a.z(), a.y(), a.z(), 0, -a.x(), -a.y(), a.x(), 0;
+  C1.block<3, 3>(3, 0).setZero();
+  qp.A.resize(6, n);
+  qp.A.leftCols(na) = C1 * J1;
+  qp.A.rightCols(na) = J2;
+  qp.b.resize(6);
+  qp.b.head<3>() = -prm.grasp_gain * e_pos;
+  qp.b.tail<3>() = -prm.grasp_gain * e_rot;
+
+  // Elastic rows: dampers for both arms (soft), then both velocity boxes.
+  qp.G = MatrixXd::Zero(p, n);
+  qp.h.resize(p);
+  qp.penalty.resize(p);
+  int r = 0;
+  auto dampers = [&](const Manipulator& arm, const Manipulator::Vector6d& q,
+                     int col) {
+    for (int i = 0; i < na; ++i, ++r) {
+      qp.G(r, col + i) = 1.0;
+      qp.h[r] = prm.damper_gain * (arm.q_max()[i] - q[i]);
+    }
+    for (int i = 0; i < na; ++i, ++r) {
+      qp.G(r, col + i) = -1.0;
+      qp.h[r] = prm.damper_gain * (q[i] - arm.q_min()[i]);
+    }
+  };
+  dampers(arm1, q1, 0);
+  dampers(arm2, q2, na);
+  qp.penalty.head(r).setConstant(prm.soft_penalty);
+  const int box_start = r;
+  auto vel_box = [&](const Manipulator& arm, int col) {
+    for (int s = 0; s < 2; ++s) {
+      for (int i = 0; i < na; ++i, ++r) {
+        qp.G(r, col + i) = s == 0 ? 1.0 : -1.0;
+        qp.h[r] = prm.qd_cap > 0 ? prm.qd_cap : arm.qd_max()[i];
+      }
+    }
+  };
+  vel_box(arm1, 0);
+  vel_box(arm2, na);
+  qp.penalty.tail(p - box_start).setConstant(prm.limit_penalty);
+  return qp;
 }
 
 // ---------------------------------------------------------------------------

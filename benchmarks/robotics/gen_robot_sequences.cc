@@ -11,6 +11,8 @@
 //   diff-ik   differential IK, x = qd        n =  6, m =  0, p =  24
 //   arm-osc   torque-level OSC, x = tau      n =  6, m =  0, p =  24
 //   hum-wbc   humanoid WBC, x = [qdd; f]     n = 46, m = 18, p = 132
+//   biman-ik  bimanual diff IK, x = [qd1; qd2]  n = 12, m = 6, p = 48
+//             (rigid grasp between the two EEs as hard equality rows)
 // (arm scenarios are closed loop, the humanoid follows a prescribed sway)
 //
 // The closed loops are driven by a warm-started elastiqp::Solver at default
@@ -123,6 +125,60 @@ std::vector<RobotQP> ArmOSCSequence(int ticks) {
   return seq;
 }
 
+std::vector<RobotQP> BimanualDiffIKSequence(int ticks) {
+  robot_control::Manipulator arm1, arm2;
+  robot_control::ArmParams prm;
+  const Eigen::Vector3d offset(0.0, 0.6, 0.0);  // arm-2 base, world frame
+  const double dt = 0.01;
+  auto q1 = robot_control::Manipulator::Home();
+  auto q2 = robot_control::Manipulator::Home();
+  const auto qd0 = robot_control::Manipulator::Vector6d::Zero();
+  arm1.Compute(q1, qd0);
+  arm2.Compute(q2, qd0);
+  const robot_control::BimanualGrasp grasp =
+      robot_control::MakeGrasp(arm1, arm2, offset);
+  const Eigen::Vector3d center = arm1.ee_pos();
+  const Eigen::Matrix3d rot0 = arm1.ee_rot();
+
+  elastiqp::Solver solver;
+  std::vector<RobotQP> seq;
+  for (int k = 0; k < ticks; ++k) {
+    const double t = k * dt;
+    // Object motion: the diff-ik circle for the grasp-1 frame plus a yaw
+    // wobble, so the grasp coupling sees a nonzero object angular velocity.
+    const double w = 2 * M_PI / 2.0;
+    const double wy = 2 * M_PI / 3.0;
+    const double yaw = 0.15 * std::sin(wy * t);
+    robot_control::TaskTarget t1;
+    t1.rot = Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()) * rot0;
+    t1.pos =
+        center + 0.10 * Vector3d(0.0, std::cos(w * t) - 1.0, std::sin(w * t));
+    t1.vel = 0.10 * w * Vector3d(0.0, -std::sin(w * t), std::cos(w * t));
+    t1.omega = Vector3d(0.0, 0.0, 0.15 * wy * std::cos(wy * t));
+    const robot_control::TaskTarget t2 =
+        robot_control::GraspConsistentTarget(grasp, t1);
+    arm1.Compute(q1, qd0);
+    arm2.Compute(q2, qd0);
+    seq.push_back(robot_control::BuildBimanualDiffIK(arm1, arm2, offset, grasp,
+                                                     prm, q1, q2, t1, t2));
+    const RobotQP& qp = seq.back();
+    if (k == 0) {
+      solver.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, qp.penalty);
+    } else {
+      solver.set_Q(qp.Q);
+      solver.set_q(qp.q);
+      solver.set_A(qp.A);
+      solver.set_b(qp.b);
+      solver.set_G(qp.G);
+      solver.set_h(qp.h);
+    }
+    const VectorXd qd = solver.solve().x;
+    q1 += dt * qd.head<6>();
+    q2 += dt * qd.tail<6>();
+  }
+  return seq;
+}
+
 std::vector<RobotQP> HumanoidSequence(int ticks) {
   robot_control::Humanoid robot;
   robot_control::HumanoidParams prm;
@@ -193,6 +249,7 @@ int main(int argc, char** argv) {
   seqs.push_back({"diff-ik", DiffIKSequence(kTicks)});
   seqs.push_back({"arm-osc", ArmOSCSequence(kTicks)});
   seqs.push_back({"hum-wbc", HumanoidSequence(kTicks / 2)});
+  seqs.push_back({"biman-ik", BimanualDiffIKSequence(kTicks)});
   robot_control::SaveSequences(path, seqs, /*float32=*/true);
   for (const NamedSequence& s : seqs) PrintFingerprint(s);
   std::printf("wrote %s\n", path);

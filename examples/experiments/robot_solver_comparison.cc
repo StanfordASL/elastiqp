@@ -1,5 +1,5 @@
 // Cross-solver comparison on the recorded robot control loops (diff-ik,
-// arm-osc, hum-wbc): every route to a usable answer, on the feasible
+// arm-osc, hum-wbc, biman-ik): every route to a usable answer, on the feasible
 // sequences and on a conflict variant of each, in one binary. Produces the
 // data for the combined feasible/infeasible table in the paper.
 //

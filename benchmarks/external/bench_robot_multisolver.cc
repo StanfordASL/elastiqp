@@ -1,5 +1,5 @@
 // The cross-solver robot control-loop benchmark: every solver route replayed
-// over the robotics sequences (diff-ik / arm-osc / hum-wbc, from
+// over the robotics sequences (diff-ik / arm-osc / hum-wbc / biman-ik, from
 // gen_robot_sequences), on both a FEASIBLE and a CONFLICT variant of each
 // sequence — so a single binary produces the cross-solver timing table
 // (feasible rows) and the graceful-degradation study (conflict rows).

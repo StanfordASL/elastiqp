@@ -225,6 +225,104 @@ void TestDiffIKConflict() {
 }
 
 // ---------------------------------------------------------------------------
+// Bimanual differential IK (rigid grasp as hard equality rows)
+// ---------------------------------------------------------------------------
+
+void TestBimanualDiffIK(bool conflict) {
+  std::printf("Bimanual diff IK (x = [qd1; qd2], rigid grasp): %s\n",
+              conflict ? "conflicting constraints" : "closed-loop tracking");
+  Manipulator arm1, arm2;
+  robot_control::ArmParams prm;
+  const Vector3d offset(0.0, 0.6, 0.0);
+
+  const double dt = 0.01;
+  const int ticks = 400;
+  auto q1 = Manipulator::Home();
+  auto q2 = Manipulator::Home();
+  const auto qd0 = Manipulator::Vector6d::Zero();
+  if (conflict) {
+    // Tightened velocity box + a joint pushed past its limit, as in the
+    // single-arm conflict test: the damper demands a retreat the box cannot
+    // deliver. The grasp equalities must keep holding regardless.
+    prm.qd_cap = 1.0;
+    q1[1] = arm1.q_max()[1] + 0.3;
+  }
+  arm1.Compute(q1, qd0);
+  arm2.Compute(q2, qd0);
+  const robot_control::BimanualGrasp grasp =
+      robot_control::MakeGrasp(arm1, arm2, offset);
+  const Vector3d center = arm1.ee_pos();
+  const Eigen::Matrix3d rot0 = arm1.ee_rot();
+
+  RobotQP qp = robot_control::BuildBimanualDiffIK(arm1, arm2, offset, grasp,
+                                                  prm, q1, q2, {}, {});
+  elastiqp::Solver solver = MakeSolver(qp);
+
+  int fails = 0;
+  double worst_kkt = 0, worst_eq = 0, max_slack = 0, worst_track = 0;
+  double worst_grasp = 0;
+  bool limits_ok = true;
+  for (int k = 0; k < ticks; ++k) {
+    robot_control::TaskTarget t1 = CircleTarget(center, rot0, k * dt,
+                                                conflict ? 0.0 : 0.10, 2.0);
+    if (!conflict) {
+      const double wy = 2 * M_PI / 3.0;
+      const double yaw = 0.15 * std::sin(wy * k * dt);
+      t1.rot = Eigen::AngleAxisd(yaw, Vector3d::UnitZ()) * rot0;
+      t1.omega = Vector3d(0.0, 0.0, 0.15 * wy * std::cos(wy * k * dt));
+    }
+    const robot_control::TaskTarget t2 =
+        robot_control::GraspConsistentTarget(grasp, t1);
+    arm1.Compute(q1, qd0);
+    arm2.Compute(q2, qd0);
+    qp = robot_control::BuildBimanualDiffIK(arm1, arm2, offset, grasp, prm, q1,
+                                            q2, t1, t2);
+    Update(solver, qp);
+    const auto& sol = solver.solve();
+    if (sol.converged != 1) fails++;
+    worst_kkt = std::max(worst_kkt, ElasticKKT(qp, sol));
+    worst_eq = std::max(worst_eq, EqualityResidual(qp, sol.x));
+    max_slack = std::max(max_slack, sol.t.maxCoeff());
+    const VectorXd qd = sol.x;
+    q1 += dt * qd.head<6>();
+    q2 += dt * qd.tail<6>();
+    for (int i = 0; i < Manipulator::kNv; ++i) {
+      limits_ok &= std::abs(qd[i]) <= arm1.qd_max()[i] + 1e-6 &&
+                   std::abs(qd[6 + i]) <= arm2.qd_max()[i] + 1e-6;
+    }
+    arm1.Compute(q1, qd0);
+    arm2.Compute(q2, qd0);
+    // Relative-pose (grasp) error: the servo in b must hold it near zero.
+    const Vector3d e_pos = (robot_control::Arm2WorldPos(arm2, offset) -
+                            arm1.ee_pos()) -
+                           arm1.ee_rot() * grasp.r12;
+    const Vector3d e_rot = robot_control::OrientationError(
+        arm2.ee_rot(), arm1.ee_rot() * grasp.R12);
+    worst_grasp = std::max(worst_grasp,
+                           std::max(e_pos.norm(), e_rot.norm()));
+    if (!conflict && k > 50) {
+      worst_track = std::max(worst_track, (arm1.ee_pos() - t1.pos).norm());
+    }
+  }
+  Check("all ticks converge", fails == 0, fails, "fails");
+  Check("worst elastic KKT residual", worst_kkt < 1e-6, worst_kkt, "kkt");
+  Check("grasp equality residual ~ 0", worst_eq < 1e-8, worst_eq, "|Ax-b|");
+  Check("grasp pose error stays small", worst_grasp < 1e-3, worst_grasp,
+        "|e|");
+  if (conflict) {
+    Check("conflict => some slack active", max_slack > 1e-1, max_slack,
+          "max t");
+    Check("joint recovered to its limit", q1[1] <= arm1.q_max()[1] + 1e-2,
+          q1[1] - arm1.q_max()[1], "q1 - q_max");
+  } else {
+    Check("feasible => slacks ~ 0", max_slack < 1e-6, max_slack, "max t");
+    Check("velocity limits respected", limits_ok, limits_ok ? 0.0 : 1.0,
+          "viol");
+    Check("EE tracking error < 1 cm", worst_track < 0.01, worst_track, "m");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Torque-level operational-space control (accelerations eliminated, x = tau)
 // ---------------------------------------------------------------------------
 
@@ -365,6 +463,8 @@ void TestHumanoidWBC(bool conflict) {
 int main() {
   TestDiffIKTracking();
   TestDiffIKConflict();
+  TestBimanualDiffIK(/*conflict=*/false);
+  TestBimanualDiffIK(/*conflict=*/true);
   TestArmOSC(/*conflict=*/false);
   TestArmOSC(/*conflict=*/true);
   TestHumanoidWBC(/*conflict=*/false);
@@ -382,6 +482,23 @@ int main() {
     target.pos = arm.ee_pos() + Vector3d(0.1, -0.1, 0.1);
     target.rot = arm.ee_rot();
     CrossValidate("diff IK", robot_control::BuildDiffIK(arm, prm, q, target));
+    {
+      Manipulator b1, b2;
+      const Vector3d offset(0.0, 0.6, 0.0);
+      auto qb1 = Manipulator::Home();
+      auto qb2 = Manipulator::Home();
+      qb2[2] += 0.2;  // break the symmetry between the arms
+      b1.Compute(qb1, Manipulator::Vector6d::Zero());
+      b2.Compute(qb2, Manipulator::Vector6d::Zero());
+      const auto grasp = robot_control::MakeGrasp(b1, b2, offset);
+      robot_control::TaskTarget t1;
+      t1.pos = b1.ee_pos() + Vector3d(0.05, -0.05, 0.05);
+      t1.rot = b1.ee_rot();
+      CrossValidate("bimanual diff IK",
+                    robot_control::BuildBimanualDiffIK(
+                        b1, b2, offset, grasp, prm, qb1, qb2, t1,
+                        robot_control::GraspConsistentTarget(grasp, t1)));
+    }
     CrossValidate("arm OSC",
                   robot_control::BuildArmOSC(
                       arm, prm, q, qd,
