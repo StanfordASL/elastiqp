@@ -195,6 +195,43 @@ rejected: −22-28% on creep cells but +30-120% at large drift and
 the seeded eta plus the stall-gated jump discover per tick, at the cost
 of one probing round.
 
+## Deactivation-side jump (gap creep)
+
+The fourth departure (2026-08-20, `Settings::bcl_gap_jump`, default on)
+handles the mirror image of the saturation creep. When a constraint
+conflict *releases* — a tick after rows rode the penalty cap `z = w` —
+the true duals drop far below the cap while the warm `x` is often
+strictly feasible for the new data. Then `pri = 0` identically, every
+BCL round is a "good" step, and mu never leaves `mu_in_init`. The
+residual clauses converge immediately; the only remaining error is
+complementarity (interior rows holding large duals), which only the
+duality-gap clause sees. The excess dual contracts at the PPM rate
+`1 - |r_i| / (mu z_i)` per round — arbitrarily slow when the active
+rows are near-parallel — and the solve burns the full outer budget with
+`pri = 0`, `dua ~ 1e-9`, and the gap frozen: kMaxIter. (Disabling the
+gap check does not help: it accepts the badly wrong duals instead — the
+check is load-bearing, per the Settings note.)
+
+As with the saturation jump, the elastic reading gives an explicit
+target: a row stuck ACTIVE with slack `r < 0` and excess dual `z` leaves
+the active set once `mu_in < -r / z`, all known at the iterate. On a
+good step where the residual clauses pass, the gap clause fails, and
+the gap improved < 20% this round, the solver jumps `mu_in` one
+`mu_update_factor` *past* the shallowest target `max_i(-r_i / z_i)`
+(landing exactly on the boundary leaves the contraction at
+`mu / (mu + lambda) ~ 1/2`; stepping past makes the round a near-snap),
+classic shrink as the ceiling, `mu_eq` in lockstep. The gate is narrow —
+residuals at tolerance, gap failing, gap stalled — so it cannot fire in
+any regime the earlier departures were tuned on; `bench_bcl_strategies`
+and the full test suite are bit-identical wins/neutral (see Validation).
+
+Found in the wild (2026-08-20): `constraint_conflict_demo.py`, a 2D
+CBF controller squeezed by a wall/obstacle conflict. On the
+pinch-release tick the warm solve failed at 251 iterations (cold: 10;
+ruiz: no effect); with the jump it converges in 24. The regression test
+`elastiqp.gap_creep` (tests/test_gap_creep.cc) pins that exact tick
+pair.
+
 ## Validation
 
 `benchmarks/bench_bcl_strategies.cc` isolates the failure regime that
@@ -237,3 +274,12 @@ The regression test `elastiqp.bcl_creep` (tests/test_bcl_creep.cc) pins
 the shipped behavior on the two worst uniform cells plus the `spike`
 mixed cell, with bounds that discriminate every rejected generation
 (proxqp parity, capped reset, worst-residual-row jump).
+
+The 2026-08-20 `gapjump` generation (deactivation-side jump, now the
+shipped defaults) is neutral on this entire benchmark — its gate
+(residuals at tolerance, gap failing, gap stalled) never triggers in
+the drift regimes above; `eta` vs `gapjump` rows differ by sub-0.2 mean
+iterations in both directions with no fails and worst ticks within ±1.
+Its motivating regime is the pinch-release tick pinned by
+`elastiqp.gap_creep`, where it converts a 251-iteration kMaxIter into a
+24-iteration solve.

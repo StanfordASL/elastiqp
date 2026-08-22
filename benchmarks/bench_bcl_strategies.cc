@@ -17,7 +17,8 @@
 //   noreset  cold reset off                        (ce51511)
 //   split    + block-split bad step                (0a0025a)
 //   jump     + creep-resolving mu jump             (de1c48a)
-//   eta      + warm-start eta seeding = SHIPPED    (4a21686, defaults)
+//   eta      + warm-start eta seeding              (4a21686)
+//   gapjump  + deactivation-side gap jump = SHIPPED (defaults)
 //
 // Cells: the creep regime (penalty 1e4, sigma 1e-4 / 1e-3, all three
 // structures, both eps tiers); the same regime with MIXED per-row
@@ -65,17 +66,18 @@ constexpr int kTicks = 100;
 // "uncapped" (proxqp has no cap; the reset can fire every outer round).
 struct Strategy {
   const char* name;
-  bool split, jump, warm_eta;
+  bool split, jump, warm_eta, gap_jump;
   int reset_limit;
 };
 
 constexpr Strategy kStrategies[] = {
-    {"proxqp", false, false, false, 250},
-    {"cap1", false, false, false, 1},
-    {"noreset", false, false, false, 0},
-    {"split", true, false, false, 0},
-    {"jump", true, true, false, 0},
-    {"eta", true, true, true, 0},
+    {"proxqp", false, false, false, false, 250},
+    {"cap1", false, false, false, false, 1},
+    {"noreset", false, false, false, false, 0},
+    {"split", true, false, false, false, 0},
+    {"jump", true, true, false, false, 0},
+    {"eta", true, true, true, false, 0},
+    {"gapjump", true, true, true, true, 0},
 };
 
 void Configure(elastiqp::Settings& s, const Strategy& st, double eps,
@@ -87,6 +89,7 @@ void Configure(elastiqp::Settings& s, const Strategy& st, double eps,
   s.bcl_split = st.split;
   s.bcl_mu_jump = st.jump;
   s.bcl_warm_eta = st.warm_eta;
+  s.bcl_gap_jump = st.gap_jump;
   s.cold_reset_limit = st.reset_limit;
 }
 

@@ -102,9 +102,7 @@ def wall_rows(p, v):
     hy = WALL_Y - p[1] - ROBOT_RADIUS
     a_sum, a_prod = ALPHA1 + ALPHA2, ALPHA1 * ALPHA2
     G = np.array([[1.0, 0.0], [0.0, 1.0]])
-    h_vec = np.array(
-        [a_prod * hx - a_sum * v[0], a_prod * hy - a_sum * v[1]]
-    )
+    h_vec = np.array([a_prod * hx - a_sum * v[0], a_prod * hy - a_sum * v[1]])
     return G, h_vec, np.array([hx, hy])
 
 
@@ -151,7 +149,9 @@ class Log:
     p_obs: list = field(default_factory=list)
     u: list = field(default_factory=list)
     u_nom: list = field(default_factory=list)
-    margins: list = field(default_factory=list)  # signed distances [wall x, wall y, obs]
+    margins: list = field(
+        default_factory=list
+    )  # signed distances [wall x, wall y, obs]
     cbf_slack: list = field(default_factory=list)  # G u - h per row (constraint room)
     t_elastic: list = field(default_factory=list)  # ElastiQP slacks t
     z: list = field(default_factory=list)  # ElastiQP inequality duals
@@ -165,7 +165,9 @@ def simulate(scenario: Scenario) -> dict:
     p = ROBOT_START.astype(float).copy()
     v = np.zeros(2)
     p_obs = OBS_START.astype(float).copy()
-    v_obs = OBS_SPEED * (OBS_TARGET - OBS_START) / np.linalg.norm(OBS_TARGET - OBS_START)
+    v_obs = (
+        OBS_SPEED * (OBS_TARGET - OBS_START) / np.linalg.norm(OBS_TARGET - OBS_START)
+    )
 
     solver = elastiqp.Solver()
     Q, q, G, h, _ = build_qp(p, v, p_obs, v_obs, np.zeros(2))
@@ -219,7 +221,9 @@ def plot_trajectory(ax, data: dict, scenario: Scenario):
     ax.fill_between([lim_lo, lim_hi], WALL_Y, lim_hi, color="0.85", zorder=0)
 
     ax.plot(p[:, 0], p[:, 1], color="tab:blue", lw=1.5, label="robot")
-    ax.plot(p_obs[:, 0], p_obs[:, 1], color="tab:red", lw=1.5, ls="--", label="obstacle")
+    ax.plot(
+        p_obs[:, 0], p_obs[:, 1], color="tab:red", lw=1.5, ls="--", label="obstacle"
+    )
 
     # Discs at a few snapshots
     for frac in (0.0, 0.35, 0.5, 0.65, 1.0):

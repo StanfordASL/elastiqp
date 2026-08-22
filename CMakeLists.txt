@@ -46,6 +46,13 @@ if(NOT SKBUILD)
   target_link_libraries(test_bcl_creep PRIVATE elastiqp::elastiqp)
   add_test(NAME elastiqp.bcl_creep COMMAND test_bcl_creep)
 
+  # Regression watch for the warm-start deactivation-creep failure mode
+  # (pinch-release tick from examples/experiments/constraint_conflict_demo.py;
+  # see tests/test_gap_creep.cc). Needs only Eigen.
+  add_executable(test_gap_creep tests/test_gap_creep.cc)
+  target_link_libraries(test_gap_creep PRIVATE elastiqp::elastiqp)
+  add_test(NAME elastiqp.gap_creep COMMAND test_gap_creep)
+
   add_executable(test_ipm_reference tests/test_ipm_reference.cc)
   target_include_directories(test_ipm_reference PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/tests

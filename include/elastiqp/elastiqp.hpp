@@ -118,6 +118,8 @@ struct Settings {
   bool bcl_split = true;
   // Jump mu to known (shallowest) saturation point among stalled inequalities
   bool bcl_mu_jump = true;
+  // Mirror jump for gap stalls: resolve oversized duals on satisfied rows
+  bool bcl_gap_jump = true;
   // Warm-start eta seeding
   bool bcl_warm_eta = true;
 
@@ -412,6 +414,7 @@ class Solver {
     if (track_jump_res) {
       jump_res_prev_ = (r_ - t_).cwiseProduct(inv_di_);
     }
+    double gap_prev = duality_gap_;
 
     // Outer loop (PMM + BCL)
     for (int oiter = 0; oiter < settings.max_outer_iter; ++oiter) {
@@ -447,6 +450,44 @@ class Solver {
       if (pri_new <= eta_ext || iters_total_ > settings.safe_guard) {
         eta_ext *= std::pow(mu_in_, settings.beta_bcl);
         eta_in = std::max(eta_in * mu_in_, eps_in_min);
+        // Good-step edge case: elasticity kicked in at the previous
+        // solve (duals = penalty, t > 0), but constraints are now satisfied
+        // at the warm start (for instance, consider a robot which had 
+        // conflicting constraints that just resolved). The duals are too
+        // large, and need to come down. Both residual checks pass on this step,
+        // but the duality gap fails and stalls, since every round counts
+        // as "good" and mu doesn't shrink. In this case, use similar BCL jump
+        // logic as in the bad-step case to resolve the shallowest stuck row
+        const bool res_ok =
+            (primal_res_ < settings.eps_abs ||
+             primal_res_rel_ < settings.eps_rel) &&
+            (dual_res_ < settings.eps_abs ||
+             dual_res_rel_ < settings.eps_rel);
+        const bool gap_fail =
+            settings.check_duality_gap &&
+            !(duality_gap_ < settings.eps_duality_gap_abs ||
+              duality_gap_rel_ < settings.eps_duality_gap_rel);
+        if (settings.bcl_gap_jump && res_ok && gap_fail &&
+            duality_gap_ > 0.8 * gap_prev) {
+          double shallowest = 0.0;
+          for (Eigen::Index i = 0; i < p_; ++i) {
+            if (r_[i] < 0.0 && z_[i] > 0.0) {
+              shallowest = std::max(shallowest, -r_[i] / z_[i]);
+            }
+          }
+          double mu_new = mu_in_ * settings.mu_update_factor;
+          if (shallowest > 0.0) {
+            // Jump one factor past the boundary so the duals snap to
+            // exactly 0 on the next step (later increasing as needed)
+            mu_new = std::min(mu_new, settings.mu_update_factor * shallowest);
+          }
+          const double ratio = mu_new / mu_in_;
+          mu_in_ = std::max(mu_new, settings.mu_min_in);
+          mu_eq_ = std::max(mu_eq_ * ratio, settings.mu_min_eq);
+          eta_ext = eta_ext_init * std::pow(mu_in_, settings.alpha_bcl);
+          eta_in = std::max(mu_in_, eps_in_min);
+          update_residuals();
+        }
       } else if (settings.bcl_split) {
         // Bad step: revert y if equalities are at fault, not z, and shrink mu
         // (split handling for elastic structure -- hard eq, elastic ineq)
@@ -496,6 +537,7 @@ class Solver {
 
       // Keep track of residuals for the next round
       if (track_jump_res) jump_res_prev_.swap(jump_res_cur_);
+      gap_prev = duality_gap_;
 
       // Cold restart of stalled, over-tightened penalties
       // Proxqp has this on, we keep this normally off (limit=0)
