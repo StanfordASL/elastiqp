@@ -208,6 +208,25 @@ def simulate(scenario: Scenario) -> dict:
 # --- Plotting -----------------------------------------------------------------
 
 
+# Snapshot instants for the disc trails, in seconds relative to the moment the
+# robot is pushed furthest from its start (which coincides with the pinch).
+SNAP_OFFSETS = (-1.2, -0.6, 0.0)
+SNAP_ALPHAS = (0.20, 0.42, 0.75)
+
+
+def _arrow_along(ax, a, b, color, zorder=4):
+    """Small arrowhead at the midpoint of segment a->b, pointing towards b."""
+    mid = 0.5 * (a + b)
+    step = 0.01 * (b - a) / (np.linalg.norm(b - a) + 1e-12)
+    ax.annotate(
+        "",
+        xy=mid + step,
+        xytext=mid - step,
+        arrowprops=dict(arrowstyle="-|>", color=color, lw=0, mutation_scale=14),
+        zorder=zorder,
+    )
+
+
 def plot_trajectory(
     ax, data: dict, scenario: Scenario, xlim=None, ylim=None, legend=True
 ):
@@ -225,15 +244,35 @@ def plot_trajectory(
     ax.fill_betweenx([lim_lo, WALL_Y], WALL_X, lim_hi, color="0.85", zorder=0)
     ax.fill_between([lim_lo, lim_hi], WALL_Y, lim_hi, color="0.85", zorder=0)
 
-    ax.plot(p[:, 0], p[:, 1], color="tab:blue", lw=1.5, label="robot")
-    ax.plot(
-        p_obs[:, 0], p_obs[:, 1], color="tab:red", lw=1.5, ls="--", label="obstacle"
-    )
+    # Snapshot indices: last frame = robot's furthest excursion (the pinch),
+    # earlier frames at fixed offsets so robot and obstacle discs are
+    # synchronized in time.
+    disp = np.linalg.norm(p - ROBOT_START, axis=1)
+    i_last = int(disp.argmax())
+    snap_idx = [
+        int(np.clip(np.searchsorted(t, t[i_last] + off), 0, len(t) - 1))
+        for off in SNAP_OFFSETS
+    ]
 
-    # Discs at a few snapshots
-    for frac in (0.0, 0.35, 0.5, 0.65, 1.0):
-        i = min(int(frac * (len(t) - 1)), len(t) - 1)
-        alpha = 0.15 + 0.5 * frac
+    # Robot: path up to the pinch (the return leg retraces it), arrowhead
+    # partway along the moving section.
+    ax.plot(p[: i_last + 1, 0], p[: i_last + 1, 1], color="tab:blue", lw=1.5,
+            label="robot", zorder=3)
+    i_mid = snap_idx[1]
+    if disp[i_last] > 0.05:
+        _arrow_along(ax, p[(i_mid + i_last) // 2 - 1], p[(i_mid + i_last) // 2 + 1],
+                     "tab:blue")
+
+    # Obstacle: dashed path starting at the first plotted disc, arrowheads in
+    # the gaps between discs pointing along the motion.
+    i0 = snap_idx[0]
+    ax.plot(p_obs[i0: snap_idx[-1] + 1, 0], p_obs[i0: snap_idx[-1] + 1, 1],
+            color="tab:red", lw=1.5, ls="--", label="obstacle", zorder=3)
+    for ia, ib in zip(snap_idx[:-1], snap_idx[1:]):
+        _arrow_along(ax, p_obs[ia], p_obs[ib], "tab:red")
+
+    # Discs at the snapshot instants, fading in towards the pinch
+    for i, alpha in zip(snap_idx, SNAP_ALPHAS):
         ax.add_patch(Circle(p[i], ROBOT_RADIUS, color="tab:blue", alpha=alpha, lw=0))
         ax.add_patch(Circle(p_obs[i], OBS_RADIUS, color="tab:red", alpha=alpha, lw=0))
 
@@ -289,8 +328,8 @@ def plot_timeseries(fig, axes, data: dict, scenario: Scenario):
 
 
 PAPER_SCENARIOS = ["Walls hard, obstacle soft", "Obstacle hard, walls soft"]
-TRAJ_XLIM = (0.0, 1.6)
-TRAJ_YLIM = (0.0, 1.8)
+TRAJ_XLIM = (0.0, 1.85)
+TRAJ_YLIM = (0.0, 1.95)
 TIME_WINDOW = (2.0, 6.0)
 
 # Sized for ieeeconf: figure* spans \textwidth (~7.16 in), body text is 10 pt,
