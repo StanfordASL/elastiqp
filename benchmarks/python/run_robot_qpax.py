@@ -43,7 +43,7 @@ import numpy as np
 
 import bench_common as bc
 
-EPS = 1e-6
+EPS = 1e-5  # overridable via --eps (module-level so the jitted fns see it)
 MAX_ITER = 250  # qpax's default 30 truncates otherwise-correct solves
 VIOL_THRESH = 1e-4
 GAP_FRAC = 0.05
@@ -273,13 +273,17 @@ def print_row(scenario: str, variant: str, route: str, st: RouteStats):
 
 
 def main():
+    global EPS
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("sequence_file", nargs="?", default=str(bc.SEQUENCE_FILE))
     ap.add_argument("--csv", default=str(bc.RESULTS_DIR),
                     help="output directory for the CSV")
     ap.add_argument("--eq-penalty", type=float, default=None,
                     help="override the calibrated folded-equality penalty")
+    ap.add_argument("--eps", type=float, default=EPS,
+                    help="qpax solver_tol (unscaled full-KKT inf-norm)")
     args = ap.parse_args()
+    EPS = args.eps
 
     seqs = bc.load_sequences(args.sequence_file)
     print(f"eps={EPS:g}, conflict gap = {100 * GAP_FRAC:.0f}% of the row "
