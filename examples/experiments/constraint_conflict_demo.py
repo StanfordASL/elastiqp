@@ -25,7 +25,8 @@ import elastiqp
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.animation import FuncAnimation
-from matplotlib.patches import Circle
+from matplotlib.legend_handler import HandlerPatch
+from matplotlib.patches import Circle, FancyArrowPatch
 
 # --- Environment -------------------------------------------------------------
 
@@ -55,6 +56,9 @@ ALPHA1 = 3.0
 ALPHA2 = 3.0
 
 CONSTRAINT_NAMES = ["wall x", "wall y", "obstacle"]
+# Constraint colors for the dual/slack time series; "obstacle" is purple so it
+# doesn't read as the (red) obstacle trajectory in the xy panels
+CONSTRAINT_COLORS = ["tab:orange", "tab:green", "tab:purple"]
 
 
 @dataclass
@@ -227,6 +231,36 @@ def _arrow_along(ax, a, b, color, zorder=4):
     )
 
 
+class _HandlerArrow(HandlerPatch):
+    """Legend handler drawing a dashed line with an arrowhead at the end."""
+
+    def create_artists(
+        self, legend, orig_handle, xdescent, ydescent, width, height, fontsize, trans
+    ):
+        y = height / 2.0 - ydescent
+        arrow = FancyArrowPatch(
+            (-xdescent, y),
+            (width - xdescent, y),
+            arrowstyle="-|>",
+            mutation_scale=12,
+            color=orig_handle.get_edgecolor(),
+            ls=orig_handle.get_linestyle(),
+            lw=orig_handle.get_linewidth(),
+        )
+        arrow.set_transform(trans)
+        return [arrow]
+
+
+def _traj_legend_handles():
+    """Proxy handles (dashed arrow lines) for the robot/obstacle trajectories."""
+    return [
+        FancyArrowPatch(
+            (0, 0), (1, 0), color=color, ls="--", lw=1.5, label=label
+        )
+        for color, label in (("tab:blue", "robot"), ("tab:red", "obstacle"))
+    ]
+
+
 def plot_trajectory(
     ax, data: dict, scenario: Scenario, xlim=None, ylim=None, legend=True
 ):
@@ -257,7 +291,7 @@ def plot_trajectory(
     # Robot: path up to the pinch (the return leg retraces it), arrowhead
     # partway along the moving section.
     ax.plot(p[: i_last + 1, 0], p[: i_last + 1, 1], color="tab:blue", lw=1.5,
-            label="robot", zorder=3)
+            ls="--", label="robot", zorder=3)
     i_mid = snap_idx[1]
     if disp[i_last] > 0.05:
         _arrow_along(ax, p[(i_mid + i_last) // 2 - 1], p[(i_mid + i_last) // 2 + 1],
@@ -271,10 +305,15 @@ def plot_trajectory(
     for ia, ib in zip(snap_idx[:-1], snap_idx[1:]):
         _arrow_along(ax, p_obs[ia], p_obs[ib], "tab:red")
 
-    # Discs at the snapshot instants, fading in towards the pinch
+    # Discs at the snapshot instants, fading in towards the pinch; robot discs
+    # sit above obstacle discs, trajectory lines (zorder 3+) above both
     for i, alpha in zip(snap_idx, SNAP_ALPHAS):
-        ax.add_patch(Circle(p[i], ROBOT_RADIUS, color="tab:blue", alpha=alpha, lw=0))
-        ax.add_patch(Circle(p_obs[i], OBS_RADIUS, color="tab:red", alpha=alpha, lw=0))
+        ax.add_patch(
+            Circle(p_obs[i], OBS_RADIUS, color="tab:red", alpha=alpha, lw=0, zorder=1.8)
+        )
+        ax.add_patch(
+            Circle(p[i], ROBOT_RADIUS, color="tab:blue", alpha=alpha, lw=0, zorder=2)
+        )
 
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
@@ -284,6 +323,8 @@ def plot_trajectory(
     ax.set_title(scenario.name)
     if legend:
         ax.legend(
+            handles=_traj_legend_handles(),
+            handler_map={FancyArrowPatch: _HandlerArrow()},
             loc="lower left",
             handlelength=1.4,
             borderpad=0.3,
@@ -293,7 +334,7 @@ def plot_trajectory(
 
 def plot_timeseries(fig, axes, data: dict, scenario: Scenario):
     t = data["time"]
-    colors = ["tab:orange", "tab:green", "tab:red"]
+    colors = CONSTRAINT_COLORS
 
     ax = axes[0]
     for i, name in enumerate(CONSTRAINT_NAMES):
@@ -352,7 +393,7 @@ PAPER_RC = {
 def plot_paper_figure(runs):
     """Full-page-width figure: [trajectory | duals/slacks] x two scenarios."""
     selected = [(s, d) for s, d in runs if s.name in PAPER_SCENARIOS]
-    colors = ["tab:orange", "tab:green", "tab:red"]
+    colors = CONSTRAINT_COLORS
 
     with plt.rc_context(PAPER_RC):
         fig = plt.figure()
@@ -420,16 +461,17 @@ def plot_paper_figure(runs):
             ax_t.set_xlabel("time [s]")
             if j == 0:
                 # Unified legend: robot/obstacle trajectories + constraint colors
-                traj_h, traj_l = ax_traj.get_legend_handles_labels()
+                traj_h = _traj_legend_handles()
                 cons_h, cons_l = ax_t.get_legend_handles_labels()
                 legend_handles = traj_h + cons_h
-                legend_labels = traj_l + cons_l
+                legend_labels = [h.get_label() for h in traj_h] + cons_l
             for ax in (ax_z, ax_t):
                 ax.grid(alpha=0.3)
 
         fig.legend(
             legend_handles,
             legend_labels,
+            handler_map={FancyArrowPatch: _HandlerArrow()},
             loc="lower center",
             ncols=len(legend_handles),
             frameon=False,
