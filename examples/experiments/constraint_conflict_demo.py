@@ -72,12 +72,12 @@ SCENARIOS = [
     ),
     Scenario(
         "Walls hard, obstacle soft",
-        np.array([1e4, 1e4, 1e1]),
+        np.array([1e2, 1e2, 1e1]),
         "Robot stops in the corner and accepts contact with the obstacle",
     ),
     Scenario(
         "Obstacle hard, walls soft",
-        np.array([1e1, 1e1, 1e4]),
+        np.array([1e1, 1e1, 1e2]),
         "Robot yields the workspace bounds slightly to stay clear of the obstacle",
     ),
 ]
@@ -208,13 +208,18 @@ def simulate(scenario: Scenario) -> dict:
 # --- Plotting -----------------------------------------------------------------
 
 
-def plot_trajectory(ax, data: dict, scenario: Scenario):
+def plot_trajectory(
+    ax, data: dict, scenario: Scenario, xlim=None, ylim=None, legend=True
+):
     t = data["time"]
     p = data["p"]
     p_obs = data["p_obs"]
 
     # Walls (room interior is down-left of the corner)
-    lim_lo, lim_hi = -3.0, 2.5
+    xlim = xlim if xlim is not None else (-3.0, 2.5)
+    ylim = ylim if ylim is not None else (-3.0, 2.5)
+    lim_lo = min(xlim[0], ylim[0])
+    lim_hi = max(xlim[1], ylim[1])
     ax.plot([WALL_X, WALL_X], [lim_lo, WALL_Y], "k-", lw=2)
     ax.plot([lim_lo, WALL_X], [WALL_Y, WALL_Y], "k-", lw=2)
     ax.fill_betweenx([lim_lo, WALL_Y], WALL_X, lim_hi, color="0.85", zorder=0)
@@ -231,15 +236,20 @@ def plot_trajectory(ax, data: dict, scenario: Scenario):
         alpha = 0.15 + 0.5 * frac
         ax.add_patch(Circle(p[i], ROBOT_RADIUS, color="tab:blue", alpha=alpha, lw=0))
         ax.add_patch(Circle(p_obs[i], OBS_RADIUS, color="tab:red", alpha=alpha, lw=0))
-    ax.plot(*ROBOT_START, "b*", ms=10, label="start/goal")
 
-    ax.set_xlim(lim_lo, lim_hi)
-    ax.set_ylim(lim_lo, lim_hi)
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
     ax.set_aspect("equal")
     ax.set_xlabel("x [m]")
     ax.set_ylabel("y [m]")
     ax.set_title(scenario.name)
-    ax.legend(loc="lower left", fontsize=8)
+    if legend:
+        ax.legend(
+            loc="lower left",
+            handlelength=1.4,
+            borderpad=0.3,
+            labelspacing=0.3,
+        )
 
 
 def plot_timeseries(fig, axes, data: dict, scenario: Scenario):
@@ -278,6 +288,118 @@ def plot_timeseries(fig, axes, data: dict, scenario: Scenario):
     fig.suptitle(f"{scenario.name} — {scenario.description}", fontsize=10)
 
 
+PAPER_SCENARIOS = ["Walls hard, obstacle soft", "Obstacle hard, walls soft"]
+TRAJ_XLIM = (0.0, 1.6)
+TRAJ_YLIM = (0.0, 1.8)
+TIME_WINDOW = (2.0, 6.0)
+
+# Sized for ieeeconf: figure* spans \textwidth (~7.16 in), body text is 10 pt,
+# so 8 pt labels / 7 pt ticks match typical IEEE figure typography at 1:1 scale.
+# Include with \includegraphics[width=\textwidth] (no scaling) to keep fonts true.
+PAPER_RC = {
+    "figure.figsize": (20, 4.25),
+    "font.size": 14,
+    # "axes.labelsize": 10,
+    # "axes.titlesize": 10,
+    # "xtick.labelsize": 10,
+    # "ytick.labelsize": 10,
+    # "legend.fontsize": 6.5,
+    # "lines.linewidth": 1,
+    # "axes.linewidth": 0.6,
+    # "grid.linewidth": 0.4,
+}
+
+
+def plot_paper_figure(runs):
+    """Full-page-width figure: [trajectory | duals/slacks] x two scenarios."""
+    selected = [(s, d) for s, d in runs if s.name in PAPER_SCENARIOS]
+    colors = ["tab:orange", "tab:green", "tab:red"]
+
+    with plt.rc_context(PAPER_RC):
+        fig = plt.figure()
+        outer = fig.add_gridspec(1, 4, width_ratios=[1.0, 1.05, 1.0, 1.05], wspace=0.55)
+
+        for j, (scenario, data) in enumerate(selected):
+            t = data["time"]
+            mask = (t >= TIME_WINDOW[0]) & (t <= TIME_WINDOW[1])
+
+            ax_traj = fig.add_subplot(outer[0, 2 * j])
+            plot_trajectory(
+                ax_traj, data, scenario, xlim=TRAJ_XLIM, ylim=TRAJ_YLIM, legend=False
+            )
+            # aspect="equal" leaves slack in the gridspec cell; push it away from
+            # the dual/slack column so the ylabels don't collide
+            ax_traj.set_anchor("W")
+
+            zt_hspace = (
+                0.15  # gap between z and t panels, as a fraction of panel height
+            )
+            inner = outer[0, 2 * j + 1].subgridspec(2, 1, hspace=zt_hspace)
+            ax_z = fig.add_subplot(inner[0])
+            ax_t = fig.add_subplot(inner[1], sharex=ax_z)
+
+            # aspect="equal" shrinks the trajectory box at draw time; resolve it
+            # now and pin the z/t stack to span exactly the same vertical extent
+            ax_traj.apply_aspect()
+            tp = ax_traj.get_position()
+            zp = ax_z.get_position()
+            panel_h = tp.height / (2.0 + zt_hspace)
+            ax_t.set_position([zp.x0, tp.y0, zp.width, panel_h])
+            ax_z.set_position(
+                [zp.x0, tp.y0 + panel_h * (1.0 + zt_hspace), zp.width, panel_h]
+            )
+
+            for i, name in enumerate(CONSTRAINT_NAMES):
+                ax_z.plot(t[mask], data["z"][mask, i], color=colors[i])
+                ax_t.plot(
+                    t[mask], data["t_elastic"][mask, i], color=colors[i], label=name
+                )
+                # Maximum attainable dual = the L1 penalty on that constraint
+                ax_z.axhline(scenario.penalty[i], color=colors[i], ls="--")  # , lw=0.8)
+
+            rho_max = scenario.penalty.max()
+            ax_z.set_yscale("log")
+            ax_z.minorticks_off()
+            ax_z.set_ylim(1e-1, 3.0 * rho_max)
+            ax_t.set_yscale("log")
+            ax_t.set_ylim(1e-1, 10.0)
+            ax_t.minorticks_off()
+            # ax_z.annotate(
+            #     r"$z_{\max} = \rho$",
+            #     xy=(TIME_WINDOW[0], rho_max),
+            #     xytext=(2, -2),
+            #     textcoords="offset points",
+            #     va="top",
+            #     fontsize=7,
+            #     color="0.3",
+            # )
+
+            ax_z.set_xlim(*TIME_WINDOW)
+            ax_z.set_ylabel("dual $z$")
+            ax_z.tick_params(labelbottom=False)
+            ax_t.set_ylabel("elastic slack $t$")
+            ax_t.set_xlabel("time [s]")
+            if j == 0:
+                # Unified legend: robot/obstacle trajectories + constraint colors
+                traj_h, traj_l = ax_traj.get_legend_handles_labels()
+                cons_h, cons_l = ax_t.get_legend_handles_labels()
+                legend_handles = traj_h + cons_h
+                legend_labels = traj_l + cons_l
+            for ax in (ax_z, ax_t):
+                ax.grid(alpha=0.3)
+
+        fig.legend(
+            legend_handles,
+            legend_labels,
+            loc="lower center",
+            ncols=len(legend_handles),
+            frameon=False,
+            bbox_to_anchor=(0.5, -0.18),
+        )
+
+    return fig
+
+
 def animate(runs):
     """Side-by-side animation of all scenarios."""
     fig, axes = plt.subplots(1, len(runs), figsize=(5 * len(runs), 5))
@@ -312,6 +434,12 @@ def animate(runs):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--animate", action="store_true", help="show an animation")
+    parser.add_argument(
+        "--detail",
+        action="store_true",
+        help="also show the per-scenario diagnostic plots",
+    )
+    parser.add_argument("--save", metavar="PATH", help="save the paper figure to PATH")
     args = parser.parse_args()
 
     runs = []
@@ -326,17 +454,23 @@ def main():
             print(f"  {name:9s}: worst margin {w:+.3f} m ({status})")
         print(f"  mean solver iters: {data['iters'].mean():.1f}")
 
-    # Trajectories side by side
-    fig, axes = plt.subplots(1, len(runs), figsize=(5 * len(runs), 5))
-    for ax, (scenario, data) in zip(np.atleast_1d(axes), runs):
-        plot_trajectory(ax, data, scenario)
-    fig.tight_layout()
+    paper_fig = plot_paper_figure(runs)
+    if args.save:
+        paper_fig.savefig(args.save, bbox_inches="tight", dpi=300)
+        print(f"Saved paper figure to {args.save}")
 
-    # Time series per scenario
-    for scenario, data in runs:
-        fig, axes = plt.subplots(4, 1, figsize=(8, 9), sharex=True)
-        plot_timeseries(fig, axes, data, scenario)
+    if args.detail:
+        # Trajectories side by side
+        fig, axes = plt.subplots(1, len(runs), figsize=(5 * len(runs), 5))
+        for ax, (scenario, data) in zip(np.atleast_1d(axes), runs):
+            plot_trajectory(ax, data, scenario)
         fig.tight_layout()
+
+        # Time series per scenario
+        for scenario, data in runs:
+            fig, axes = plt.subplots(4, 1, figsize=(8, 9), sharex=True)
+            plot_timeseries(fig, axes, data, scenario)
+            fig.tight_layout()
 
     anim = animate(runs) if args.animate else None  # noqa: F841 (keep alive)
     plt.show()
