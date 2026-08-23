@@ -42,6 +42,7 @@ elastiqp_bench(bench_relax_warm    bench_relax_warm.cc)
 elastiqp_bench(bench_fwd_warm      bench_fwd_warm.cc)
 elastiqp_bench(bench_bcl_strategies bench_bcl_strategies.cc)
 elastiqp_bench(bench_diff_robot    bench_diff_robot.cc)
+elastiqp_bench(bench_eq_elastic    bench_eq_elastic.cc)
 
 # --- robotics generator + correctness tests (need Pinocchio) -----------------
 # Need an installed Pinocchio (ROS/pip/conda binary or source build; point
