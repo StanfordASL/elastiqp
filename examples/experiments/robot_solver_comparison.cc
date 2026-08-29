@@ -24,7 +24,9 @@
 #include <string>
 #include <vector>
 
+#include <Eigen/SparseCore>
 #include <proxsuite/proxqp/dense/dense.hpp>
+#include <proxsuite/proxqp/sparse/sparse.hpp>
 
 #include "elastiqp/elastiqp.hpp"
 #include "piqp/piqp.hpp"
@@ -247,6 +249,54 @@ RouteStats RunPiqp(const Sequence& seq, int conflict_row, bool slack) {
   return st;
 }
 
+// Sparse view of the expanded formulation. The dense blocks (Q, A, G) are
+// stored with every entry explicit, zeros included, so the sparsity pattern is
+// identical on every tick: ProxQP-sparse's update() compares the pattern with
+// the one given to init() and silently keeps the old matrices when it differs.
+// The slack columns are the only structural sparsity ([-I] in C, empty in H).
+// The sparse API has no box block, so t >= 0 is p further rows [0 I] of C.
+struct SparseExpanded {
+  using Mat = Eigen::SparseMatrix<double, Eigen::ColMajor, int>;
+  Mat H, A, C;
+  VectorXd g, l, u;
+  int n, p;
+
+  SparseExpanded(const RobotQP& qp)
+      : n(static_cast<int>(qp.q.size())), p(static_cast<int>(qp.h.size())) {
+    const int m = static_cast<int>(qp.b.size());
+    H.resize(n + p, n + p);
+    A.resize(m, n + p);
+    C.resize(2 * p, n + p);
+    g.resize(n + p);
+    l = VectorXd::Constant(2 * p, -kInf);
+    l.tail(p).setZero();
+    u = VectorXd::Constant(2 * p, kInf);
+    Fill(qp);
+  }
+  static void DenseBlock(std::vector<Eigen::Triplet<double>>& t, const MatrixXd& M) {
+    for (int j = 0; j < M.cols(); ++j)
+      for (int i = 0; i < M.rows(); ++i) t.emplace_back(i, j, M(i, j));
+  }
+  void Fill(const RobotQP& qp) {
+    std::vector<Eigen::Triplet<double>> t;
+    DenseBlock(t, qp.Q);
+    H.setFromTriplets(t.begin(), t.end());
+    t.clear();
+    DenseBlock(t, qp.A);
+    A.setFromTriplets(t.begin(), t.end());
+    t.clear();
+    DenseBlock(t, qp.G);
+    for (int i = 0; i < p; ++i) {
+      t.emplace_back(i, n + i, -1.0);
+      t.emplace_back(p + i, n + i, 1.0);
+    }
+    C.setFromTriplets(t.begin(), t.end());
+    g.head(n) = qp.q;
+    g.tail(p) = qp.penalty;
+    u.head(p) = qp.h;
+  }
+};
+
 enum class ProxMode { kHard, kClosestFeasible, kSlack };
 
 // Closest-feasible mode misbehaves through update() (spins past max_iter in
@@ -313,6 +363,49 @@ RouteStats RunProxqp(const Sequence& seq, int conflict_row, ProxMode mode,
       st.other++;
     }
     if (certified || fresh) st.AddPrimal(tick, qp->results.x.head(e.n), conflict_row);
+  }
+  st.Finalize();
+  return st;
+}
+
+// ProxQP sparse backend on the expanded l1-slack formulation.
+RouteStats RunProxqpSparse(const Sequence& seq, int conflict_row, bool warm) {
+  SparseExpanded e(seq.front());
+  const int m = static_cast<int>(seq.front().b.size());
+  pq::sparse::QP<double, int> qp(e.n + e.p, m, 2 * e.p);
+  qp.settings.eps_abs = kEps;
+  qp.settings.eps_rel = 0;
+  qp.settings.max_iter = kProxMaxIter;
+  qp.settings.check_duality_gap = true;
+  qp.settings.eps_duality_gap_abs = kEps;
+  qp.settings.eps_duality_gap_rel = 0;
+  qp.settings.eps_primal_inf = 1e-14;  // feasible by construction
+  qp.settings.eps_dual_inf = 1e-14;
+  qp.settings.initial_guess =
+      warm ? pq::InitialGuessStatus::WARM_START_WITH_PREVIOUS_RESULT
+           : pq::InitialGuessStatus::EQUALITY_CONSTRAINED_INITIAL_GUESS;
+  RouteStats st;
+  bool first = true;
+  for (const RobotQP& tick : seq) {
+    e.Fill(tick);
+    const double t0 = Now();
+    if (first) {
+      qp.init(e.H, e.g, e.A, tick.b, e.C, e.l, e.u);
+    } else {
+      qp.update(e.H, e.g, e.A, tick.b, e.C, e.l, e.u);
+    }
+    first = false;
+    qp.solve();
+    st.Add(Now() - t0, static_cast<int>(qp.results.info.iter));
+    const auto status = qp.results.info.status;
+    if (status == pq::QPSolverOutput::PROXQP_SOLVED) {
+      st.solved++;
+      st.AddPrimal(tick, qp.results.x.head(e.n), conflict_row);
+    } else if (status == pq::QPSolverOutput::PROXQP_PRIMAL_INFEASIBLE) {
+      st.infeasible++;
+    } else {
+      st.other++;
+    }
   }
   st.Finalize();
   return st;
@@ -393,6 +486,8 @@ int main(int argc, char** argv) {
       add("proxqp-clfeas", RunProxqp(s, row_c, ProxMode::kClosestFeasible, false));
       add("proxqp-slack", RunProxqp(s, row_c, ProxMode::kSlack, false));
       add("proxqp-slack-warm", RunProxqp(s, row_c, ProxMode::kSlack, true));
+      add("proxqp-sparse-slack", RunProxqpSparse(s, row_c, false));
+      add("proxqp-sparse-slack-warm", RunProxqpSparse(s, row_c, true));
       std::fflush(stdout);
     }
     std::printf("\n");
