@@ -20,7 +20,8 @@ only by the density cut are visible there). No conditioning filter is
 applied — ill-conditioned problems stay in, and the per-problem cond(P)
 column lets the reader slice the results either way.
 
-Hard routes solve the HARD problem cold at eps_abs = 1e-6 (eps_rel = 0):
+Hard routes solve the HARD problem cold at eps_abs = --eps (default 1e-6,
+eps_rel = 0):
 piqp/proxqp on l <= Ax <= u directly, qpax-hard on the one-sided
 conversion. elastiqp solves its elastic relaxation (l == u rows hard,
 finite sides elastic, Ruiz on — this badly-scaled set is what the flag
@@ -121,8 +122,11 @@ def objective(P, q, x):
 
 # ------------------------------------------------------------------ piqp
 
-def solve_piqp(P, q, forms, eps=EPS, max_iter=MAX_ITER):
+def solve_piqp(P, q, forms, eps=None, max_iter=MAX_ITER):
     import piqp
+
+    if eps is None:  # bind the (possibly --eps overridden) global at call time
+        eps = EPS
 
     A_eq, b_eq, A_in, l_in, u_in, _, _ = forms
     solver = piqp.DenseSolver()
@@ -291,12 +295,21 @@ def time_elastiqp(P, q, forms, penalty_mag):
 # ------------------------------------------------------------------ main
 
 def main():
+    global EPS
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--nmax", type=int, default=100)
     ap.add_argument("--rows-max", type=int, default=500)
     ap.add_argument("--min-density", type=float, default=0.05)
+    ap.add_argument("--eps", type=float, default=EPS,
+                    help="eps_abs for every timed solver (the piqp "
+                         "reference stays at 1e-11)")
+    ap.add_argument("--suffix", default="",
+                    help="appended to output CSV stems, so exploratory "
+                         "runs don't clobber the pinned paper CSVs")
     ap.add_argument("--data-dir", default=default_data_dir())
     args = ap.parse_args()
+    EPS = args.eps
+    sfx = args.suffix
     if not args.data_dir or not os.path.isdir(args.data_dir):
         raise SystemExit(
             "no Maros-Meszaros data dir found; configure a build with "
@@ -390,11 +403,11 @@ def main():
         print(f"  {name}: done in {time.time() - t0:.1f}s "
               f"(ref {'ok' if ref_ok else 'FAILED'}, cond(P) {cond_P:.1e})")
 
-    bc.write_csv(bc.RESULTS_DIR / "maros_meszaros_stats.csv",
+    bc.write_csv(bc.RESULTS_DIR / f"maros_meszaros_stats{sfx}.csv",
                  ["name", "n", "rows", "eq_rows", "ineq_rows", "density_A",
                   "density_P", "density_PA", "cond_P", "included", "reason"],
                  stats_rows)
-    bc.write_csv(bc.RESULTS_DIR / "maros_meszaros_py_results.csv",
+    bc.write_csv(bc.RESULTS_DIR / f"maros_meszaros_py_results{sfx}.csv",
                  ["name", "n", "rows", "solver", "status", "ok", "time_ms",
                   "iters", "primal_viol", "objective", "obj_rel_err"],
                  results_rows)
@@ -420,7 +433,7 @@ def main():
     for s in solvers:
         summary.append([s, n_prob, n_prob - fails[s], fails[s] / n_prob,
                         sgms[s], sgms[s] / best])
-    bc.write_csv(bc.RESULTS_DIR / "maros_meszaros_py_summary.csv",
+    bc.write_csv(bc.RESULTS_DIR / f"maros_meszaros_py_summary{sfx}.csv",
                  ["solver", "problems", "solved", "failure_rate",
                   "sgm_time_ms_shift1", "sgm_normalized"], summary)
     for row in summary:
