@@ -1,5 +1,6 @@
 """ElastiQP python bindings test cases"""
 
+import os
 import sys
 
 import elastiqp
@@ -345,6 +346,50 @@ def main():
         and np.isfinite([s.primal_obj, s.primal_res, s.dual_res, s.duality_gap]).all()
     )
     check("Solution dtypes/shapes incl. empty equality block", ok, "")
+
+    print("Hard case: warm-start stale duals (OSCBF Panda teleop, step 8945)")
+    # Captured pathology: a primal-feasible warm start carrying oversized
+    # duals from a constraint-conflict transition. Residuals pass on round
+    # one; the duality gap decays at ~0.78/round -- under the former
+    # 0.8-stall gate -- so bcl_gap_jump never fired and the warm solve took
+    # 30 iters vs 13 cold. The projected-horizon gate (bcl_gap_jump_horizon)
+    # fires on round one instead: 5 iters measured (bounds hold 2x headroom).
+    d = np.load(os.path.join(os.path.dirname(__file__), "data", "warmstart_stale_duals.npz"))
+    tol = float(d["solver_tol"])
+
+    def hard_case_solver():
+        s = elastiqp.Solver()
+        s.settings.eps_abs = tol
+        s.settings.eps_duality_gap_abs = tol
+        s.setup(d["P"], d["q"], d["G"], d["h"], d["penalties"])
+        return s
+
+    cold = hard_case_solver().solve()
+    check(
+        "cold reference converges",
+        cold.converged == 1 and cold.iters <= 26,
+        f"iters={cold.iters}",
+    )
+    ws = hard_case_solver()
+    ws.set_warm_start(d["warm_x"], d["warm_y"], d["warm_z_ineq"])
+    warm = ws.solve()
+    dx = np.abs(warm.x - d["expected_x"]).max()
+    check(
+        "warm solve converges accurately",
+        warm.converged == 1 and dx < 10 * tol,
+        f"|dx|={dx:.1e}",
+    )
+    check(
+        "warm gap jump beats logged 30 iters",
+        warm.iters <= 10 and warm.iters < cold.iters,
+        f"iters={warm.iters} (logged 30)",
+    )
+    # Informational: the repro still discriminates with the jump off.
+    off = hard_case_solver()
+    off.settings.bcl_gap_jump = False
+    off.set_warm_start(d["warm_x"], d["warm_y"], d["warm_z_ineq"])
+    noj = off.solve()
+    print(f"  [info] bcl_gap_jump=False: iters={noj.iters} (logged 30)")
 
     n_fail = RESULTS.count(False)
     print(f"\n{'All binding tests passed.' if n_fail == 0 else f'{n_fail} FAILURES'}")

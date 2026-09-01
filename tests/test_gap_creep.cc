@@ -19,9 +19,10 @@
 // with pri = 0, dua ~ 1e-9, gap stuck at 0.28: kMaxIter.
 //
 // The fix under test is Settings::bcl_gap_jump: on a good step where the
-// residual clauses pass, the gap clause fails, and the gap improved
-// < 20% in the round, jump mu one mu_update_factor past the shallowest
-// deactivation point max_i(-r_i / z_i). Measured post-fix: 24 iterations
+// residual clauses pass, the gap clause fails, and the gap's decay rate
+// projects to more than bcl_gap_jump_horizon further rounds, jump mu one
+// mu_update_factor past the shallowest deactivation point
+// max_i(-r_i / z_i). Measured post-fix: 24 iterations
 // (bounds below hold ~2x headroom). With the flag off the warm solve
 // still fails -- reported informationally to confirm the repro
 // discriminates.

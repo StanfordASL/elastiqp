@@ -189,6 +189,7 @@ NB_MODULE(_core, m) {
       .def_rw("bcl_split", &Settings::bcl_split)
       .def_rw("bcl_mu_jump", &Settings::bcl_mu_jump)
       .def_rw("bcl_gap_jump", &Settings::bcl_gap_jump)
+      .def_rw("bcl_gap_jump_horizon", &Settings::bcl_gap_jump_horizon)
       .def_rw("bcl_warm_eta", &Settings::bcl_warm_eta)
       .def_rw("eps_abs", &Settings::eps_abs)
       .def_rw("eps_rel", &Settings::eps_rel)

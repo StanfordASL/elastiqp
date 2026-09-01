@@ -131,6 +131,9 @@ struct Settings {
   bool bcl_mu_jump = true;
   // Mirror jump for gap stalls: resolve oversized duals on satisfied rows
   bool bcl_gap_jump = true;
+  // Fire the gap jump when the gap's geometric decay would still need more
+  // than this many rounds to pass the gap tolerance
+  int bcl_gap_jump_horizon = 4;
   // Warm-start eta seeding
   bool bcl_warm_eta = true;
 
@@ -481,8 +484,17 @@ class Solver {
             settings.check_duality_gap &&
             !(duality_gap_ < settings.eps_duality_gap_abs ||
               duality_gap_rel_ < settings.eps_duality_gap_rel);
-        if (settings.bcl_gap_jump && res_ok && gap_fail &&
-            duality_gap_ > 0.8 * gap_prev) {
+        // Jump when the gap's per-round geometric decay cannot reach the
+        // gap tolerance within bcl_gap_jump_horizon more rounds
+        bool gap_too_slow = duality_gap_ >= gap_prev || !(gap_prev > 0.0);
+        if (!gap_too_slow) {
+          const double decay =
+              std::pow(duality_gap_ / gap_prev, settings.bcl_gap_jump_horizon);
+          gap_too_slow =
+              duality_gap_ * decay >= settings.eps_duality_gap_abs &&
+              duality_gap_rel_ * decay >= settings.eps_duality_gap_rel;
+        }
+        if (settings.bcl_gap_jump && res_ok && gap_fail && gap_too_slow) {
           double shallowest = 0.0;
           for (Eigen::Index i = 0; i < p_; ++i) {
             if (r_[i] < 0.0 && z_[i] > 0.0) {

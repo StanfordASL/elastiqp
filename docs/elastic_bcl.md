@@ -216,21 +216,37 @@ As with the saturation jump, the elastic reading gives an explicit
 target: a row stuck ACTIVE with slack `r < 0` and excess dual `z` leaves
 the active set once `mu_in < -r / z`, all known at the iterate. On a
 good step where the residual clauses pass, the gap clause fails, and
-the gap improved < 20% this round, the solver jumps `mu_in` one
-`mu_update_factor` *past* the shallowest target `max_i(-r_i / z_i)`
-(landing exactly on the boundary leaves the contraction at
-`mu / (mu + lambda) ~ 1/2`; stepping past makes the round a near-snap),
-classic shrink as the ceiling, `mu_eq` in lockstep. The gate is narrow —
-residuals at tolerance, gap failing, gap stalled — so it cannot fire in
-any regime the earlier departures were tuned on; `bench_bcl_strategies`
-and the full test suite are bit-identical wins/neutral (see Validation).
+the gap's per-round geometric decay projects to more than
+`bcl_gap_jump_horizon` (default 4) further rounds to tolerance, the
+solver jumps `mu_in` one `mu_update_factor` *past* the shallowest
+target `max_i(-r_i / z_i)` (landing exactly on the boundary leaves the
+contraction at `mu / (mu + lambda) ~ 1/2`; stepping past makes the
+round a near-snap), classic shrink as the ceiling, `mu_eq` in lockstep.
+(The original 2026-08-20 gate fired only on a hard stall — gap improved
+< 20% this round — which missed decay rates just past the threshold;
+see the stale-duals case below. The projected-horizon gate subsumes it:
+a non-decreasing gap always projects past any horizon.) The gate is
+narrow — residuals at tolerance, gap failing, gap too slow — so it
+cannot fire in any regime the earlier departures were tuned on;
+`bench_bcl_strategies` and the full test suite are bit-identical
+wins/neutral (see Validation).
 
 Found in the wild (2026-08-20): `constraint_conflict_demo.py`, a 2D
 CBF controller squeezed by a wall/obstacle conflict. On the
 pinch-release tick the warm solve failed at 251 iterations (cold: 10;
-ruiz: no effect); with the jump it converges in 24. The regression test
-`elastiqp.gap_creep` (tests/test_gap_creep.cc) pins that exact tick
-pair.
+ruiz: no effect); with the jump it converges in 17 (24 under the
+original stall-only gate). The regression test `elastiqp.gap_creep`
+(tests/test_gap_creep.cc) pins that exact tick pair.
+
+Found in the wild again (2026-08-31): an OSCBF Panda teleop stress test
+(n=7, m=92 CBF/limit rows) captured a warm tick taking 30 iters against
+13 cold — the same stale-duals mechanism, but with the gap decaying at
+~0.78/round, just past the old 0.8 stall gate: every round looked
+"healthy" while the solve was 30 rounds from tolerance (with
+`check_duality_gap` off it terminates in 1 iter, confirming the whole
+solve was gap grind). The projected-horizon gate fires on round one:
+5 iters. The captured QP is pinned as a regression case in
+tests/test_bindings.py (data in tests/data/warmstart_stale_duals.npz).
 
 ## Validation
 
@@ -277,9 +293,13 @@ mixed cell, with bounds that discriminate every rejected generation
 
 The 2026-08-20 `gapjump` generation (deactivation-side jump, now the
 shipped defaults) is neutral on this entire benchmark — its gate
-(residuals at tolerance, gap failing, gap stalled) never triggers in
+(residuals at tolerance, gap failing, gap too slow) never triggers in
 the drift regimes above; `eta` vs `gapjump` rows differ by sub-0.2 mean
 iterations in both directions with no fails and worst ticks within ±1.
 Its motivating regime is the pinch-release tick pinned by
 `elastiqp.gap_creep`, where it converts a 251-iteration kMaxIter into a
-24-iteration solve.
+17-iteration solve. The 2026-08-31 projected-horizon regate (see the
+deactivation-side section) was revalidated the same way:
+`bench_bcl_strategies` gapjump rows unchanged (0 fails, only
+parity-ladder rungs fail as designed), `bench_fwd_warm` 0 fails with
+warm speedups intact, full test suite green.
