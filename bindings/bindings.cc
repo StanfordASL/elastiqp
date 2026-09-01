@@ -199,6 +199,10 @@ NB_MODULE(_core, m) {
       .def_rw("max_outer_iter", &Settings::max_outer_iter)
       .def_rw("max_iter_in", &Settings::max_iter_in)
       .def_rw("max_factor_retries", &Settings::max_factor_retries)
+      .def_rw("incremental_updates", &Settings::incremental_updates)
+      .def_rw("incremental_update_budget", &Settings::incremental_update_budget)
+      .def_rw("incremental_update_max_flips",
+              &Settings::incremental_update_max_flips)
       .def_rw("warm_start", &Settings::warm_start)
       .def_rw("ruiz", &Settings::ruiz)
       .def_rw("ruiz_max_iter", &Settings::ruiz_max_iter)

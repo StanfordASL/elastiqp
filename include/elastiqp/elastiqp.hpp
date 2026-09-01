@@ -26,7 +26,9 @@
 // n x n SPD system K = Q + rho*I + (1/mu_eq) A^T A + (1/mu_in) G_act^T G_act.
 // The factorization is cached across Newton iterations AND across solve()
 // calls: control-loop re-solves where only vectors drift and the active
-// set is stable cost zero factorizations.
+// set is stable cost zero factorizations. Small active-set changes at
+// fixed data and penalties are applied as rank-one Cholesky up/downdates
+// (Settings::incremental_updates) rather than refactorizations.
 //
 // The penalty is exact (no barrier): an unsaturated solution matches the
 // hard-constrained QP, and warm starting needs no slack flooring -- the
@@ -88,6 +90,15 @@ struct Settings {
   double eps_duality_gap_abs = 1e-5;
   double eps_duality_gap_rel = 0;
   int max_factor_retries = 10;
+
+  // Incremental factorization updates on active set changes
+  // rather than a full refactorization.
+  bool incremental_updates = true;
+  // Cap on incremental updates between refactorizations
+  int incremental_update_budget = 256;
+  // Number of active set changes allowable for incremental updates
+  // More than this = just refactorize anyways. 0 means "auto" (=n/3)
+  int incremental_update_max_flips = 0;
 
   // Check if equalities are inconsistent (the only infeasibility case).
   // Runs when A/b data is set; only applies if eps_rel = 0
@@ -221,6 +232,9 @@ class Solver {
     GS_.resize(p_, n_);
     K_.resize(n_, n_);
     llt_ = Eigen::LLT<MatrixXd, Eigen::Lower>(n_);
+    flip_idx_.reserve(static_cast<size_t>(p_));
+    upd_vec_.resize(n_);
+    updates_since_factor_ = 0;
 
     // relax() iterate and workspace
     xr_.resize(n_);
@@ -1078,18 +1092,43 @@ class Solver {
   }
 
   bool ensure_factor() {
-    bool need = !factored_ || matrix_dirty_ || f_rho_ != rho_ ||
-                f_mu_eq_ != mu_eq_ || f_mu_in_ != mu_in_;
-    if (!need) {
+    const bool data_changed = !factored_ || matrix_dirty_ || f_rho_ != rho_ ||
+                              f_mu_eq_ != mu_eq_ || f_mu_in_ != mu_in_;
+    if (!data_changed) {
+      flip_idx_.clear();
       for (Eigen::Index i = 0; i < p_; ++i) {
         const bool act = state_[static_cast<size_t>(i)] == 1;
         if (act != (f_active_[static_cast<size_t>(i)] != 0)) {
-          need = true;
-          break;
+          flip_idx_.push_back(i);
         }
       }
+      if (flip_idx_.empty()) return true;
+
+      // Only the active set changed: fold the flipped rows into the cached
+      // factor as rank-one up/downdates when that beats a refactorization.
+      const Eigen::Index max_flips =
+          settings.incremental_update_max_flips > 0
+              ? settings.incremental_update_max_flips
+              : std::max<Eigen::Index>(1, n_ / 3);
+      if (settings.incremental_updates &&
+          static_cast<Eigen::Index>(flip_idx_.size()) <= max_flips &&
+          updates_since_factor_ + static_cast<int>(flip_idx_.size()) <=
+              settings.incremental_update_budget) {
+        bool ok = true;
+        for (Eigen::Index i : flip_idx_) {
+          const bool act = state_[static_cast<size_t>(i)] == 1;
+          upd_vec_ = G_.row(i).transpose();
+          llt_.rankUpdate(upd_vec_, (act ? 1.0 : -1.0) / mu_in_);
+          ++updates_since_factor_;
+          if (llt_.info() != Eigen::Success) {
+            ok = false;  // factor corrupted; fall through to refactorize
+            break;
+          }
+          f_active_[static_cast<size_t>(i)] = act ? 1 : 0;
+        }
+        if (ok) return true;
+      }
     }
-    if (!need) return true;
 
     while (!factor_kkt()) {
       if (factor_retries_ < settings.max_factor_retries) {
@@ -1102,6 +1141,7 @@ class Solver {
     factor_retries_ = 0;
     factored_ = true;
     matrix_dirty_ = false;
+    updates_since_factor_ = 0;
     f_rho_ = rho_;
     f_mu_eq_ = mu_eq_;
     f_mu_in_ = mu_in_;
@@ -1402,6 +1442,9 @@ class Solver {
   bool matrix_dirty_ = true, factored_ = false;
   double f_rho_ = 0, f_mu_eq_ = 0, f_mu_in_ = 0;
   std::vector<signed char> f_active_;
+  std::vector<Eigen::Index> flip_idx_;  // rows flipped since the cached factor
+  VectorXd upd_vec_;                    // rank-one update staging
+  int updates_since_factor_ = 0;
   int factor_retries_ = 0, factor_count_ = 0, iters_total_ = 0;
   int cold_resets_ = 0;
 
