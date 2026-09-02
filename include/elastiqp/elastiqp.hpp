@@ -127,13 +127,15 @@ struct Settings {
   // On a BCL bad step, revert the equality duals (only if their residual
   // is at fault); never revert the inequality duals
   bool bcl_split = true;
-  // Jump mu to known (shallowest) saturation point among stalled inequalities
-  bool bcl_mu_jump = true;
-  // Mirror jump for gap stalls: resolve oversized duals on satisfied rows
-  bool bcl_gap_jump = true;
-  // Fire the gap jump when the gap's geometric decay would still need more
+  // Saturation jump: on a stalled bad step, drop mu to the shallowest
+  // saturation point among the stalled inequality rows
+  bool bcl_saturation_jump = true;
+  // Release jump: mirror for gap stalls, drop mu so the oversized dual on
+  // the shallowest satisfied row releases to 0
+  bool bcl_release_jump = true;
+  // Fire the release jump when the gap's geometric decay would still need more
   // than this many rounds to pass the gap tolerance
-  int bcl_gap_jump_horizon = 4;
+  int bcl_release_jump_horizon = 4;
   // Warm-start eta seeding
   bool bcl_warm_eta = true;
 
@@ -428,7 +430,8 @@ class Solver {
     }
 
     // Store initial residuals to track slow convergence across outer rounds
-    const bool track_jump_res = settings.bcl_split && settings.bcl_mu_jump;
+    const bool track_jump_res =
+        settings.bcl_split && settings.bcl_saturation_jump;
     if (track_jump_res) {
       jump_res_prev_ = (r_ - t_).cwiseProduct(inv_di_);
     }
@@ -468,16 +471,16 @@ class Solver {
       if (pri_new <= eta_ext_ || iters_total_ > settings.safe_guard) {
         eta_ext_ *= std::pow(mu_in_, settings.beta_bcl);
         eta_in_ = std::max(eta_in_ * mu_in_, eps_in_min());
-        // Gap jump: residuals pass but the gap stalls because oversized duals
+        // Release jump: residuals pass but the gap stalls because oversized duals
         // on now-satisfied rows must come down (deactivation creep,
         // docs/elastic_bcl.md). Every round counts as good, so mu never
         // shrinks on its own. Jump one factor past the shallowest such row
         // so its dual snaps to 0 on the next step
-        if (settings.bcl_gap_jump && residuals_ok() &&
+        if (settings.bcl_release_jump && residuals_ok() &&
             settings.check_duality_gap && !gap_ok() &&
             gap_decay_too_slow(gap_prev)) {
           double mu_new = mu_in_ * settings.mu_update_factor;
-          const double shallowest = gap_jump_mu();
+          const double shallowest = release_jump_mu();
           if (shallowest > 0.0) {
             mu_new = std::min(mu_new, settings.mu_update_factor * shallowest);
           }
@@ -485,12 +488,13 @@ class Solver {
         }
       } else if (settings.bcl_split) {
         // Bad step (elastic): revert y only if the equalities are at fault,
-        // never z; jump mu just far enough to resolve one stalled row
+        // never z; saturation jump: drop mu just far enough to saturate one
+        // stalled row
         if (m_ > 0 && eq_res_ > eta_ext_) y_ = yk_;
         double mu_new = mu_in_ * settings.mu_update_factor;
-        if (settings.bcl_mu_jump && in_res_ > eta_ext_ &&
+        if (settings.bcl_saturation_jump && in_res_ > eta_ext_ &&
             pri_new > 0.8 * pri_old) {
-          const double shallowest = stall_jump_mu();
+          const double shallowest = saturation_jump_mu();
           if (shallowest > 0.0) mu_new = std::min(mu_new, shallowest);
         }
         shrink_mu(mu_new);
@@ -862,9 +866,9 @@ class Solver {
     set_mu(mu_new, mu_eq_ * (mu_new / mu_in_));
   }
 
-  // Gap-jump target: the mu_in at which the shallowest oversized dual on a
+  // Release-jump target: the mu_in at which the shallowest oversized dual on a
   // satisfied row (r < 0, z > 0) snaps to 0. Returns 0 if there is none
-  double gap_jump_mu() const {
+  double release_jump_mu() const {
     double shallowest = 0.0;
     for (Eigen::Index i = 0; i < p_; ++i) {
       if (r_[i] < 0.0 && z_[i] > 0.0) {
@@ -874,10 +878,10 @@ class Solver {
     return shallowest;
   }
 
-  // Stall-jump target: a violated row improving < 20% per round needs
+  // Saturation-jump target: a violated row improving < 20% per round needs
   // mu_in <= r / (penalty - z) for its dual to reach the penalty cap.
   // Returns the shallowest such mu_in, or 0 if no row is stalled
-  double stall_jump_mu() const {
+  double saturation_jump_mu() const {
     double shallowest = 0.0;
     for (Eigen::Index i = 0; i < p_; ++i) {
       const double res_i = jump_res_cur_[i];
@@ -892,11 +896,11 @@ class Solver {
   }
 
   // True if the gap's per-round geometric decay cannot reach the gap
-  // tolerance within bcl_gap_jump_horizon more rounds
+  // tolerance within bcl_release_jump_horizon more rounds
   bool gap_decay_too_slow(double gap_prev) const {
     if (duality_gap_ >= gap_prev || !(gap_prev > 0.0)) return true;
     const double decay =
-        std::pow(duality_gap_ / gap_prev, settings.bcl_gap_jump_horizon);
+        std::pow(duality_gap_ / gap_prev, settings.bcl_release_jump_horizon);
     return duality_gap_ * decay >= settings.eps_duality_gap_abs &&
            duality_gap_rel_ * decay >= settings.eps_duality_gap_rel;
   }
@@ -1483,8 +1487,8 @@ class Solver {
 
   // Workspace (allocated in setup, reused every iteration)
   VectorXd S_, zhat_, t_, s2_, r_, din_, pv_, tp_;
-  // Per-row inequality residuals across outer rounds, for the bcl_mu_jump
-  // stall gate (maintained only while the jump is enabled).
+  // Per-row inequality residuals across outer rounds, for the saturation
+  // jump's stall gate (maintained only while the jump is enabled).
   VectorXd jump_res_prev_, jump_res_cur_;
   VectorXd verr_, dyrhs_, rhs_x_, dx_, dy_, dz_, Qdx_, Adx_, Gdx_;
   VectorXd wQx_, wGtz_, wGtd_, wAty_, wAx_, wGx_;

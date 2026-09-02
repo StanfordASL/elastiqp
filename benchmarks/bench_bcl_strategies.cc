@@ -16,14 +16,14 @@
 //   cap1     cold reset capped at 1 per solve      (719cbf8)
 //   noreset  cold reset off                        (ce51511)
 //   split    + block-split bad step                (0a0025a)
-//   jump     + creep-resolving mu jump             (de1c48a)
+//   satjump  + creep-resolving saturation jump     (de1c48a)
 //   eta      + warm-start eta seeding              (4a21686)
-//   gapjump  + deactivation-side gap jump = SHIPPED (defaults)
+//   release  + release jump (gap creep) = SHIPPED  (defaults)
 //
 // Cells: the creep regime (penalty 1e4, sigma 1e-4 / 1e-3, all three
 // structures, both eps tiers); the same regime with MIXED per-row
 // penalties (w in {10, 1e4}: alt / spike / dip patterns -- the
-// bcl_mu_jump target is read off the single worst-residual row, so a
+// bcl_saturation_jump target is read off the single worst-residual row, so a
 // soft row winning that argmax while stiff rows creep is the suspected
 // weak spot); and control cells (penalty 10; large drift sigma 1e-1). Trajectories
 // use the same generator and seed formula as bench_relax_warm /
@@ -66,7 +66,7 @@ constexpr int kTicks = 100;
 // "uncapped" (proxqp has no cap; the reset can fire every outer round).
 struct Strategy {
   const char* name;
-  bool split, jump, warm_eta, gap_jump;
+  bool split, saturation_jump, warm_eta, release_jump;
   int reset_limit;
 };
 
@@ -75,9 +75,9 @@ constexpr Strategy kStrategies[] = {
     {"cap1", false, false, false, false, 1},
     {"noreset", false, false, false, false, 0},
     {"split", true, false, false, false, 0},
-    {"jump", true, true, false, false, 0},
+    {"satjump", true, true, false, false, 0},
     {"eta", true, true, true, false, 0},
-    {"gapjump", true, true, true, true, 0},
+    {"release", true, true, true, true, 0},
 };
 
 void Configure(elastiqp::Settings& s, const Strategy& st, double eps,
@@ -87,9 +87,9 @@ void Configure(elastiqp::Settings& s, const Strategy& st, double eps,
   s.ruiz = ruiz;
   s.warm_start = warm;
   s.bcl_split = st.split;
-  s.bcl_mu_jump = st.jump;
+  s.bcl_saturation_jump = st.saturation_jump;
   s.bcl_warm_eta = st.warm_eta;
-  s.bcl_gap_jump = st.gap_jump;
+  s.bcl_release_jump = st.release_jump;
   s.cold_reset_limit = st.reset_limit;
 }
 
@@ -184,7 +184,7 @@ void RunCell(const char* group, Size sz, Structure st, double penalty_w,
           sigma, eps);
 }
 
-// Mixed penalty patterns (period 8). The bcl_mu_jump target is read off
+// Mixed penalty patterns (period 8). The bcl_saturation_jump target is read off
 // the single worst-residual row, so the mix decides whether a soft row
 // can win that argmax while stiff rows creep:
 //   alt    every other row soft (50/50)

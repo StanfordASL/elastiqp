@@ -121,9 +121,9 @@ tightening schedule mostly de-synchronizes the ladder from the mu
 schedule that actually governs progress. The threshold split is
 rejected; only the *revert* is split (above).
 
-## Creep-resolving mu jump
+## Saturation jump (creep-resolving)
 
-The second adopted departure (2026-08-15, `Settings::bcl_mu_jump`,
+The second adopted departure (2026-08-15, `Settings::bcl_saturation_jump`,
 default on) cashes in the dual-step reinterpretation directly. Classic
 BCL must shrink mu blindly — a fixed `mu_update_factor` per bad round —
 because for a hard QP no target depth exists. In the elastic reading the
@@ -195,9 +195,9 @@ rejected: −22-28% on creep cells but +30-120% at large drift and
 the seeded eta plus the stall-gated jump discover per tick, at the cost
 of one probing round.
 
-## Deactivation-side jump (gap creep)
+## Release jump (gap creep)
 
-The fourth departure (2026-08-20, `Settings::bcl_gap_jump`, default on)
+The fourth departure (2026-08-20, `Settings::bcl_release_jump`, default on)
 handles the mirror image of the saturation creep. When a constraint
 conflict *releases* — a tick after rows rode the penalty cap `z = w` —
 the true duals drop far below the cap while the warm `x` is often
@@ -217,7 +217,7 @@ target: a row stuck ACTIVE with slack `r < 0` and excess dual `z` leaves
 the active set once `mu_in < -r / z`, all known at the iterate. On a
 good step where the residual clauses pass, the gap clause fails, and
 the gap's per-round geometric decay projects to more than
-`bcl_gap_jump_horizon` (default 4) further rounds to tolerance, the
+`bcl_release_jump_horizon` (default 4) further rounds to tolerance, the
 solver jumps `mu_in` one `mu_update_factor` *past* the shallowest
 target `max_i(-r_i / z_i)` (landing exactly on the boundary leaves the
 contraction at `mu / (mu + lambda) ~ 1/2`; stepping past makes the
@@ -264,7 +264,7 @@ worst cell (degen n=14 p=100, sigma 1e-4, 100 warm ticks):
 | reset capped at 1 | 0 | 47 | 67.8 | 149 |
 | reset off | 0 | 0 | 38.5 | 77 |
 | + block split | 0 | 0 | 35.6 | 73 |
-| + mu jump | 0 | 0 | 26.2 | 52 |
+| + saturation jump | 0 | 0 | 26.2 | 52 |
 | + eta seed (shipped) | 0 | 0 | 25.0 | 52 |
 
 The fail counts under proxqp parity reproduce b995082 exactly (19
@@ -282,7 +282,7 @@ BCL fails even with the reset off (1 tick to kMaxIter on the feas
 sigma-1e-4 cell) — the block split itself, not just the reset removal,
 is load-bearing there. Second, the `spike` mix exposed the
 worst-residual-row jump regression fixed by the shallowest-first rule
-(see the mu-jump section). Ladder on the worst mixed cell
+(see the saturation-jump section). Ladder on the worst mixed cell
 (degen `spike`, sigma 1e-4, mean it / worst tick): split 34.1 / 76,
 worst-residual jump 46.4 / 99, shallowest-first shipped 33.2 / 80.
 
@@ -291,15 +291,15 @@ the shipped behavior on the two worst uniform cells plus the `spike`
 mixed cell, with bounds that discriminate every rejected generation
 (proxqp parity, capped reset, worst-residual-row jump).
 
-The 2026-08-20 `gapjump` generation (deactivation-side jump, now the
+The 2026-08-20 `release` generation (release jump, now the
 shipped defaults) is neutral on this entire benchmark — its gate
 (residuals at tolerance, gap failing, gap too slow) never triggers in
-the drift regimes above; `eta` vs `gapjump` rows differ by sub-0.2 mean
+the drift regimes above; `eta` vs `release` rows differ by sub-0.2 mean
 iterations in both directions with no fails and worst ticks within ±1.
 Its motivating regime is the pinch-release tick pinned by
 `elastiqp.gap_creep`, where it converts a 251-iteration kMaxIter into a
 17-iteration solve. The 2026-08-31 projected-horizon regate (see the
-deactivation-side section) was revalidated the same way:
-`bench_bcl_strategies` gapjump rows unchanged (0 fails, only
+release-jump section) was revalidated the same way:
+`bench_bcl_strategies` release rows unchanged (0 fails, only
 parity-ladder rungs fail as designed), `bench_fwd_warm` 0 fails with
 warm speedups intact, full test suite green.

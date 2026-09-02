@@ -18,9 +18,9 @@
 // (lambda ~ 3e-3) -- so the pre-fix solver burned all 250 outer rounds
 // with pri = 0, dua ~ 1e-9, gap stuck at 0.28: kMaxIter.
 //
-// The fix under test is Settings::bcl_gap_jump: on a good step where the
+// The fix under test is Settings::bcl_release_jump: on a good step where the
 // residual clauses pass, the gap clause fails, and the gap's decay rate
-// projects to more than bcl_gap_jump_horizon further rounds, jump mu one
+// projects to more than bcl_release_jump_horizon further rounds, jump mu one
 // mu_update_factor past the shallowest deactivation point
 // max_i(-r_i / z_i). Measured post-fix: 24 iterations
 // (bounds below hold ~2x headroom). With the flag off the warm solve
@@ -89,14 +89,14 @@ int main() {
   // Informational: the repro still discriminates (not gated -- a future
   // deeper fix may legitimately clear it with the jump off).
   elastiqp::Solver off;
-  off.settings.bcl_gap_jump = false;
+  off.settings.bcl_release_jump = false;
   off.setup(Q, q463, G463, h463, penalty);
   off.solve();
   off.set_q(q464);
   off.set_G(G464);
   off.set_h(h464);
   const elastiqp::Solution noj = off.solve();
-  std::printf("  [info] bcl_gap_jump=false: status=%d iters=%d gap=%.2e\n",
+  std::printf("  [info] bcl_release_jump=false: status=%d iters=%d gap=%.2e\n",
               static_cast<int>(noj.status), noj.iters, noj.duality_gap);
 
   return g_all_ok ? 0 : 1;

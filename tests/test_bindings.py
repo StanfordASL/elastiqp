@@ -351,8 +351,8 @@ def main():
     # Captured pathology: a primal-feasible warm start carrying oversized
     # duals from a constraint-conflict transition. Residuals pass on round
     # one; the duality gap decays at ~0.78/round -- under the former
-    # 0.8-stall gate -- so bcl_gap_jump never fired and the warm solve took
-    # 30 iters vs 13 cold. The projected-horizon gate (bcl_gap_jump_horizon)
+    # 0.8-stall gate -- so bcl_release_jump never fired and the warm solve took
+    # 30 iters vs 13 cold. The projected-horizon gate (bcl_release_jump_horizon)
     # fires on round one instead: 5 iters measured (bounds hold 2x headroom).
     d = np.load(os.path.join(os.path.dirname(__file__), "data", "warmstart_stale_duals.npz"))
     tol = float(d["solver_tol"])
@@ -380,16 +380,16 @@ def main():
         f"|dx|={dx:.1e}",
     )
     check(
-        "warm gap jump beats logged 30 iters",
+        "warm release jump beats logged 30 iters",
         warm.iters <= 10 and warm.iters < cold.iters,
         f"iters={warm.iters} (logged 30)",
     )
     # Informational: the repro still discriminates with the jump off.
     off = hard_case_solver()
-    off.settings.bcl_gap_jump = False
+    off.settings.bcl_release_jump = False
     off.set_warm_start(d["warm_x"], d["warm_y"], d["warm_z_ineq"])
     noj = off.solve()
-    print(f"  [info] bcl_gap_jump=False: iters={noj.iters} (logged 30)")
+    print(f"  [info] bcl_release_jump=False: iters={noj.iters} (logged 30)")
 
     n_fail = RESULTS.count(False)
     print(f"\n{'All binding tests passed.' if n_fail == 0 else f'{n_fail} FAILURES'}")
