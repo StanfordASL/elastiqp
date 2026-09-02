@@ -362,7 +362,8 @@ class Solver {
   // Number of BCL cold resets performed by the last solve()
   int cold_resets() const { return cold_resets_; }
 
-  // Lower bound on reachable equality residual. 0 if consistent or check disabled
+  // Lower bound on the reachable equality residual (0 if consistent or the
+  // check is disabled)
   double eq_infeasibility() const { return eq_infeas_lb_; }
 
   const Solution& solve() {
@@ -373,8 +374,7 @@ class Solver {
     factor_retries_ = 0;
     cold_resets_ = 0;
 
-    // Return infeasibile if checks on latest A/b data indicated
-    // inconsistent (eps_abs unreachable)
+    // Inconsistent equalities: eps_abs is unreachable, report and exit
     if (settings.check_eq_consistency && settings.eps_rel <= 0 &&
         eq_infeas_lb_ > settings.eps_abs) {
       if (!have_warm_ && !explicit_ws) {
@@ -470,11 +470,10 @@ class Solver {
       if (pri_new <= eta_ext_ || iters_total_ > settings.safe_guard) {
         eta_ext_ *= std::pow(mu_in_, settings.beta_bcl);
         eta_in_ = std::max(eta_in_ * mu_in_, eps_in_min());
-        // Release jump: residuals pass but the gap stalls because oversized duals
-        // on now-satisfied rows must come down (deactivation creep,
-        // docs/elastic_bcl.md). Every round counts as good, so mu never
-        // shrinks on its own. Jump one factor past the shallowest such row
-        // so its dual snaps to 0 on the next step
+        // Release jump: residuals pass but the gap stalls because oversized
+        // duals on satisfied rows must come down, and every round counts as
+        // good so mu never shrinks (docs/elastic_bcl.md). Jump one factor
+        // past the shallowest such row so its dual snaps to 0 next step
         if (settings.bcl_release_jump && residuals_ok() &&
             settings.check_duality_gap && !gap_ok() &&
             gap_decay_too_slow(gap_prev)) {
@@ -524,9 +523,8 @@ class Solver {
     return finish(Status::kMaxIter);
   }
 
-  // Differentiability / backward pass -- relax the tight solution to a
-  // kappa-relaxed point for smooth gradient evals
-  // (qpax style, with PDAL + log barrier retraction tweaks)
+  // Backward pass: walk the tight solution to a kappa-relaxed central point
+  // for smooth implicit differentiation (docs/pdal_differentiability.md).
   // The returned Solution is at the relaxed point
   const Solution& relax(double kappa, double tol = 1e-6, int max_iter = 50,
                         bool warm = true) {
@@ -609,8 +607,8 @@ class Solver {
         (Aus_ * xls - b).norm() / std::sqrt(static_cast<double>(m_));
   }
 
-  // PIQP preconditioning logic: Clamp row norms to [1e-4, 1e4] so each scale factor
-  // 1/sqrt(nrm) stays in [1e-2, 100]; rows too small to matter are left unscaled
+  // PIQP-style clamp: scale factors 1/sqrt(nrm) stay in [1e-2, 100], and
+  // negligible rows are left unscaled
   static double limit_scaling(double nrm) {
     return nrm < 1e-4 ? 1.0 : std::min(nrm, 1e4);
   }
@@ -724,9 +722,9 @@ class Solver {
     return finish(converged() ? Status::kSolved : Status::kNumerics);
   }
 
-  // Cold start (proxsuite EQUALITY_CONSTRAINED_INITIAL_GUESS): reset the
-  // proximal state and solve [Q+rho I, A'; A, -mu_eq I][x;y] = [-q; b] via
-  // the condensed K with an empty active set; z = 0.
+  // Cold start (proxsuite EQUALITY_CONSTRAINED_INITIAL_GUESS): solve
+  // [Q+rho I, A'; A, -mu_eq I][x;y] = [-q; b] via K with an empty active
+  // set; z = 0
   bool cold_init() {
     rho_ = settings.rho;
     mu_eq_ = settings.mu_eq_init;
@@ -819,9 +817,8 @@ class Solver {
   bool inner_loop(double eps_int) {
     for (int it = 0; it < settings.max_iter_in; ++it) {
       const double err = compute_inner_terms();
-      // For very small mu_in, err can be <= eps_int even if the duals are
-      // still wrong (mismatch is scaled by mu_in). Take at least one
-      // step to fix them, or the outer loop retries forever with no progress.
+      // The dual mismatch in err is scaled by mu_in, so always take at least
+      // one step; otherwise tiny mu_in can stall the outer loop
       if (err <= eps_int && it > 0) return true;
 
       // Three-state row classification on the shifted value S (elastic
@@ -837,10 +834,8 @@ class Solver {
       }
       if (!ensure_factor()) return false;
 
-      // Newton system, condensed onto K (see header comment). Non-active
-      // rows leave the system: their dual snaps to its known target
-      // (0 inactive, penalty saturated) and the target replaces z in the
-      // dual residual on the right-hand side.
+      // Newton system condensed onto K. Non-active rows leave the system;
+      // their dual snaps to its target (0 inactive, penalty saturated)
       for (Eigen::Index i = 0; i < p_; ++i) {
         switch (state(i)) {
           case RowState::kActive:
@@ -898,9 +893,8 @@ class Solver {
     return true;  // out of inner iterations; the outer loop adapts mu
   }
 
-  // Inner stopping quantities (proxsuite compute_inner_loop_saddle_point,
-  // with the nonnegative-ray projection replaced by the [0, penalty]
-  // clamp). Fills the buffers the Newton step reuses.
+  // Inner stopping criterion (proxsuite compute_inner_loop_saddle_point
+  // with the [0, penalty] clamp). Fills the buffers the Newton step reuses
   double compute_inner_terms() {
     wQx_.noalias() = Q_ * x_;
     wGtz_.noalias() = G_.transpose() * z_;
@@ -923,15 +917,13 @@ class Solver {
     return std::max(err, mu_in_ * inerr);
   }
 
-  // Exact line search on the piecewise-quadratic PDAL merit along
-  // (dx, dy, dz) (proxsuite linesearch::primal_dual_ls). The derivative is
-  // piecewise affine in alpha with breakpoints where a row's shifted value
-  // S_i(alpha) crosses 0 or mu_in*penalty_i; scan the (nondecreasing in
-  // expectation) derivative for its sign change and interpolate.
+  // Exact line search on the piecewise-quadratic PDAL merit (proxsuite
+  // linesearch::primal_dual_ls): the derivative is piecewise affine in
+  // alpha with breakpoints where S_i(alpha) crosses 0 or mu_in*penalty_i;
+  // scan for its sign change and interpolate
   double line_search() {
-    // alpha-independent scalars of the smooth part. With
-    // dy = (Adx + dyrhs)/mu_eq we have Adx - mu_eq*dy = -dyrhs, which
-    // collapses the second (dual-coupling) equality term.
+    // Smooth part g(alpha) = b + a*alpha. The dual-coupling equality term
+    // collapses via Adx - mu_eq*dy = -dyrhs
     double a = dx_.dot(Qdx_) + rho_ * dx_.squaredNorm();
     double b = dx_.dot(wQx_) + dx_.dot(q_) + rho_ * dx_.dot(x_ - xk_);
     if (m_ > 0) {
@@ -1184,15 +1176,12 @@ class Solver {
     return v >= 0.0 ? small : 1.0 - small;
   }
 
-  // Residuals of the kappa-relaxed KKT at (xr, tr, yr, v1r, v2r), with the
-  // slack/dual pairs materialized through the retraction (so z.s = kappa
-  // identically and the complementarity rows never appear):
+  // Relaxed-KKT residuals at (xr, tr, yr, v1r, v2r), with (z, s) pairs
+  // materialized through the retraction so z.s = kappa holds identically:
   //   F1 = Q x + q + A'y + G'z2      F2 = penalty - z1 - z2
   //   F3 = A x - b                   F4 = s1 - t     F5 = s2 - (h + t - Gx)
-  // Returns the max unscaled norm (termination metric) and fills
-  // relax_merit_, the squared 2-norm of the same stack: the Newton step
-  // is a guaranteed descent direction for 0.5||F||_2^2 but NOT for the
-  // max norm, so the line search must accept on the 2-norm merit.
+  // Returns the unscaled max norm (termination) and fills relax_merit_,
+  // the squared 2-norm (line search: Newton is descent for the 2-norm only)
   double relax_residual(double kappa_s) {
     for (Eigen::Index i = 0; i < p_; ++i) {
       z1r_[i] = retraction(v1r_[i], kappa_s);
@@ -1224,11 +1213,9 @@ class Solver {
     return std::max(relax_dual_res_, relax_primal_res_);
   }
 
-  // Predicted expensive flips for a warm relax() attempt: rows whose
-  // retraction v-sign (same map as relax_init_retraction()) disagrees
-  // with the stored chain iterate's, counting only pairs well clear of
-  // the hyperbola corner (|v_old * v_new| > 100 kappa_s). O(p n); does
-  // not touch the chain iterate.
+  // Rows whose retraction v-sign at the tight iterate disagrees with the
+  // stored relaxed iterate's, ignoring pairs near the hyperbola corner
+  // (|v_old v_new| <= 100 kappa_s). Predicts the cost of a warm relax()
   int relax_predict_flips(double kappa_s) {
     const double corner2 = 100.0 * kappa_s;
     wGx_.noalias() = G_ * x_;
@@ -1247,11 +1234,8 @@ class Solver {
     return flips;
   }
 
-  // Retraction start for relax(): the reconstructed elastic certificate of
-  // the tight iterate mapped through v = z - s. Its x, t, y satisfy the
-  // tight KKT to solver tolerance, so the residual is concentrated in the
-  // rows the smoothing shifts -- and its v sign pattern encodes the
-  // current smoothed configuration exactly.
+  // Cold start for relax(): the tight iterate's elastic certificate mapped
+  // through v = z - s
   void relax_init_retraction() {
     xr_ = x_;
     if (m_ > 0) yr_ = y_;
@@ -1283,10 +1267,9 @@ class Solver {
            std::isfinite(K_.diagonal().sum());
   }
 
-  // Certificate at the relaxed point (unscaled). Deliberately does NOT
-  // touch the solver iterate, residual scalars, or have_warm_: only sol_
-  // reflects the relaxation. The duality gap converges to ~2 p kappa (each
-  // relaxed pair contributes kappa), not 0.
+  // Unscaled certificate at the relaxed point. Only sol_ is written; the
+  // solver iterate and warm-start state are untouched. The duality gap
+  // converges to ~2 p kappa, not 0
   void relax_finish(Status status, int iters) {
     sol_.x = xr_.cwiseProduct(dx_s_);
     sol_.t = tr_.cwiseProduct(inv_di_);
@@ -1342,15 +1325,11 @@ class Solver {
 
   // ---- residuals and termination ----
 
-  // Unscaled residuals of the elastic QP at the reconstructed expanded
-  // point:
-  //   t = [Gx - h + mu_in (z - penalty)]_+   (argmin of the folded slack)
+  // Residuals of the elastic QP at the reconstructed expanded point
+  //   t = [Gx - h + mu_in (z - penalty)]_+
   //   z_ineq = z, z_t = penalty - z, s_t = t, s_ineq = [t - (Gx - h)]_+
-  // The t-block dual residual penalty - z_t - z_ineq vanishes identically
-  // and z_t, z_ineq >= 0 exactly (z is kept in [0, penalty]). Internal
-  // quantities are in the (possibly Ruiz-scaled) frame; every norm below
-  // is unscaled componentwise, so the reported residuals and termination
-  // test are on the true elastic KKT.
+  // The t-block dual residual vanishes identically. All norms are unscaled
+  // componentwise, so termination is tested on the true elastic KKT
   void update_residuals() {
     wGx_.noalias() = G_ * x_;
     r_ = wGx_ - h_;
