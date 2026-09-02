@@ -669,6 +669,160 @@ int main() {
           worst_dx, "|dx|");
   }
 
+  std::printf("PDAL: Ruiz re-equilibration (drift G, A row scales)\n");
+  {
+    // Matrix updates keep the setup()-time scaling exact but let it drift;
+    // solve() must re-equilibrate past settings.ruiz_refresh_ratio and
+    // carry the warm-start iterate (solve + relax) into the new frame.
+    const int n = 30, m = 8, p = 200, ticks = 24;
+    const double kappa = 1e-4;
+    QPData qp0 = problem_gen::InfeasibleEq(rng, n, m, p, p / 4);
+    VectorXd penalty = VectorXd::Constant(p, 10.0);
+    elastiqp::Solver warm;
+    warm.settings = TightSettings();
+    warm.settings.ruiz = true;
+    warm.setup(qp0.Q, qp0.q, qp0.A, qp0.b, qp0.G, qp0.h, penalty);
+
+    std::normal_distribution<double> dist;
+    MatrixXd G = qp0.G, A = qp0.A;
+    VectorXd q = qp0.q, h = qp0.h, b = qp0.b;
+    // Per-tick row scale growth: 1.5x on a fifth of the rows (G and A) so the
+    // drift crosses the 4x refresh ratio every few ticks
+    int refreshes = 0, warm_iters = 0, cold_iters = 0;
+    int relax_warm_iters = 0, relax_cold_iters = 0;
+    double worst_kkt = 0, worst_dx = 0, worst_rdx = 0, worst_drift = 0;
+    bool all_conv = true;
+    VectorXd last_relax_x;
+    for (int k = 0; k < ticks; ++k) {
+      for (int i = 0; i < p; i += 5) {
+        G.row(i) *= 1.5;
+        h[i] *= 1.5;
+        penalty[i] /= 1.5;
+      }
+      for (int i = 0; i < m; i += 4) {
+        A.row(i) *= 1.5;
+        b[i] *= 1.5;
+      }
+      for (int i = 0; i < n; ++i) q[i] += 0.01 * dist(rng);
+      warm.set_G(G);
+      warm.set_h(h);
+      warm.set_penalty(penalty);
+      warm.set_A(A);
+      warm.set_b(b);
+      warm.set_q(q);
+      const double drift = warm.scaling_drift();
+      refreshes += drift > warm.settings.ruiz_refresh_ratio;
+      const auto ws = warm.solve();
+      worst_drift = std::max(worst_drift, warm.scaling_drift());
+      const auto wr = warm.relax(kappa);
+      elastiqp::Solver cold;
+      cold.settings = TightSettings();
+      cold.settings.ruiz = true;
+      cold.setup(qp0.Q, q, A, b, G, h, penalty);
+      const auto cs = cold.solve();
+      const auto cr = cold.relax(kappa);
+      all_conv &= ws.converged == 1 && cs.converged == 1 &&
+                  wr.converged == 1 && cr.converged == 1;
+      warm_iters += ws.iters;
+      cold_iters += cs.iters;
+      relax_warm_iters += wr.iters;
+      relax_cold_iters += cr.iters;
+      worst_dx = std::max(worst_dx, (ws.x - cs.x).lpNorm<Eigen::Infinity>());
+      worst_rdx =
+          std::max(worst_rdx, (wr.x - cr.x).lpNorm<Eigen::Infinity>());
+      last_relax_x = wr.x;
+      worst_kkt = std::max(
+          worst_kkt, problem_gen::ElasticKKTResidual(
+                         qp0.Q, q, A, b, G, h, penalty, ws.x, ws.t, ws.y,
+                         ws.z_t, ws.z_ineq));
+    }
+    std::printf(
+        "  refreshes=%d/%d worst_drift_after=%.2f | solve iters warm=%d "
+        "cold=%d | relax iters warm=%d cold=%d | worst_kkt=%9.2e\n",
+        refreshes, ticks, worst_drift, warm_iters, cold_iters,
+        relax_warm_iters, relax_cold_iters, worst_kkt);
+    Check("auto refresh fires and settles",
+          refreshes >= 3 && refreshes < ticks &&
+              worst_drift <= warm.settings.ruiz_refresh_ratio,
+          worst_drift, "drift");
+    Check("solve matches fresh setup", all_conv && worst_dx < 1e-4 &&
+                                           worst_kkt < 1e-5,
+          worst_dx, "|dx|");
+    // (The relax warm chain is mostly rejected by the flip gate on these
+    // 1.5x row jumps, so only accuracy is checked here; the exact remap of
+    // the relax iterate is checked below.)
+    Check("relax matches fresh setup", worst_rdx < 1e-4, worst_rdx, "|dx|");
+    // Manual call on equilibrated data is a no-op
+    warm.reequilibrate();
+    const auto ws2 = warm.solve();
+    Check("manual reequilibrate no-op on fresh data",
+          ws2.converged == 1 && ws2.iters == 0 && warm.factorizations() == 0,
+          warm.scaling_drift(), "drift");
+    // Exact remap check: re-equilibrate with the problem UNCHANGED (the
+    // setup-time scaling was deliberately left half-converged), so the
+    // remapped solve() and relax() warm iterates must still be converged
+    {
+      elastiqp::Solver half;
+      half.settings = TightSettings();
+      half.settings.ruiz = true;
+      half.settings.ruiz_max_iter = 1;
+      half.settings.ruiz_refresh_ratio = 0;
+      half.setup(qp0.Q, q, A, b, G, h, penalty);
+      const auto hs = half.solve();
+      const auto hr = half.relax(kappa);
+      const double drift_before = half.scaling_drift();
+      half.settings.ruiz_max_iter = 10;
+      half.reequilibrate();
+      const double drift_after = half.scaling_drift();
+      const auto hs2 = half.solve();
+      const auto hr2 = half.relax(kappa);
+      const double rdx = (hr2.x - hr.x).lpNorm<Eigen::Infinity>();
+      std::printf("  unchanged problem: drift %.2f -> %.2f | solve iters %d "
+                  "-> %d | relax iters %d -> %d |dx|=%9.2e\n",
+                  drift_before, drift_after, hs.iters, hs2.iters, hr.iters,
+                  hr2.iters, rdx);
+      Check("remap keeps solve() warm iterate",
+            hs.converged == 1 && drift_before > 1.5 && drift_after < 1.01 &&
+                hs2.converged == 1 && hs2.iters == 0,
+            hs2.iters, "iters");
+      Check("remap keeps relax() warm iterate",
+            hr.converged == 1 && hr2.converged == 1 && hr2.iters == 0 &&
+                rdx < 1e-9,
+            rdx, "|dx|");
+    }
+    // Drifted problem: from the same user-frame iterate, the re-equilibrated
+    // solver must reach the same solution as one left on the stale scaling
+    // (and on these badly rescaled rows it gets there in fewer iterations)
+    for (int i = 0; i < p; ++i) {
+      const double sc = (i % 3 == 0) ? 3.0 : (i % 3 == 1) ? 0.2 : 1.0;
+      G.row(i) *= sc;
+      h[i] *= sc;
+      penalty[i] /= sc;
+    }
+    warm.set_G(G);
+    warm.set_h(h);
+    warm.set_penalty(penalty);
+    warm.settings.ruiz_refresh_ratio = 0;  // manual only
+    elastiqp::Solver stale = warm;         // same state, scaling left as is
+    warm.reequilibrate();
+    const auto ss3 = stale.solve();
+    const auto ws3 = warm.solve();
+    const auto sr3 = stale.relax(kappa);
+    const auto wr3 = warm.relax(kappa);
+    const double dx3 = (ws3.x - ss3.x).lpNorm<Eigen::Infinity>();
+    const double rdx3 = (wr3.x - sr3.x).lpNorm<Eigen::Infinity>();
+    std::printf("  drifted rows: solve iters stale=%d remapped=%d |dx|=%9.2e "
+                "| relax iters stale=%d remapped=%d |dx|=%9.2e\n",
+                ss3.iters, ws3.iters, dx3, sr3.iters, wr3.iters, rdx3);
+    Check("remapped warm solve matches stale",
+          ss3.converged == 1 && ws3.converged == 1 && dx3 < 1e-6 &&
+              ws3.iters <= ss3.iters,
+          dx3, "|dx|");
+    Check("remapped warm relax matches stale",
+          sr3.converged == 1 && wr3.converged == 1 && rdx3 < 1e-6, rdx3,
+          "|dx|");
+  }
+
   std::printf("PDAL: exact-penalty threshold (recovery vs saturation)\n");
   {
     // p < n so all rows are linearly independent and the hard dual is

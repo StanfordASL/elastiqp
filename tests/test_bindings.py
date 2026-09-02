@@ -300,6 +300,33 @@ def main():
         rz.converged == 1 and dx < 1e-4,
         f"|dx|={dx:.1e}",
     )
+    # Ruiz scaling is computed at setup(); matrix updates keep it (exact,
+    # drifting), and solve() re-equilibrates past settings.ruiz_refresh_ratio
+    # without losing the warm start. reequilibrate() is the manual form.
+    rq = elastiqp.Solver()
+    rq.settings.ruiz = True
+    rq.settings.eps_abs = 1e-8
+    rq.setup(Qp, qp_, Gp, hp, 10.0, A=Ap, b=bp)
+    rq.solve()
+    drift0 = rq.scaling_drift()
+    rq.set_G(Gp * scale[:, None])
+    rq.set_h(hp * scale)
+    rq.set_penalty(10.0 / scale)
+    drift1 = rq.scaling_drift()
+    rs = rq.solve()
+    drift2 = rq.scaling_drift()
+    dx = np.abs(np.asarray(rs.x) - np.asarray(seed.x)).max()
+    check(
+        "solve() auto re-equilibrates after a drifting set_G",
+        abs(drift0 - 1.0) < 0.01
+        and drift1 > rq.settings.ruiz_refresh_ratio
+        and drift2 <= rq.settings.ruiz_refresh_ratio
+        and rs.converged == 1
+        and dx < 1e-4,
+        f"drift {drift0:.2f} -> {drift1:.1f} -> {drift2:.2f} |dx|={dx:.1e}",
+    )
+    rq.reequilibrate()
+    check("reequilibrate() no-op when equilibrated", rq.solve().iters == 0, "")
 
     print("Solver.relax: kappa relaxation (smoothed differentiation point)")
     kappa = 1e-3

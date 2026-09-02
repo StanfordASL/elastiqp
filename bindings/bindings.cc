@@ -208,6 +208,7 @@ NB_MODULE(_core, m) {
       .def_rw("ruiz", &Settings::ruiz)
       .def_rw("ruiz_max_iter", &Settings::ruiz_max_iter)
       .def_rw("ruiz_tol", &Settings::ruiz_tol)
+      .def_rw("ruiz_refresh_ratio", &Settings::ruiz_refresh_ratio)
       .def_rw("relax_reg", &Settings::relax_reg)
       .def_rw("relax_warm_budget", &Settings::relax_warm_budget);
 
@@ -223,6 +224,14 @@ NB_MODULE(_core, m) {
           .def("eq_infeasibility", &Solver::eq_infeasibility,
                "certified lower bound on the reachable ||Ax - b||_inf "
                "(0 when consistent or unchecked)")
+          .def("reequilibrate", &Solver::reequilibrate,
+               "Recompute the Ruiz scaling for the current matrices and "
+               "rescale the warm-start state in place (no-op with ruiz "
+               "off). solve() does this automatically when the drift "
+               "exceeds settings.ruiz_refresh_ratio.")
+          .def("scaling_drift", &Solver::scaling_drift,
+               "Largest factor by which a scaled column/row max-norm has "
+               "drifted from 1 since the last equilibration (1 = none)")
           .def(
               "relax",
               [](Solver& s, double kappa, double tol, int max_iter,

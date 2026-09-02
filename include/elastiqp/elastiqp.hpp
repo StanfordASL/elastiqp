@@ -131,6 +131,13 @@ struct Settings {
   bool ruiz = false;
   int ruiz_max_iter = 10;
   double ruiz_tol = 1e-3;
+  // Automatic re-equilibration: the scaling computed at setup() is kept by
+  // the set_* updates (it stays exact, only the conditioning drifts). When a
+  // matrix update leaves some column/row max-norm of the scaled (Q, A, G)
+  // more than this factor away from 1, solve() re-equilibrates first (see
+  // reequilibrate(); the refactorization is already forced by the update).
+  // 0 = never (manual reequilibrate() only).
+  double ruiz_refresh_ratio = 4.0;
 
   // Regularization added to the relax() Newton system
   double relax_reg = 1e-9;
@@ -229,6 +236,9 @@ class Solver {
 
     // Scaling state (identity unless Ruiz runs) and the A^T A cache
     ruiz_ = settings.ruiz && p_ > 0;
+    dxw_.resize(n_);
+    dew_.resize(m_);
+    diw_.resize(p_);
     dx_s_ = VectorXd::Ones(n_);
     de_s_ = VectorXd::Ones(m_);
     di_s_ = VectorXd::Ones(p_);
@@ -292,6 +302,72 @@ class Solver {
     penalty_ = ruiz_ ? VectorXd(c_s_ * penalty.cwiseQuotient(di_s_)) : penalty;
   }
 
+  // Recompute the Ruiz scaling for the current (Q, A, G) and rescale the
+  // stored data and every warm-start iterate in place. A setup() would do
+  // the same but discards the warm start (and redoes allocations, the A'A
+  // cache, and the equality-consistency check). No-op when Ruiz is off, or
+  // the data is still equilibrated. solve() calls this automatically when
+  // the drift exceeds settings.ruiz_refresh_ratio.
+  void reequilibrate() {
+    if (!ruiz_) return;
+    const VectorXd dx0 = dx_s_, de0 = de_s_, di0 = di_s_;
+    const double c0 = c_s_;
+    equilibrate();  // incremental: continues from the current scaled data
+    if (c_s_ == c0 && (dx_s_.array() == dx0.array()).all() &&
+        (de_s_.array() == de0.array()).all() &&
+        (di_s_.array() == di0.array()).all()) {
+      return;
+    }
+    // Old scaled frame -> new scaled frame. Primal x scales like 1/dx,
+    // t (and s) like di, duals like c/de and c/di.
+    const VectorXd dx = dx_s_.cwiseQuotient(dx0);
+    const VectorXd de = de_s_.cwiseQuotient(de0);
+    const VectorXd di = di_s_.cwiseQuotient(di0);
+    const double gamma = c_s_ / c0;
+    const VectorXd yf = gamma * de.cwiseInverse();
+    const VectorXd zf = gamma * di.cwiseInverse();
+    x_ = x_.cwiseQuotient(dx);
+    xk_ = xk_.cwiseQuotient(dx);
+    if (m_ > 0) {
+      y_ = y_.cwiseProduct(yf);
+      yk_ = yk_.cwiseProduct(yf);
+    }
+    z_ = z_.cwiseProduct(zf);
+    zk_ = zk_.cwiseProduct(zf);
+    // relax() warm iterate: (z, s) pairs live in v = z - s with z.s = kappa_s
+    if (relax_have_warm_) {
+      xr_ = xr_.cwiseQuotient(dx);
+      if (m_ > 0) yr_ = yr_.cwiseProduct(yf);
+      tr_ = tr_.cwiseProduct(di);
+      for (Eigen::Index i = 0; i < p_; ++i) {
+        v1r_[i] = zf[i] * retraction(v1r_[i], relax_kappa_s_) -
+                  di[i] * retraction(-v1r_[i], relax_kappa_s_);
+        v2r_[i] = zf[i] * retraction(v2r_[i], relax_kappa_s_) -
+                  di[i] * retraction(-v2r_[i], relax_kappa_s_);
+      }
+      relax_kappa_s_ *= gamma;
+    }
+    update_unscale_vectors();
+    compute_AtA();
+    matrix_dirty_ = true;
+  }
+
+  // How far the scaled (Q, A, G) has drifted from equilibrated: the largest
+  // factor by which any column/row max-norm is off from 1 (1 = still
+  // equilibrated, also when Ruiz is off).
+  double scaling_drift() const {
+    if (!ruiz_) return 1.0;
+    scaling_pass(dxw_, dew_, diw_);
+    double worst = 1.0;
+    for (const VectorXd* d : {&dxw_, &dew_, &diw_}) {
+      for (Eigen::Index k = 0; k < d->size(); ++k) {
+        const double r = (*d)[k] * (*d)[k];  // = 1 / max-norm
+        worst = std::max(worst, std::max(r, 1.0 / r));
+      }
+    }
+    return worst;
+  }
+
   // Explicitly set the warm-start for the next solve
   // Set rho/mu <= 0 to use the default settings
   void set_warm_start(const VectorXd& x, const VectorXd& y,
@@ -325,6 +401,13 @@ class Solver {
     iters_total_ = 0;
     factor_retries_ = 0;
     cold_resets_ = 0;
+
+    // A matrix update may have drifted the Ruiz scaling; the refactorization
+    // it forces makes this the cheap moment to refresh
+    if (ruiz_ && matrix_dirty_ && settings.ruiz_refresh_ratio > 0 &&
+        scaling_drift() > settings.ruiz_refresh_ratio) {
+      reequilibrate();
+    }
 
     // Inconsistent equalities: eps_abs is unreachable, report and exit
     if (settings.check_eq_consistency && settings.eps_rel <= 0 &&
@@ -510,6 +593,7 @@ class Solver {
       relax_run(kappa_s, tol, max_iter);
     }
     relax_have_warm_ = sol_.converged == 1;
+    relax_kappa_s_ = kappa_s;
     return sol_;
   }
 
@@ -566,30 +650,47 @@ class Solver {
     return nrm < 1e-4 ? 1.0 : std::min(nrm, 1e4);
   }
 
+  // One Ruiz pass over the current (scaled) data: per-column and per-row
+  // factors 1/sqrt(max-norm) of the stacked (Q, A, G) system, and the
+  // largest deviation |1 - factor| from equilibrated
+  double scaling_pass(VectorXd& dx, VectorXd& de, VectorXd& di) const {
+    for (Eigen::Index k = 0; k < n_; ++k) {
+      dx[k] = Q_.col(k).cwiseAbs().maxCoeff();  // symmetric: col max = row max
+    }
+    if (m_ > 0) max_abs_rows_cols(A_, dx, de);
+    max_abs_rows_cols(G_, dx, di);
+    double dev = 0.0;
+    for (VectorXd* d : {&dx, &de, &di}) {
+      for (Eigen::Index k = 0; k < d->size(); ++k) {
+        (*d)[k] = 1.0 / std::sqrt(limit_scaling((*d)[k]));
+        dev = std::max(dev, std::abs(1.0 - (*d)[k]));
+      }
+    }
+    return dev;
+  }
+
+  // Row-wise max-abs of M into rowmax, and column-wise max-abs folded into
+  // colmax (max with the existing entries), one contiguous column at a time
+  // (both reductions vectorize; a strided rowwise() pass would not)
+  static void max_abs_rows_cols(const MatrixXd& M, VectorXd& colmax,
+                                VectorXd& rowmax) {
+    rowmax.setZero();
+    for (Eigen::Index k = 0; k < M.cols(); ++k) {
+      const auto col = M.col(k).cwiseAbs();
+      rowmax = rowmax.cwiseMax(col);
+      colmax[k] = std::max(colmax[k], col.maxCoeff());
+    }
+  }
+
   // Ruiz equilibration of the stacked (Q, A, G) system
-  // proxqp ruiz logic + piqp limit_scaling + elastic penalty scaling
+  // proxqp ruiz logic + piqp limit_scaling + elastic penalty scaling.
+  // Incremental: starts from the currently stored (possibly already scaled)
+  // data and accumulates into the cumulative factors, so it doubles as the
+  // refresh step of reequilibrate().
   void equilibrate() {
-    VectorXd dx(n_), de(m_), di(p_);
+    VectorXd &dx = dxw_, &de = dew_, &di = diw_;
     for (int iter = 0; iter < settings.ruiz_max_iter; ++iter) {
-      double dev = 0.0;
-      for (Eigen::Index k = 0; k < n_; ++k) {
-        double nrm = Q_.col(k).cwiseAbs().maxCoeff();
-        if (m_ > 0) nrm = std::max(nrm, A_.col(k).cwiseAbs().maxCoeff());
-        nrm = std::max(nrm, G_.col(k).cwiseAbs().maxCoeff());
-        dx[k] = 1.0 / std::sqrt(limit_scaling(nrm));
-        dev = std::max(dev, std::abs(1.0 - dx[k]));
-      }
-      for (Eigen::Index i = 0; i < m_; ++i) {
-        const double nrm = A_.row(i).cwiseAbs().maxCoeff();
-        de[i] = 1.0 / std::sqrt(limit_scaling(nrm));
-        dev = std::max(dev, std::abs(1.0 - de[i]));
-      }
-      for (Eigen::Index i = 0; i < p_; ++i) {
-        const double nrm = G_.row(i).cwiseAbs().maxCoeff();
-        di[i] = 1.0 / std::sqrt(limit_scaling(nrm));
-        dev = std::max(dev, std::abs(1.0 - di[i]));
-      }
-      if (dev <= settings.ruiz_tol) break;
+      if (scaling_pass(dx, de, di) <= settings.ruiz_tol) break;
       Q_ = dx.asDiagonal() * Q_ * dx.asDiagonal();
       q_ = q_.cwiseProduct(dx);
       if (m_ > 0) {
@@ -1428,6 +1529,7 @@ class Solver {
   VectorXd dx_s_, de_s_, di_s_;             // cumulative scale factors
   VectorXd inv_cdx_, inv_de_, inv_di_;      // residual unscaling
   VectorXd y_us_, z_us_;                    // dual unscaling (de/c, di/c)
+  mutable VectorXd dxw_, dew_, diw_;        // scaling_pass() workspace
 
   // Equality-consistency certificate state (check_eq_A / check_eq_b)
   Eigen::ColPivHouseholderQR<MatrixXd> qr_A_;
@@ -1495,6 +1597,7 @@ class Solver {
   // True while (xr_, tr_, yr_, v1r_, v2r_) holds a converged relaxed
   // iterate usable as the next relax() warm start; cleared by setup().
   bool relax_have_warm_ = false;
+  double relax_kappa_s_ = 0;  // scaled kappa the warm iterate was solved at
   bool relax_ready_ = false;  // workspace sized for the current problem
 
   Solution sol_;

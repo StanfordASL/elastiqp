@@ -159,7 +159,7 @@ For runnable Python/JAX examples, see the `examples` folder
 
 ## Assorted Tips
 
-- If differentiating through problems with large penalty weights (roughly >= 1e4), consider turning on Ruiz equilibration. In Python/JAX: `ruiz=True`; in C++: `settings.ruiz = true`
+- If differentiating through problems with large penalty weights (roughly >= 1e4), or for badly row-scaled constraints (mixed units), consider turning on Ruiz equilibration. In Python/JAX: `ruiz=True`; in C++: `settings.ruiz = true`. The scaling is computed at `setup()` and carried through the `set_*` updates (still exact, only the conditioning drifts); `solve()` re-equilibrates automatically once a matrix update has drifted a scaled row/column norm past `settings.ruiz_refresh_ratio` (4x by default), keeping the warm start. `scaling_drift()` reports the current drift and `reequilibrate()` refreshes on demand, so a control loop never needs a second `setup()` for this.
 
 
 ## Acknowledgments
