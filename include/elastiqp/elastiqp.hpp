@@ -386,7 +386,7 @@ class Solver {
         y_.setZero();
         z_.setZero();
       }
-      z_ = z_.cwiseMax(0.0).cwiseMin(penalty_);
+      clamp_z();
       update_residuals();
       return finish(Status::kInfeasible);
     }
@@ -397,14 +397,14 @@ class Solver {
 
     bool warm_path = true;
     if (explicit_ws) {
-      z_ = z_.cwiseMax(0.0).cwiseMin(penalty_);
+      clamp_z();
     } else if (settings.warm_start && have_warm_) {
       // Keep (x, y, z) and the cached factorization, reset AL penalties
       // z is re-clamped in case the penalty changed
       mu_eq_ = settings.mu_eq_init;
       mu_in_ = settings.mu_in_init;
       rho_ = settings.rho;
-      z_ = z_.cwiseMax(0.0).cwiseMin(penalty_);
+      clamp_z();
     } else {
       warm_path = false;
       if (!cold_init()) {
@@ -586,20 +586,12 @@ class Solver {
       //   [Q + rho I + (1/delta) A'A + G' diag(Lambda) G] dx = rhs.
       d1r_ = z1r_.cwiseQuotient(s1r_);
       d2r_ = z2r_.cwiseQuotient(s2r_);
-      einvr_ = ((d1r_ + d2r_).array() + rho).cwiseInverse();
-      lamr_ = d2r_.array() * (d1r_.array() + rho) * einvr_.array();
-      bool ok = true;
-      while (!relax_factor(rho, delta)) {
-        if (retries < settings.max_factor_retries) {
-          rho *= 100;
-          delta *= 100;
-          retries++;
-          einvr_ = ((d1r_ + d2r_).array() + rho).cwiseInverse();
-          lamr_ = d2r_.array() * (d1r_.array() + rho) * einvr_.array();
-        } else {
-          ok = false;
-          break;
-        }
+      bool ok = relax_factor(rho, delta);
+      while (!ok && retries < settings.max_factor_retries) {
+        rho *= 100;
+        delta *= 100;
+        retries++;
+        ok = relax_factor(rho, delta);
       }
       if (!ok) {
         status = Status::kNumerics;
@@ -983,7 +975,7 @@ class Solver {
       // alpha is unclamped, so the step can push z outside [0, penalty].
       // So, project it back. Note: this never increases the merit
       // (merit z terms are separable quadratics with minimizers in range)
-      z_ = z_.cwiseMax(0.0).cwiseMin(penalty_);
+      clamp_z();
       S_ += alpha * Gdx_;
       if (alpha == 0.0) return true;
     }
@@ -1191,12 +1183,6 @@ class Solver {
   // is a guaranteed descent direction for 0.5||F||_2^2 but NOT for the
   // max norm, so the line search must accept on the 2-norm merit.
   double relax_residual(double kappa_s) {
-    const auto inf_us = [](const VectorXd& v, const VectorXd& s) {
-      return v.size() > 0 ? v.cwiseAbs().cwiseProduct(s).maxCoeff() : 0.0;
-    };
-    const auto ssq_us = [](const VectorXd& v, const VectorXd& s) {
-      return v.size() > 0 ? v.cwiseProduct(s).squaredNorm() : 0.0;
-    };
     for (Eigen::Index i = 0; i < p_; ++i) {
       z1r_[i] = retraction(v1r_[i], kappa_s);
       s1r_[i] = retraction(-v1r_[i], kappa_s);
@@ -1237,14 +1223,13 @@ class Solver {
     wGx_.noalias() = G_ * x_;
     int flips = 0;
     for (Eigen::Index i = 0; i < p_; ++i) {
-      const double r = wGx_[i] - h_[i];
-      const double ti = std::max(r + mu_in_ * (z_[i] - penalty_[i]), 0.0);
-      const double v1 = (penalty_[i] - z_[i]) - ti;
-      const double v2 = z_[i] - std::max(ti - r, 0.0);
-      if ((v1 > 0) != (v1r_[i] > 0) && std::abs(v1 * v1r_[i]) > corner2) {
+      const RowRetraction rr = row_retraction(i, wGx_[i] - h_[i]);
+      if ((rr.v1 > 0) != (v1r_[i] > 0) &&
+          std::abs(rr.v1 * v1r_[i]) > corner2) {
         flips++;
       }
-      if ((v2 > 0) != (v2r_[i] > 0) && std::abs(v2 * v2r_[i]) > corner2) {
+      if ((rr.v2 > 0) != (v2r_[i] > 0) &&
+          std::abs(rr.v2 * v2r_[i]) > corner2) {
         flips++;
       }
     }
@@ -1261,18 +1246,20 @@ class Solver {
     if (m_ > 0) yr_ = y_;
     wGx_.noalias() = G_ * x_;
     for (Eigen::Index i = 0; i < p_; ++i) {
-      const double r = wGx_[i] - h_[i];
-      const double ti = std::max(r + mu_in_ * (z_[i] - penalty_[i]), 0.0);
-      tr_[i] = ti;
-      v1r_[i] = (penalty_[i] - z_[i]) - ti;         // z_t - s_t
-      v2r_[i] = z_[i] - std::max(ti - r, 0.0);      // z_ineq - s_ineq
+      const RowRetraction rr = row_retraction(i, wGx_[i] - h_[i]);
+      tr_[i] = rr.t;
+      v1r_[i] = rr.v1;
+      v2r_[i] = rr.v2;
     }
   }
 
-  // Factor K = Q + rho I + (1/delta) A'A + G' diag(Lambda) G into llt_r_.
+  // Condensation scalings E^-1, Lambda for the current (D1, D2, rho), then
+  // factor K = Q + rho I + (1/delta) A'A + G' diag(Lambda) G into llt_r_.
   // Same shape as factor_kkt(), but into a separate factorization (and
   // reusing the K_/GS_ staging buffers) so the solve() cache stays valid.
   bool relax_factor(double rho, double delta) {
+    einvr_ = ((d1r_ + d2r_).array() + rho).cwiseInverse();
+    lamr_ = d2r_.array() * (d1r_.array() + rho) * einvr_.array();
     GS_.noalias() = lamr_.cwiseSqrt().asDiagonal() * G_;
     K_.triangularView<Eigen::Lower>() = Q_;
     K_.diagonal().array() += rho;
@@ -1311,6 +1298,36 @@ class Solver {
     return sol_;
   }
 
+  // ---- shared row/vector helpers ----
+
+  // Keep the inequality duals in the bounded multiplier set [0, penalty]
+  void clamp_z() { z_ = z_.cwiseMax(0.0).cwiseMin(penalty_); }
+
+  // Elastic slack of row i with violation r = (Gx - h)_i at the current
+  // mu_in: t = [r + mu_in (z - penalty)]_+ (argmin of the folded slack)
+  double elastic_slack(Eigen::Index i, double r) const {
+    return std::max(r + mu_in_ * (z_[i] - penalty_[i]), 0.0);
+  }
+
+  // Row i of the tight iterate mapped to the relax() retraction
+  // coordinates v = z - s: v1 = z_t - s_t, v2 = z_ineq - s_ineq
+  struct RowRetraction {
+    double t, v1, v2;
+  };
+  RowRetraction row_retraction(Eigen::Index i, double r) const {
+    const double t = elastic_slack(i, r);
+    return {t, (penalty_[i] - z_[i]) - t, z_[i] - std::max(t - r, 0.0)};
+  }
+
+  // Unscaled inf-norm and squared 2-norm of a scaled-frame vector v, with
+  // componentwise unscaling factors s
+  static double inf_us(const VectorXd& v, const VectorXd& s) {
+    return v.size() > 0 ? v.cwiseAbs().cwiseProduct(s).maxCoeff() : 0.0;
+  }
+  static double ssq_us(const VectorXd& v, const VectorXd& s) {
+    return v.size() > 0 ? v.cwiseProduct(s).squaredNorm() : 0.0;
+  }
+
   // Unscaled residuals of the elastic QP at the reconstructed expanded
   // point:
   //   t = [Gx - h + mu_in (z - penalty)]_+   (argmin of the folded slack)
@@ -1321,9 +1338,6 @@ class Solver {
   // is unscaled componentwise, so the reported residuals and termination
   // test are on the true elastic KKT.
   void update_residuals() {
-    const auto inf_us = [](const VectorXd& v, const VectorXd& s) {
-      return v.size() > 0 ? v.cwiseAbs().cwiseProduct(s).maxCoeff() : 0.0;
-    };
     wGx_.noalias() = G_ * x_;
     r_ = wGx_ - h_;
     wQx_.noalias() = Q_ * x_;
@@ -1344,7 +1358,7 @@ class Solver {
 
     double in_res = 0.0;
     for (Eigen::Index i = 0; i < p_; ++i) {
-      t_[i] = std::max(r_[i] + mu_in_ * (z_[i] - penalty_[i]), 0.0);
+      t_[i] = elastic_slack(i, r_[i]);
       s2_[i] = std::max(t_[i] - r_[i], 0.0);
       in_res = std::max(in_res, (r_[i] - t_[i]) * inv_di_[i]);
     }
