@@ -165,6 +165,9 @@ class Solver {
  public:
   Settings settings;
 
+  // Inequality row classification on the shifted value S (see header)
+  enum class RowState : unsigned char { kInactive, kActive, kSaturated };
+
   void setup(const MatrixXd& Q, const VectorXd& q, const MatrixXd& A,
              const VectorXd& b, const MatrixXd& G, const VectorXd& h,
              const VectorXd& penalty) {
@@ -226,8 +229,8 @@ class Solver {
     wGx_.resize(p_);
 
     // Active-set state and line-search breakpoint buffer
-    state_.assign(static_cast<size_t>(p_), 0);
-    f_active_.assign(static_cast<size_t>(p_), 0);
+    state_.assign(static_cast<size_t>(p_), RowState::kInactive);
+    f_active_.assign(static_cast<size_t>(p_), false);
     bp_.clear();
     bp_.reserve(static_cast<size_t>(2 * p_));
 
@@ -887,7 +890,7 @@ class Solver {
     yk_.setZero();
     zk_.setZero();
 
-    std::fill(state_.begin(), state_.end(), static_cast<signed char>(0));
+    std::fill(state_.begin(), state_.end(), RowState::kInactive);
     if (!ensure_factor()) return false;
 
     rhs_x_ = -q_;
@@ -917,11 +920,11 @@ class Solver {
       // version of proxsuite's active-set test; ties mirror its >=).
       for (Eigen::Index i = 0; i < p_; ++i) {
         if (S_[i] >= mu_in_ * penalty_[i]) {
-          state_[static_cast<size_t>(i)] = 2;  // saturated
+          state(i) = RowState::kSaturated;
         } else if (S_[i] >= 0.0) {
-          state_[static_cast<size_t>(i)] = 1;  // active
+          state(i) = RowState::kActive;
         } else {
-          state_[static_cast<size_t>(i)] = 0;  // inactive
+          state(i) = RowState::kInactive;
         }
       }
       if (!ensure_factor()) return false;
@@ -931,16 +934,16 @@ class Solver {
       // (0 inactive, penalty saturated) and the target replaces z in the
       // dual residual on the right-hand side.
       for (Eigen::Index i = 0; i < p_; ++i) {
-        switch (state_[static_cast<size_t>(i)]) {
-          case 1:
+        switch (state(i)) {
+          case RowState::kActive:
             din_[i] = S_[i] - mu_in_ * z_[i];
             pv_[i] = 0.0;
             break;
-          case 2:
+          case RowState::kSaturated:
             din_[i] = 0.0;
             pv_[i] = penalty_[i] - z_[i];
             break;
-          default:
+          case RowState::kInactive:
             din_[i] = 0.0;
             pv_[i] = -z_[i];
             break;
@@ -961,7 +964,7 @@ class Solver {
         dy_ = (Adx_ + dyrhs_) / mu_eq_;
       }
       for (Eigen::Index i = 0; i < p_; ++i) {
-        dz_[i] = state_[static_cast<size_t>(i)] == 1
+        dz_[i] = state(i) == RowState::kActive
                      ? (Gdx_[i] + din_[i]) / mu_in_
                      : pv_[i];
       }
@@ -1083,7 +1086,7 @@ class Solver {
     Eigen::Index na = 0;
     const double s = std::sqrt(1.0 / mu_in_);
     for (Eigen::Index i = 0; i < p_; ++i) {
-      if (state_[static_cast<size_t>(i)] == 1) {
+      if (state(i) == RowState::kActive) {
         GS_.row(na) = s * G_.row(i);
         ++na;
       }
@@ -1109,10 +1112,7 @@ class Solver {
     if (!data_changed) {
       flip_idx_.clear();
       for (Eigen::Index i = 0; i < p_; ++i) {
-        const bool act = state_[static_cast<size_t>(i)] == 1;
-        if (act != (f_active_[static_cast<size_t>(i)] != 0)) {
-          flip_idx_.push_back(i);
-        }
+        if (is_active(i) != f_active(i)) flip_idx_.push_back(i);
       }
       if (flip_idx_.empty()) return true;
 
@@ -1128,7 +1128,7 @@ class Solver {
               settings.incremental_update_budget) {
         bool ok = true;
         for (Eigen::Index i : flip_idx_) {
-          const bool act = state_[static_cast<size_t>(i)] == 1;
+          const bool act = is_active(i);
           upd_vec_ = G_.row(i).transpose();
           llt_.rankUpdate(upd_vec_, (act ? 1.0 : -1.0) / mu_in_);
           ++updates_since_factor_;
@@ -1136,7 +1136,7 @@ class Solver {
             ok = false;  // factor corrupted; fall through to refactorize
             break;
           }
-          f_active_[static_cast<size_t>(i)] = act ? 1 : 0;
+          set_f_active(i, act);
         }
         if (ok) return true;
       }
@@ -1157,10 +1157,7 @@ class Solver {
     f_rho_ = rho_;
     f_mu_eq_ = mu_eq_;
     f_mu_in_ = mu_in_;
-    for (Eigen::Index i = 0; i < p_; ++i) {
-      f_active_[static_cast<size_t>(i)] =
-          state_[static_cast<size_t>(i)] == 1 ? 1 : 0;
-    }
+    for (Eigen::Index i = 0; i < p_; ++i) set_f_active(i, is_active(i));
     return true;
   }
 
@@ -1453,15 +1450,28 @@ class Solver {
   // Factorization cache
   bool matrix_dirty_ = true, factored_ = false;
   double f_rho_ = 0, f_mu_eq_ = 0, f_mu_in_ = 0;
-  std::vector<signed char> f_active_;
+  std::vector<bool> f_active_;  // active set of the cached factor
   std::vector<Eigen::Index> flip_idx_;  // rows flipped since the cached factor
   VectorXd upd_vec_;                    // rank-one update staging
   int updates_since_factor_ = 0;
   int factor_retries_ = 0, factor_count_ = 0, iters_total_ = 0;
   int cold_resets_ = 0;
 
-  // Row states: 0 inactive, 1 active, 2 saturated
-  std::vector<signed char> state_;
+  // Per-row active-set state and its accessors
+  std::vector<RowState> state_;
+  RowState& state(Eigen::Index i) { return state_[static_cast<size_t>(i)]; }
+  RowState state(Eigen::Index i) const {
+    return state_[static_cast<size_t>(i)];
+  }
+  bool is_active(Eigen::Index i) const {
+    return state(i) == RowState::kActive;
+  }
+  bool f_active(Eigen::Index i) const {
+    return f_active_[static_cast<size_t>(i)];
+  }
+  void set_f_active(Eigen::Index i, bool act) {
+    f_active_[static_cast<size_t>(i)] = act;
+  }
 
   // Residual scalars
   double primal_res_ = 0, dual_res_ = 0;
