@@ -205,7 +205,6 @@ class Solver {
 
     // solve() workspace, preallocated
     S_.resize(p_);
-    zhat_.resize(p_);
     t_.resize(p_);
     s2_.resize(p_);
     r_.resize(p_);
@@ -1006,7 +1005,6 @@ class Solver {
     for (Eigen::Index i = 0; i < p_; ++i) {
       const double zh =
           std::min(std::max(S_[i] / mu_in_, 0.0), penalty_[i]);
-      zhat_[i] = zh;
       inerr = std::max(inerr, std::abs(zh - z_[i]));
     }
     return std::max(err, mu_in_ * inerr);
@@ -1323,12 +1321,14 @@ class Solver {
     return {t, (penalty_[i] - z_[i]) - t, z_[i] - std::max(t - r, 0.0)};
   }
 
-  // Unscaled inf-norm and squared 2-norm of a scaled-frame vector v, with
-  // componentwise unscaling factors s
-  static double inf_us(const VectorXd& v, const VectorXd& s) {
+  // Unscaled inf-norm and squared 2-norm of a scaled-frame vector (or
+  // expression) v, with componentwise unscaling factors s
+  template <typename V>
+  static double inf_us(const V& v, const VectorXd& s) {
     return v.size() > 0 ? v.cwiseAbs().cwiseProduct(s).maxCoeff() : 0.0;
   }
-  static double ssq_us(const VectorXd& v, const VectorXd& s) {
+  template <typename V>
+  static double ssq_us(const V& v, const VectorXd& s) {
     return v.size() > 0 ? v.cwiseProduct(s).squaredNorm() : 0.0;
   }
 
@@ -1367,15 +1367,13 @@ class Solver {
       in_res = std::max(in_res, (r_[i] - t_[i]) * inv_di_[i]);
     }
     in_res = std::max(in_res, 0.0);
-    zhat_ = wGx_ - t_;  // reuse as scratch: unscaled ||Gx - t|| below
     double primal_rel_norm = std::max(
-        {inf_us(zhat_, inv_di_), inf_us(h_, inv_di_), inf_us(s2_, inv_di_),
-         inf_us(t_, inv_di_)});
+        {inf_us(wGx_ - t_, inv_di_), inf_us(h_, inv_di_),
+         inf_us(s2_, inv_di_), inf_us(t_, inv_di_)});
     double eq_res = 0.0;
     if (m_ > 0) {
       wAx_.noalias() = A_ * x_;
-      dyrhs_ = wAx_ - b_;  // reuse as scratch
-      eq_res = inf_us(dyrhs_, inv_de_);
+      eq_res = inf_us(wAx_ - b_, inv_de_);
       primal_rel_norm = std::max(
           {primal_rel_norm, inf_us(wAx_, inv_de_), inf_us(b_, inv_de_)});
     }
@@ -1504,7 +1502,7 @@ class Solver {
   double primal_obj_ = 0, duality_gap_ = 0, duality_gap_rel_ = 0;
 
   // Workspace (allocated in setup, reused every iteration)
-  VectorXd S_, zhat_, t_, s2_, r_, din_, pv_, tp_;
+  VectorXd S_, t_, s2_, r_, din_, pv_, tp_;
   // Per-row inequality residuals across outer rounds, for the saturation
   // jump's stall gate (maintained only while the jump is enabled).
   VectorXd jump_res_prev_, jump_res_cur_;
