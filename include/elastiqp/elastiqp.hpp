@@ -5,42 +5,22 @@
 //               G x - t <= h      (soft, slack s_ineq, dual z_ineq)
 //               t >= 0            (slack s_t, dual z_t)
 //
-// Each inequality row has its own L1-penalized slack t_i, so the
-// inequalities can never cause infeasibility: the problem is feasible iff
-// Ax = b is consistent. The slacks are eliminated analytically rather
-// than added as decision variables -- the AL treatment of each row
-// becomes the Moreau envelope of the weighted l1 penalty, and the
-// multiplier is projected onto [0, penalty] instead of the nonnegative
-// ray (bounded multipliers <=> exact l1 penalty). ProxQP's active-set
-// test then gains a third state:
+// Every inequality row is L1-elastic, so the problem is feasible iff
+// Ax = b is consistent. The slacks are eliminated analytically: each
+// multiplier lives in [0, penalty], and proxsuite's active-set test on the
+// unclamped multiplier estimate gains a third state,
 //
-//   S_i = G_i x - h_i + mu_in * z_prev_i          (shifted row value)
-//   inactive   S <= 0                  row out, dual snaps to 0
-//   active     0 < S < mu_in*penalty   identical to hard ProxQP
-//   saturated  S >= mu_in*penalty      row out, constant gradient
-//                                      penalty_i*G_i, dual snaps to penalty_i
+//   z~_i = z_prev_i + (G_i x - h_i) / mu_in
+//   inactive    z~ < 0                 row out, dual = 0
+//   active      0 <= z~ < penalty      identical to hard ProxQP
+//   saturated   z~ >= penalty          row out, dual = penalty
 //
-// The method is a primal-dual augmented Lagrangian (PDAL) that mirrors
-// proxsuite's dense backend (PDAL merit with nu=1, exact line search, BCL
-// outer loop, equality-constrained cold start), condensed onto the
-// n x n SPD system K = Q + rho*I + (1/mu_eq) A^T A + (1/mu_in) G_act^T G_act.
-// The factorization is cached across Newton iterations AND across solve()
-// calls: control-loop re-solves where only vectors drift and the active
-// set is stable cost zero factorizations. Small active-set changes at
-// fixed data and penalties are applied as rank-one Cholesky up/downdates
-// (Settings::incremental_updates) rather than refactorizations.
-//
-// The penalty is exact (no barrier): an unsaturated solution matches the
-// hard-constrained QP, and warm starting needs no slack flooring -- the
-// previous (x, y, z_ineq) is reused as-is, z_ineq clamped to [0, penalty].
-//
-// Departures from proxsuite: GPDAL merit, incremental LDLT, box
-// specialization, and nonconvex handling are omitted; Farkas
-// infeasibility detection is replaced by an equality-consistency
-// certificate (Settings::check_eq_consistency); the BCL outer loop is
-// adapted to the elastic setting (docs/elastic_bcl.md). For smooth
-// implicit differentiation, relax(kappa) walks the converged solution to
-// a kappa-relaxed central point (docs/pdal_differentiability.md).
+// The method is proxsuite's dense PDAL (BCL outer loop, semismooth Newton
+// with exact line search) condensed onto the n x n SPD system
+//   K = Q + rho I + (1/mu_eq) A^T A + (1/mu_in) G_act^T G_act,
+// whose factorization is cached across iterations and solve() calls.
+// Elastic BCL changes: docs/elastic_bcl.md. Differentiation via relax():
+// docs/pdal_differentiability.md.
 
 #pragma once
 
@@ -167,7 +147,7 @@ class Solver {
  public:
   Settings settings;
 
-  // Inequality row classification on the shifted value S (see header)
+  // Inequality row classification on the unclamped estimate z~ (see header)
   enum class RowState : unsigned char { kInactive, kActive, kSaturated };
 
   void setup(const MatrixXd& Q, const VectorXd& q, const MatrixXd& A,
@@ -204,13 +184,11 @@ class Solver {
     zk_.resize(p_);
 
     // solve() workspace, preallocated
-    S_.resize(p_);
+    ztilde_.resize(p_);
     t_.resize(p_);
     s2_.resize(p_);
     r_.resize(p_);
-    din_.resize(p_);
-    pv_.resize(p_);
-    tp_.resize(p_);
+    dzs_.resize(p_);
     jump_res_prev_.resize(p_);
     jump_res_cur_.resize(p_);
     verr_.resize(n_);
@@ -441,13 +419,13 @@ class Solver {
       const double pri_old = primal_res_;
       const double dua_old = dual_res_;
 
-      // PMM: Center proximal terms on current iterate;
-      // update shifted constraint value for new center
+      // PMM: center the proximal terms on the current iterate and refresh
+      // the unclamped multiplier estimate for the new center
       xk_ = x_;
       if (m_ > 0) yk_ = y_;
       zk_ = z_;
       wGx_.noalias() = G_ * x_;
-      S_ = wGx_ - h_ + mu_in_ * zk_;
+      ztilde_ = zk_ + (wGx_ - h_) / mu_in_;
 
       // PMM: newton solve for subproblem
       if (!inner_loop(eta_in_)) {
@@ -813,7 +791,7 @@ class Solver {
 
   // Newton on the PDAL merit (proxsuite primal_dual_newton_semi_smooth).
   // Returns false only on a factorization disaster. Invariant on entry and
-  // throughout: S_ = Gx - h + mu_in*zk_.
+  // throughout: ztilde_ = zk_ + (Gx - h) / mu_in
   bool inner_loop(double eps_int) {
     for (int it = 0; it < settings.max_iter_in; ++it) {
       const double err = compute_inner_terms();
@@ -821,12 +799,12 @@ class Solver {
       // one step; otherwise tiny mu_in can stall the outer loop
       if (err <= eps_int && it > 0) return true;
 
-      // Three-state row classification on the shifted value S (elastic
-      // version of proxsuite's active-set test; ties mirror its >=).
+      // Three-state row classification on z~ (elastic version of
+      // proxsuite's active-set test; ties mirror its >=)
       for (Eigen::Index i = 0; i < p_; ++i) {
-        if (S_[i] >= mu_in_ * penalty_[i]) {
+        if (ztilde_[i] >= penalty_[i]) {
           state(i) = RowState::kSaturated;
-        } else if (S_[i] >= 0.0) {
+        } else if (ztilde_[i] >= 0.0) {
           state(i) = RowState::kActive;
         } else {
           state(i) = RowState::kInactive;
@@ -834,26 +812,23 @@ class Solver {
       }
       if (!ensure_factor()) return false;
 
-      // Newton system condensed onto K. Non-active rows leave the system;
-      // their dual snaps to its target (0 inactive, penalty saturated)
+      // Newton system condensed onto K. Each row's dual shift is toward its
+      // target: z~ (active), penalty (saturated), 0 (inactive); non-active
+      // rows leave the system and their shift is exact
       for (Eigen::Index i = 0; i < p_; ++i) {
         switch (state(i)) {
           case RowState::kActive:
-            din_[i] = S_[i] - mu_in_ * z_[i];
-            pv_[i] = 0.0;
+            dzs_[i] = ztilde_[i] - z_[i];
             break;
           case RowState::kSaturated:
-            din_[i] = 0.0;
-            pv_[i] = penalty_[i] - z_[i];
+            dzs_[i] = penalty_[i] - z_[i];
             break;
           case RowState::kInactive:
-            din_[i] = 0.0;
-            pv_[i] = -z_[i];
+            dzs_[i] = -z_[i];
             break;
         }
       }
-      tp_ = pv_ + din_ / mu_in_;
-      wGtd_.noalias() = G_.transpose() * tp_;
+      wGtd_.noalias() = G_.transpose() * dzs_;
       rhs_x_ = -verr_ - wGtd_;
       if (m_ > 0) {
         rhs_x_.noalias() -= (1.0 / mu_eq_) * (A_.transpose() * dyrhs_);
@@ -867,9 +842,7 @@ class Solver {
         dy_ = (Adx_ + dyrhs_) / mu_eq_;
       }
       for (Eigen::Index i = 0; i < p_; ++i) {
-        dz_[i] = state(i) == RowState::kActive
-                     ? (Gdx_[i] + din_[i]) / mu_in_
-                     : pv_[i];
+        dz_[i] = is_active(i) ? Gdx_[i] / mu_in_ + dzs_[i] : dzs_[i];
       }
 
       iters_total_++;
@@ -887,7 +860,7 @@ class Solver {
       // So, project it back. Note: this never increases the merit
       // (merit z terms are separable quadratics with minimizers in range)
       clamp_z();
-      S_ += alpha * Gdx_;
+      ztilde_ += (alpha / mu_in_) * Gdx_;
       if (alpha == 0.0) return true;
     }
     return true;  // out of inner iterations; the outer loop adapts mu
@@ -910,8 +883,7 @@ class Solver {
     err = std::max(err, verr_.lpNorm<Eigen::Infinity>());
     double inerr = 0.0;
     for (Eigen::Index i = 0; i < p_; ++i) {
-      const double zh =
-          std::min(std::max(S_[i] / mu_in_, 0.0), penalty_[i]);
+      const double zh = std::min(std::max(ztilde_[i], 0.0), penalty_[i]);
       inerr = std::max(inerr, std::abs(zh - z_[i]));
     }
     return std::max(err, mu_in_ * inerr);
@@ -919,8 +891,8 @@ class Solver {
 
   // Exact line search on the piecewise-quadratic PDAL merit (proxsuite
   // linesearch::primal_dual_ls): the derivative is piecewise affine in
-  // alpha with breakpoints where S_i(alpha) crosses 0 or mu_in*penalty_i;
-  // scan for its sign change and interpolate
+  // alpha with breakpoints where z~_i(alpha) crosses 0 or penalty_i; scan
+  // for its sign change and interpolate
   double line_search() {
     // Smooth part g(alpha) = b + a*alpha. The dual-coupling equality term
     // collapses via Adx - mu_eq*dy = -dyrhs
@@ -936,14 +908,12 @@ class Solver {
       double g = b + a * alpha;
       for (Eigen::Index i = 0; i < p_; ++i) {
         const double c = Gdx_[i];
-        const double Sa = S_[i] + alpha * c;
+        const double zta = ztilde_[i] + alpha * c / mu_in_;
         const double za = z_[i] + alpha * dz_[i];
-        const double mw = mu_in_ * penalty_[i];
-        if (Sa >= mw) {  // saturated
+        if (zta >= penalty_[i]) {  // saturated
           g += penalty_[i] * c - mu_in_ * (penalty_[i] - za) * dz_[i];
-        } else if (Sa >= 0.0) {  // active
-          g += (Sa / mu_in_) * c +
-               (Sa / mu_in_ - za) * (c - mu_in_ * dz_[i]);
+        } else if (zta >= 0.0) {  // active
+          g += zta * c + (zta - za) * (c - mu_in_ * dz_[i]);
         } else {  // inactive
           g += mu_in_ * za * dz_[i];
         }
@@ -955,9 +925,9 @@ class Solver {
     for (Eigen::Index i = 0; i < p_; ++i) {
       const double c = Gdx_[i];
       if (c == 0.0) continue;
-      const double a1 = -S_[i] / c;
+      const double a1 = -mu_in_ * ztilde_[i] / c;
       if (a1 > 0.0 && std::isfinite(a1)) bp_.push_back(a1);
-      const double a2 = (mu_in_ * penalty_[i] - S_[i]) / c;
+      const double a2 = mu_in_ * (penalty_[i] - ztilde_[i]) / c;
       if (a2 > 0.0 && std::isfinite(a2)) bp_.push_back(a2);
     }
     std::sort(bp_.begin(), bp_.end());
@@ -1493,7 +1463,8 @@ class Solver {
   double primal_obj_ = 0, duality_gap_ = 0, duality_gap_rel_ = 0;
 
   // Workspace (allocated in setup, reused every iteration)
-  VectorXd S_, t_, s2_, r_, din_, pv_, tp_;
+  VectorXd ztilde_;  // unclamped multiplier estimate (proxsuite's S / mu_in)
+  VectorXd t_, s2_, r_, dzs_;  // dzs_: per-row dual shift in the Newton step
   // Per-row inequality residuals across outer rounds, for the saturation
   // jump's stall gate (maintained only while the jump is enabled).
   VectorXd jump_res_prev_, jump_res_cur_;
