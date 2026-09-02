@@ -563,98 +563,7 @@ class Solver {
   }
 
  private:
-  const Solution& relax_run(double kappa_s, double tol, int max_iter) {
-    double rho = settings.relax_reg;
-    double delta = settings.relax_reg;
-    int retries = 0;
-    int iter = 0;
-    Status status = Status::kMaxIter;
-    double res = relax_residual(kappa_s);
-    while (iter < max_iter) {
-      if (!std::isfinite(res)) {
-        status = Status::kNumerics;
-        break;
-      }
-      if (res < tol) {
-        status = Status::kSolved;
-        break;
-      }
-      iter++;
-
-      // Condensed Newton system. Eliminating dv1, dv2 (with b' in (0, 1)
-      // and D = b'(v)/b'(-v) = z/s) and dt gives, per row,
-      //   E = rho + D1 + D2,  Lambda = D2 (rho + D1) / E,
-      //   E dt = D2 G dx - F2 + D1 F4 + D2 F5,
-      // and the n x n SPD system
-      //   [Q + rho I + (1/delta) A'A + G' diag(Lambda) G] dx = rhs.
-      d1r_ = z1r_.cwiseQuotient(s1r_);
-      d2r_ = z2r_.cwiseQuotient(s2r_);
-      bool ok = relax_factor(rho, delta);
-      while (!ok && retries < settings.max_factor_retries) {
-        rho *= 100;
-        delta *= 100;
-        retries++;
-        ok = relax_factor(rho, delta);
-      }
-      if (!ok) {
-        status = Status::kNumerics;
-        break;
-      }
-      retries = 0;
-
-      wr_ = d1r_.cwiseProduct(rf4_) + d2r_.cwiseProduct(rf5_) - rf2_;
-      pvr_ = d2r_.cwiseProduct(rf5_ - einvr_.cwiseProduct(wr_));
-      rhs_x_ = -rf1_;
-      rhs_x_.noalias() -= G_.transpose() * pvr_;
-      if (m_ > 0) {
-        rhs_x_.noalias() -= (1.0 / delta) * (A_.transpose() * rf3_);
-      }
-      dxr_ = llt_r_.solve(rhs_x_);
-      Gdx_.noalias() = G_ * dxr_;
-      dtr_ = einvr_.cwiseProduct(d2r_.cwiseProduct(Gdx_) + wr_);
-      if (m_ > 0) {
-        dyr_.noalias() = A_ * dxr_;
-        dyr_ += rf3_;
-        dyr_ /= delta;
-      }
-      for (Eigen::Index i = 0; i < p_; ++i) {
-        dv1r_[i] = (rf4_[i] - dtr_[i]) / retraction_dcomp(v1r_[i], kappa_s);
-        dv2r_[i] = (rf5_[i] + Gdx_[i] - dtr_[i]) /
-                   retraction_dcomp(v2r_[i], kappa_s);
-      }
-
-      // Backtrack on the 2-norm merit; terminate on max norm
-      const double merit_prev = relax_merit_;
-      xr_ += dxr_;
-      tr_ += dtr_;
-      if (m_ > 0) yr_ += dyr_;
-      v1r_ += dv1r_;
-      v2r_ += dv2r_;
-      double alpha = 1.0;
-      double res_new = relax_residual(kappa_s);
-      for (int bt = 0;
-           bt < 12 && !(std::isfinite(relax_merit_) &&
-                        relax_merit_ <= merit_prev);
-           ++bt) {
-        alpha *= 0.5;
-        xr_ -= alpha * dxr_;
-        tr_ -= alpha * dtr_;
-        if (m_ > 0) yr_ -= alpha * dyr_;
-        v1r_ -= alpha * dv1r_;
-        v2r_ -= alpha * dv2r_;
-        res_new = relax_residual(kappa_s);
-      }
-      res = res_new;
-    }
-    // The loop tests res before stepping, check if the final step is in tol
-    if (status == Status::kMaxIter && std::isfinite(res) && res < tol) {
-      status = Status::kSolved;
-    }
-    if (!std::isfinite(res)) status = Status::kNumerics;
-    return relax_finish(status, iter);
-  }
-
- private:
+  // ---- problem data: A'A cache, equality certificate, Ruiz scaling ----
   void compute_AtA() {
     if (m_ > 0) {
       AtA_.resize(n_, n_);
@@ -762,6 +671,8 @@ class Solver {
     y_us_ = de_s_ / c_s_;
     z_us_ = di_s_ / c_s_;
   }
+
+  // ---- solve() entry paths ----
 
   // No inequality constraints: plain equality-constrained (or unconstrained)
   // QP, just solve the KKT system directly + report status from residuals
@@ -900,9 +811,11 @@ class Solver {
            duality_gap_rel_ * decay >= settings.eps_duality_gap_rel;
   }
 
-  // ---- inner semismooth Newton on the PDAL merit (proxsuite
-  // primal_dual_newton_semi_smooth). Returns false only on a factorization
-  // disaster. Invariant on entry and throughout: S_ = Gx - h + mu_in*zk_.
+  // ---- inner semismooth Newton ----
+
+  // Newton on the PDAL merit (proxsuite primal_dual_newton_semi_smooth).
+  // Returns false only on a factorization disaster. Invariant on entry and
+  // throughout: S_ = Gx - h + mu_in*zk_.
   bool inner_loop(double eps_int) {
     for (int it = 0; it < settings.max_iter_in; ++it) {
       const double err = compute_inner_terms();
@@ -1155,7 +1068,103 @@ class Solver {
     return true;
   }
 
-  // ---- relax() helpers ----
+  // ---- relax() ----
+
+  // Newton on the kappa-relaxed KKT from the current (xr, tr, yr, v1r, v2r)
+  void relax_run(double kappa_s, double tol, int max_iter) {
+    double rho = settings.relax_reg;
+    double delta = settings.relax_reg;
+    int retries = 0;
+    int iter = 0;
+    Status status = Status::kMaxIter;
+    double res = relax_residual(kappa_s);
+    while (iter < max_iter) {
+      if (!std::isfinite(res)) {
+        status = Status::kNumerics;
+        break;
+      }
+      if (res < tol) {
+        status = Status::kSolved;
+        break;
+      }
+      iter++;
+
+      // Condensed Newton system. Eliminating dv1, dv2 (with b' in (0, 1)
+      // and D = b'(v)/b'(-v) = z/s) and dt gives, per row,
+      //   E = rho + D1 + D2,  Lambda = D2 (rho + D1) / E,
+      //   E dt = D2 G dx - F2 + D1 F4 + D2 F5,
+      // and the n x n SPD system
+      //   [Q + rho I + (1/delta) A'A + G' diag(Lambda) G] dx = rhs.
+      d1r_ = z1r_.cwiseQuotient(s1r_);
+      d2r_ = z2r_.cwiseQuotient(s2r_);
+      bool ok = relax_factor(rho, delta);
+      while (!ok && retries < settings.max_factor_retries) {
+        rho *= 100;
+        delta *= 100;
+        retries++;
+        ok = relax_factor(rho, delta);
+      }
+      if (!ok) {
+        status = Status::kNumerics;
+        break;
+      }
+      retries = 0;
+
+      wr_ = d1r_.cwiseProduct(rf4_) + d2r_.cwiseProduct(rf5_) - rf2_;
+      pvr_ = d2r_.cwiseProduct(rf5_ - einvr_.cwiseProduct(wr_));
+      rhs_x_ = -rf1_;
+      rhs_x_.noalias() -= G_.transpose() * pvr_;
+      if (m_ > 0) {
+        rhs_x_.noalias() -= (1.0 / delta) * (A_.transpose() * rf3_);
+      }
+      dxr_ = llt_r_.solve(rhs_x_);
+      Gdx_.noalias() = G_ * dxr_;
+      dtr_ = einvr_.cwiseProduct(d2r_.cwiseProduct(Gdx_) + wr_);
+      if (m_ > 0) {
+        dyr_.noalias() = A_ * dxr_;
+        dyr_ += rf3_;
+        dyr_ /= delta;
+      }
+      for (Eigen::Index i = 0; i < p_; ++i) {
+        dv1r_[i] = (rf4_[i] - dtr_[i]) / retraction_dcomp(v1r_[i], kappa_s);
+        dv2r_[i] = (rf5_[i] + Gdx_[i] - dtr_[i]) /
+                   retraction_dcomp(v2r_[i], kappa_s);
+      }
+
+      // Backtrack on the 2-norm merit; terminate on max norm
+      const double merit_prev = relax_merit_;
+      xr_ += dxr_;
+      tr_ += dtr_;
+      if (m_ > 0) yr_ += dyr_;
+      v1r_ += dv1r_;
+      v2r_ += dv2r_;
+      double alpha = 1.0;
+      double res_new = relax_residual(kappa_s);
+      for (int bt = 0;
+           bt < 12 && !(std::isfinite(relax_merit_) &&
+                        relax_merit_ <= merit_prev);
+           ++bt) {
+        alpha *= 0.5;
+        xr_ -= alpha * dxr_;
+        tr_ -= alpha * dtr_;
+        if (m_ > 0) yr_ -= alpha * dyr_;
+        v1r_ -= alpha * dv1r_;
+        v2r_ -= alpha * dv2r_;
+        res_new = relax_residual(kappa_s);
+      }
+      res = res_new;
+    }
+    // The loop tests res before stepping, so classify the final step too
+    if (status == Status::kMaxIter) {
+      if (!std::isfinite(res)) {
+        status = Status::kNumerics;
+      } else if (res < tol) {
+        status = Status::kSolved;
+      }
+    }
+    relax_finish(status, iter);
+  }
+
 
   // Closed-form prox of kappa*(-log): the positive root of
   // s^2 - v s - kappa = 0, i.e. b_k(v) = (v + sqrt(v^2 + 4 kappa))/2, with
@@ -1278,7 +1287,7 @@ class Solver {
   // touch the solver iterate, residual scalars, or have_warm_: only sol_
   // reflects the relaxation. The duality gap converges to ~2 p kappa (each
   // relaxed pair contributes kappa), not 0.
-  const Solution& relax_finish(Status status, int iters) {
+  void relax_finish(Status status, int iters) {
     sol_.x = xr_.cwiseProduct(dx_s_);
     sol_.t = tr_.cwiseProduct(inv_di_);
     sol_.y = yr_.cwiseProduct(y_us_);
@@ -1297,7 +1306,6 @@ class Solver {
     sol_.primal_res = relax_primal_res_;
     sol_.dual_res = relax_dual_res_;
     sol_.duality_gap = std::abs(sol_.primal_obj - dual_obj);
-    return sol_;
   }
 
   // ---- shared row/vector helpers ----
@@ -1331,6 +1339,8 @@ class Solver {
   static double ssq_us(const V& v, const VectorXd& s) {
     return v.size() > 0 ? v.cwiseProduct(s).squaredNorm() : 0.0;
   }
+
+  // ---- residuals and termination ----
 
   // Unscaled residuals of the elastic QP at the reconstructed expanded
   // point:
@@ -1436,6 +1446,8 @@ class Solver {
     }
     return sol_;
   }
+
+  // ---- state ----
 
   // Problem data
   Eigen::Index n_ = 0, m_ = 0, p_ = 0;
