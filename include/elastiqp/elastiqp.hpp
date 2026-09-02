@@ -412,10 +412,8 @@ class Solver {
     }
 
     // BCL state (proxsuite defaults)
-    const double eta_ext_init = std::pow(0.1, settings.alpha_bcl);
-    const double eps_in_min = std::min(settings.eps_abs, 1e-9);
-    double eta_ext = eta_ext_init;
-    double eta_in = 1.0;
+    eta_ext_ = eta_ext_init();
+    eta_in_ = 1.0;
 
     // Initial termination check
     update_residuals();
@@ -425,8 +423,8 @@ class Solver {
     // But, only do so if it results in a 10x skip. Smaller skips might lead
     // to a bad step / mu-shrink that makes it no longer worth it
     const double eta_warm = 0.5 * primal_res_;
-    if (warm_path && settings.bcl_warm_eta && eta_warm < 0.1 * eta_ext) {
-      eta_ext = eta_warm;
+    if (warm_path && settings.bcl_warm_eta && eta_warm < 0.1 * eta_ext_) {
+      eta_ext_ = eta_warm;
     }
 
     // Store initial residuals to track slow convergence across outer rounds
@@ -450,7 +448,7 @@ class Solver {
       S_ = wGx_ - h_ + mu_in_ * zk_;
 
       // PMM: newton solve for subproblem
-      if (!inner_loop(eta_in)) {
+      if (!inner_loop(eta_in_)) {
         return finish(Status::kNumerics);
       }
 
@@ -467,101 +465,41 @@ class Solver {
       }
 
       // BCL: accept the step and tighten tolerances, or shrink mu on a bad step
-      if (pri_new <= eta_ext || iters_total_ > settings.safe_guard) {
-        eta_ext *= std::pow(mu_in_, settings.beta_bcl);
-        eta_in = std::max(eta_in * mu_in_, eps_in_min);
-        // Good-step edge case: elasticity kicked in at the previous
-        // solve (duals = penalty, t > 0), but constraints are now satisfied
-        // at the warm start (for instance, consider a robot which had 
-        // conflicting constraints that just resolved). The duals are too
-        // large, and need to come down. Both residual checks pass on this step,
-        // but the duality gap fails and stalls, since every round counts
-        // as "good" and mu doesn't shrink. In this case, use similar BCL jump
-        // logic as in the bad-step case to resolve the shallowest stuck row
-        const bool res_ok =
-            (primal_res_ < settings.eps_abs ||
-             primal_res_rel_ < settings.eps_rel) &&
-            (dual_res_ < settings.eps_abs ||
-             dual_res_rel_ < settings.eps_rel);
-        const bool gap_fail =
-            settings.check_duality_gap &&
-            !(duality_gap_ < settings.eps_duality_gap_abs ||
-              duality_gap_rel_ < settings.eps_duality_gap_rel);
-        // Jump when the gap's per-round geometric decay cannot reach the
-        // gap tolerance within bcl_gap_jump_horizon more rounds
-        bool gap_too_slow = duality_gap_ >= gap_prev || !(gap_prev > 0.0);
-        if (!gap_too_slow) {
-          const double decay =
-              std::pow(duality_gap_ / gap_prev, settings.bcl_gap_jump_horizon);
-          gap_too_slow =
-              duality_gap_ * decay >= settings.eps_duality_gap_abs &&
-              duality_gap_rel_ * decay >= settings.eps_duality_gap_rel;
-        }
-        if (settings.bcl_gap_jump && res_ok && gap_fail && gap_too_slow) {
-          double shallowest = 0.0;
-          for (Eigen::Index i = 0; i < p_; ++i) {
-            if (r_[i] < 0.0 && z_[i] > 0.0) {
-              shallowest = std::max(shallowest, -r_[i] / z_[i]);
-            }
-          }
+      if (pri_new <= eta_ext_ || iters_total_ > settings.safe_guard) {
+        eta_ext_ *= std::pow(mu_in_, settings.beta_bcl);
+        eta_in_ = std::max(eta_in_ * mu_in_, eps_in_min());
+        // Gap jump: residuals pass but the gap stalls because oversized duals
+        // on now-satisfied rows must come down (deactivation creep,
+        // docs/elastic_bcl.md). Every round counts as good, so mu never
+        // shrinks on its own. Jump one factor past the shallowest such row
+        // so its dual snaps to 0 on the next step
+        if (settings.bcl_gap_jump && residuals_ok() &&
+            settings.check_duality_gap && !gap_ok() &&
+            gap_decay_too_slow(gap_prev)) {
           double mu_new = mu_in_ * settings.mu_update_factor;
+          const double shallowest = gap_jump_mu();
           if (shallowest > 0.0) {
-            // Jump one factor past the boundary so the duals snap to
-            // exactly 0 on the next step (later increasing as needed)
             mu_new = std::min(mu_new, settings.mu_update_factor * shallowest);
           }
-          const double ratio = mu_new / mu_in_;
-          mu_in_ = std::max(mu_new, settings.mu_min_in);
-          mu_eq_ = std::max(mu_eq_ * ratio, settings.mu_min_eq);
-          eta_ext = eta_ext_init * std::pow(mu_in_, settings.alpha_bcl);
-          eta_in = std::max(mu_in_, eps_in_min);
-          update_residuals();
+          shrink_mu(mu_new);
         }
       } else if (settings.bcl_split) {
-        // Bad step: revert y if equalities are at fault, not z, and shrink mu
-        // (split handling for elastic structure -- hard eq, elastic ineq)
-        if (m_ > 0 && eq_res_ > eta_ext) y_ = yk_;
+        // Bad step (elastic): revert y only if the equalities are at fault,
+        // never z; jump mu just far enough to resolve one stalled row
+        if (m_ > 0 && eq_res_ > eta_ext_) y_ = yk_;
         double mu_new = mu_in_ * settings.mu_update_factor;
-        if (settings.bcl_mu_jump && in_res_ > eta_ext &&
+        if (settings.bcl_mu_jump && in_res_ > eta_ext_ &&
             pri_new > 0.8 * pri_old) {
-          // If an inequality row is slowly improving (< 20% per round), it needs
-          // mu_in <= r / (penalty - z) for its dual to snap to the penalty cap.
-          // Drop mu_in just enough to resolve one stuck row
-          double shallowest = 0.0;
-          for (Eigen::Index i = 0; i < p_; ++i) {
-            const double res_i = jump_res_cur_[i];
-            if (res_i <= settings.eps_abs ||
-                res_i <= 0.8 * jump_res_prev_[i]) {
-              continue;
-            }
-            const double den = penalty_[i] - z_[i];
-            if (!(den > 0.0) || r_[i] <= 0.0) continue;
-            shallowest = std::max(shallowest, r_[i] / den);
-          }
-          if (shallowest > 0.0) {
-            mu_new = std::min(mu_in_ * settings.mu_update_factor,
-                              shallowest);
-          }
+          const double shallowest = stall_jump_mu();
+          if (shallowest > 0.0) mu_new = std::min(mu_new, shallowest);
         }
-        // Shrink mu_eq_ at same ratio as mu_in_
-        const double ratio = mu_new / mu_in_;
-        mu_in_ = std::max(mu_new, settings.mu_min_in);
-        mu_eq_ = std::max(mu_eq_ * ratio, settings.mu_min_eq);
-        // Reset BCL tolerances to the new mu
-        eta_ext = eta_ext_init * std::pow(mu_in_, settings.alpha_bcl);
-        eta_in = std::max(mu_in_, eps_in_min);
-        update_residuals();
+        shrink_mu(mu_new);
       } else {
-        // Bad step [no elastic BCL split logic] -- same as proxqp
+        // Bad step (proxqp): revert both duals, shrink both mu
         if (m_ > 0) y_ = yk_;
         z_ = zk_;
-        mu_in_ = std::max(mu_in_ * settings.mu_update_factor,
-                          settings.mu_min_in);
-        mu_eq_ = std::max(mu_eq_ * settings.mu_update_factor,
-                          settings.mu_min_eq);
-        eta_ext = eta_ext_init * std::pow(mu_in_, settings.alpha_bcl);
-        eta_in = std::max(mu_in_, eps_in_min);
-        update_residuals();
+        set_mu(mu_in_ * settings.mu_update_factor,
+               mu_eq_ * settings.mu_update_factor);
       }
 
       // Keep track of residuals for the next round
@@ -903,6 +841,64 @@ class Solver {
       y_ = (wAx_ - b_) / mu_eq_;
     }
     return std::isfinite(x_.sum()) && (m_ == 0 || std::isfinite(y_.sum()));
+  }
+
+  // ---- BCL outer-loop helpers ----
+  double eta_ext_init() const { return std::pow(0.1, settings.alpha_bcl); }
+  double eps_in_min() const { return std::min(settings.eps_abs, 1e-9); }
+
+  // Set both AL penalties (floored), reset the BCL tolerances to the new
+  // mu_in, and refresh the residuals (t depends on mu_in)
+  void set_mu(double mu_in_new, double mu_eq_new) {
+    mu_in_ = std::max(mu_in_new, settings.mu_min_in);
+    mu_eq_ = std::max(mu_eq_new, settings.mu_min_eq);
+    eta_ext_ = eta_ext_init() * std::pow(mu_in_, settings.alpha_bcl);
+    eta_in_ = std::max(mu_in_, eps_in_min());
+    update_residuals();
+  }
+
+  // Shrink mu_in to mu_new and mu_eq by the same ratio
+  void shrink_mu(double mu_new) {
+    set_mu(mu_new, mu_eq_ * (mu_new / mu_in_));
+  }
+
+  // Gap-jump target: the mu_in at which the shallowest oversized dual on a
+  // satisfied row (r < 0, z > 0) snaps to 0. Returns 0 if there is none
+  double gap_jump_mu() const {
+    double shallowest = 0.0;
+    for (Eigen::Index i = 0; i < p_; ++i) {
+      if (r_[i] < 0.0 && z_[i] > 0.0) {
+        shallowest = std::max(shallowest, -r_[i] / z_[i]);
+      }
+    }
+    return shallowest;
+  }
+
+  // Stall-jump target: a violated row improving < 20% per round needs
+  // mu_in <= r / (penalty - z) for its dual to reach the penalty cap.
+  // Returns the shallowest such mu_in, or 0 if no row is stalled
+  double stall_jump_mu() const {
+    double shallowest = 0.0;
+    for (Eigen::Index i = 0; i < p_; ++i) {
+      const double res_i = jump_res_cur_[i];
+      if (res_i <= settings.eps_abs || res_i <= 0.8 * jump_res_prev_[i]) {
+        continue;
+      }
+      const double den = penalty_[i] - z_[i];
+      if (!(den > 0.0) || r_[i] <= 0.0) continue;
+      shallowest = std::max(shallowest, r_[i] / den);
+    }
+    return shallowest;
+  }
+
+  // True if the gap's per-round geometric decay cannot reach the gap
+  // tolerance within bcl_gap_jump_horizon more rounds
+  bool gap_decay_too_slow(double gap_prev) const {
+    if (duality_gap_ >= gap_prev || !(gap_prev > 0.0)) return true;
+    const double decay =
+        std::pow(duality_gap_ / gap_prev, settings.bcl_gap_jump_horizon);
+    return duality_gap_ * decay >= settings.eps_duality_gap_abs &&
+           duality_gap_rel_ * decay >= settings.eps_duality_gap_rel;
   }
 
   // ---- inner semismooth Newton on the PDAL merit (proxsuite
@@ -1383,14 +1379,18 @@ class Solver {
     duality_gap_rel_ = duality_gap_ / std::max(1.0, gap_rel_norm);
   }
 
-  bool converged() const {
+  bool residuals_ok() const {
     return (primal_res_ < settings.eps_abs ||
             primal_res_rel_ < settings.eps_rel) &&
            (dual_res_ < settings.eps_abs ||
-            dual_res_rel_ < settings.eps_rel) &&
-           (!settings.check_duality_gap ||
-            duality_gap_ < settings.eps_duality_gap_abs ||
-            duality_gap_rel_ < settings.eps_duality_gap_rel);
+            dual_res_rel_ < settings.eps_rel);
+  }
+  bool gap_ok() const {
+    return duality_gap_ < settings.eps_duality_gap_abs ||
+           duality_gap_rel_ < settings.eps_duality_gap_rel;
+  }
+  bool converged() const {
+    return residuals_ok() && (!settings.check_duality_gap || gap_ok());
   }
 
   const Solution& finish(Status status) {
@@ -1431,6 +1431,8 @@ class Solver {
 
   // Proximal / AL state (persists across solves)
   double rho_ = 0, mu_eq_ = 0, mu_in_ = 0;
+  // BCL tolerances for the current solve
+  double eta_ext_ = 0, eta_in_ = 0;
 
   // Ruiz scaling state (identity when ruiz_ is false)
   bool ruiz_ = false;
