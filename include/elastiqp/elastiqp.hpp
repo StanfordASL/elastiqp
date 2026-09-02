@@ -221,33 +221,7 @@ class Solver {
     upd_vec_.resize(n_);
     updates_since_factor_ = 0;
 
-    // relax() iterate and workspace
-    xr_.resize(n_);
-    tr_.resize(p_);
-    yr_.resize(m_);
-    v1r_.resize(p_);
-    v2r_.resize(p_);
-    z1r_.resize(p_);
-    z2r_.resize(p_);
-    s1r_.resize(p_);
-    s2r_.resize(p_);
-    rf1_.resize(n_);
-    rf2_.resize(p_);
-    rf3_.resize(m_);
-    rf4_.resize(p_);
-    rf5_.resize(p_);
-    d1r_.resize(p_);
-    d2r_.resize(p_);
-    einvr_.resize(p_);
-    lamr_.resize(p_);
-    wr_.resize(p_);
-    pvr_.resize(p_);
-    dxr_.resize(n_);
-    dtr_.resize(p_);
-    dyr_.resize(m_);
-    dv1r_.resize(p_);
-    dv2r_.resize(p_);
-    llt_r_ = Eigen::LLT<MatrixXd, Eigen::Lower>(n_);
+    relax_ready_ = false;  // relax() workspace is allocated on first use
 
     // Equality-consistency certificate, on the still-unscaled (A_, b_)
     check_eq_A(A_);
@@ -509,6 +483,7 @@ class Solver {
     if (p_ == 0 || kappa <= 0.0 || (!have_warm_ && !relax_have_warm_)) {
       return sol_;
     }
+    if (!relax_ready_) relax_alloc();
     // Ruiz-scaled kappa (the di factors cancel)
     const double kappa_s = c_s_ * kappa;
 
@@ -1032,6 +1007,38 @@ class Solver {
 
   // ---- relax() ----
 
+  // Workspace for relax(), allocated on the first call after setup() so
+  // forward-only users pay nothing for the backward pass
+  void relax_alloc() {
+    xr_.resize(n_);
+    tr_.resize(p_);
+    yr_.resize(m_);
+    v1r_.resize(p_);
+    v2r_.resize(p_);
+    z1r_.resize(p_);
+    z2r_.resize(p_);
+    s1r_.resize(p_);
+    s2r_.resize(p_);
+    rf1_.resize(n_);
+    rf2_.resize(p_);
+    rf3_.resize(m_);
+    rf4_.resize(p_);
+    rf5_.resize(p_);
+    d1r_.resize(p_);
+    d2r_.resize(p_);
+    einvr_.resize(p_);
+    lamr_.resize(p_);
+    wr_.resize(p_);
+    pvr_.resize(p_);
+    dxr_.resize(n_);
+    dtr_.resize(p_);
+    dyr_.resize(m_);
+    dv1r_.resize(p_);
+    dv2r_.resize(p_);
+    llt_r_ = Eigen::LLT<MatrixXd, Eigen::Lower>(n_);
+    relax_ready_ = true;
+  }
+
   // Newton on the kappa-relaxed KKT from the current (xr, tr, yr, v1r, v2r)
   void relax_run(double kappa_s, double tol, int max_iter) {
     double rho = settings.relax_reg;
@@ -1488,6 +1495,7 @@ class Solver {
   // True while (xr_, tr_, yr_, v1r_, v2r_) holds a converged relaxed
   // iterate usable as the next relax() warm start; cleared by setup().
   bool relax_have_warm_ = false;
+  bool relax_ready_ = false;  // workspace sized for the current problem
 
   Solution sol_;
 };
