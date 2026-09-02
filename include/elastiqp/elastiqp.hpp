@@ -534,24 +534,28 @@ class Solver {
     if (p_ == 0 || kappa <= 0.0 || (!have_warm_ && !relax_have_warm_)) {
       return sol_;
     }
-    // Update kappa to account for Ruiz scaling (note: di factors cancel out here)
+    // Ruiz-scaled kappa (the di factors cancel)
     const double kappa_s = c_s_ * kappa;
 
-    if (warm && relax_have_warm_ &&
-        !(have_warm_ && settings.relax_warm_flip_tol >= 0 &&
-          relax_predict_flips(kappa_s) > settings.relax_warm_flip_tol)) {
-      // Warm-start the relax path from the previous relaxed iterate
-      relax_run(kappa_s, tol,
-                std::min(max_iter, settings.relax_warm_budget));
-      // If warm starting relax failed to converge (stalled), retry from tight sol
+    // Warm-start from the previous relaxed iterate, unless too many rows are
+    // predicted to flip sides of the s.z = kappa hyperbola (the prediction
+    // needs a tight solve to compare against)
+    bool use_warm = warm && relax_have_warm_;
+    if (use_warm && have_warm_ && settings.relax_warm_flip_tol >= 0) {
+      use_warm = relax_predict_flips(kappa_s) <= settings.relax_warm_flip_tol;
+    }
+
+    if (use_warm) {
+      relax_run(kappa_s, tol, std::min(max_iter, settings.relax_warm_budget));
+      // Stalled warm attempt: retry from the tight solution
       if (sol_.converged != 1 && have_warm_) {
         const int warm_iters = sol_.iters;
         relax_init_retraction();
         relax_run(kappa_s, tol, max_iter);
         sol_.iters += warm_iters;
       }
-    } else { // Cold start relax path
-      if (!have_warm_) return sol_;  // no usable tight solve to start from
+    } else {
+      if (!have_warm_) return sol_;  // no tight solve to start from
       relax_init_retraction();
       relax_run(kappa_s, tol, max_iter);
     }
