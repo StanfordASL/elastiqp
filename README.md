@@ -157,6 +157,11 @@ batch_ls = vmap_loss(batch_q)
 
 For runnable Python/JAX examples, see the `examples` folder
 
+## Benchmarks
+
+See [StanfordASL/elastiqp_benchmarks](https://github.com/StanfordASL/elastiqp_benchmarks)
+
+
 ## Assorted Tips
 
 - If differentiating through problems with large penalty weights (roughly >= 1e4), or for badly row-scaled constraints (mixed units), consider turning on Ruiz equilibration. In Python/JAX: `ruiz=True`; in C++: `settings.ruiz = true`. The scaling is computed at `setup()` and carried through the `set_*` updates (still exact, only the conditioning drifts); `solve()` re-equilibrates automatically once a matrix update has drifted a scaled row/column norm past `settings.ruiz_refresh_ratio` (4x by default), keeping the warm start. `scaling_drift()` reports the current drift and `reequilibrate()` refreshes on demand, so a control loop never needs a second `setup()` for this.
