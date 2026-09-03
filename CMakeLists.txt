@@ -76,6 +76,11 @@ if(ELASTIQP_BUILD_TESTS)
   # re-equilibration, long-horizon oscillating drift, user-frame reporting.
   elastiqp_test(test_ruiz)
   add_test(NAME elastiqp.ruiz COMMAND test_ruiz)
+
+  # Linear programs (Q = 0): vertex optima known by construction, degenerate
+  # face, and the unbounded-LP limitation (not certified, just fails).
+  elastiqp_test(test_lp)
+  add_test(NAME elastiqp.lp COMMAND test_lp)
 endif()
 
 # --- Python bindings + JAX FFI -----------------------------------------------
