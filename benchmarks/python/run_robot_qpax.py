@@ -2,7 +2,7 @@
 """qpax (hard + elastic, explicit backend) on the robot_solver_comparison
 problems.
 
-Python-side companion to examples/experiments/robot_solver_comparison.cc:
+Python-side companion to experiments/robot_solver_comparison.cc:
 same recorded control-loop sequences, same feasible/conflict variants, same
 per-route statistics — but only the qpax routes, which have no C++ bindings.
 The other solvers' numbers come from the C++ binary; this script does not

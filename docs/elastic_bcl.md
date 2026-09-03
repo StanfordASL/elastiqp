@@ -250,7 +250,7 @@ tests/test_bindings.py (data in tests/data/warmstart_stale_duals.npz).
 
 ## Validation
 
-`benchmarks/bench_bcl_strategies.cc` isolates the failure regime that
+`benchmarks/core/bench_bcl_strategies.cc` isolates the failure regime that
 motivated all of the above (penalty 1e4, sigma 1e-4/1e-3 qh drift, all
 three structures — first seen as forward warm-solve failures in
 `bench_relax_warm` at commit b995082) and replays it under each

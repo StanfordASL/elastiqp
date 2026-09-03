@@ -1,0 +1,9 @@
+# Python side of the benchmarks (python/, tools/). elastiqp itself comes
+# from the sibling checkout (pip install -e "../elastiqp[jax]") or PyPI.
+elastiqp[jax]
+numpy
+scipy          # tools/convert_maros_meszaros.py, python/run_maros_meszaros.py
+matplotlib     # python/plot_results.py
+qpax           # python/run_diff_experiment.py, run_robot_qpax.py (pulls in jax)
+piqp           # python/run_maros_meszaros.py, run_robot_qpax.py
+proxsuite      # python/run_maros_meszaros.py

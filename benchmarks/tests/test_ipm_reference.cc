@@ -1,6 +1,8 @@
-// Correctness tests for the test-only IPM reference implementation
-// (tests/ipm_reference.hpp). The reference cross-validates elastiqp::Solver
-// in test_pdal.cc, so it must itself be validated against vanilla PIQP:
+// Correctness tests for elastiqp's test-only IPM reference implementation
+// (elastiqp/tests/support/ipm_reference.hpp). The reference is the oracle
+// for elastiqp::Solver in elastiqp's own test suite (tests/test_pdal.cc),
+// so it must itself be validated against vanilla PIQP -- which is why this
+// test lives here, next to the external-solver dependency:
 // (1) on hard-constrained-yet-feasible problems where the elastic
 // result should coincide with the PIQP result;
 // (2) on the expanded (n+p) variable form of the elastic problem

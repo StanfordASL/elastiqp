@@ -1,0 +1,6 @@
+build*/
+results/
+__pycache__/
+*.pyc
+.cache/
+Testing/

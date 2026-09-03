@@ -12,7 +12,7 @@
 //     the eliminated dynamics)
 //   * in deliberately conflicting scenarios the solver still converges and
 //     degrades gracefully (slacks > 0) instead of failing
-//   * (with the vendored piqp/) solutions match vanilla PIQP on the expanded
+//   * (with ELASTIQP_BENCH_EXTERNAL_SOLVERS) solutions match vanilla PIQP on the expanded
 //     (n+p)-variable formulation
 //
 // The closed-loop tests integrate the QP solution (velocity or acceleration)

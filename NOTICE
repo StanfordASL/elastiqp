@@ -11,20 +11,21 @@ It builds on three projects:
     at the end of this file, and apply to the portions derived from it.
   * PIQP (https://github.com/PREDICT-EPFL/piqp), BSD 2-Clause License --
     the proximal interior-point algorithm that the test-only reference
-    solver (tests/ipm_reference.hpp, not installed or distributed)
+    solver (tests/support/ipm_reference.hpp, not installed or distributed)
     reimplements for the elastic form. PIQP's copyright notice and license
     are reproduced at the end of this file, and apply to the portions
     derived from it.
 
-The repository additionally vendors two sets of third-party headers, both
+The repository additionally vendors one set of third-party headers,
 outside the installed ElastiQP headers:
 
   * third_party/xla_ffi -- the XLA FFI API headers (Copyright The OpenXLA
     Authors, Apache License 2.0; see the header of each file and
     third_party/xla_ffi/README.md).
-  * third_party/piqp -- PIQP's headers (Copyright EPFL, BSD 2-Clause,
-    reproduced below and in third_party/piqp/LICENSE), used only for
-    cross-solver tests
+
+PIQP's and proxsuite's own headers are not vendored; the benchmarks project
+(benchmarks/, elastiqp_benchmarks) fetches their pinned release tarballs at
+configure time for cross-solver tests and benchmarks.
 
 =======================================================================
 Third-party notice: ProxQP (proxsuite)

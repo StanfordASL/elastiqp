@@ -1,5 +1,5 @@
 // Timing benchmark on random dense elastic QPs (self-contained: only
-// Eigen + the ElastiQP header + common/problem_gen.hpp).
+// Eigen + the ElastiQP header + elastiqp tests/support/problem_gen.hpp).
 //
 // For each problem family (feasible / feasible+eq / infeasible /
 // infeasible+eq) and size, reports over a set of random instances:

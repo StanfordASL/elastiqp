@@ -57,7 +57,7 @@ cmake -B build-native . -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-march=nat
 cmake --build build-native --config Release
 ```
 
-To build the `benchmarks`, add the following flag: `-DELASTIQP_BUILD_BENCHMARKS=ON`
+The tests are self-contained (Eigen only) and run with `ctest --test-dir build`. Benchmarks, cross-solver comparisons, and tests against external solvers live in the separate [`benchmarks/`](benchmarks/README.md) project (`elastiqp_benchmarks`), which pulls in PIQP / ProxQP / Pinocchio so that this repo does not have to.
 
 If you've installed with CMake, you can also `find_package(elastiqp)`
 
@@ -168,6 +168,6 @@ ElastiQP builds on the following excellent projects:
 
 - [qpax](https://github.com/qpax-solver/qpax): ElastiQP is inspired by the condensation strategy from their elastic primal-dual interior point method, and builds on their kappa-smoothed derivatives. Apache-2.0
 - [ProxQP](https://github.com/Simple-Robotics/proxsuite): ElastiQP considers an elastic formulation of their primal-dual augmented Lagrangian method. BSD 2-Clause.
-- [PIQP](https://github.com/PREDICT-EPFL/piqp): used (vendored, test-only) as an independent reference solver in ElastiQP's test suite, alongside a test-only elastic interior-point reference implementation based on it. BSD 2-Clause.
+- [PIQP](https://github.com/PREDICT-EPFL/piqp): the test-only elastic interior-point reference implementation that ElastiQP's test suite validates against (`tests/support/ipm_reference.hpp`) is based on it, and the benchmarks project cross-validates both against vanilla PIQP. BSD 2-Clause.
 
 ElastiQP is licensed under Apache 2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE) for third-party notices.

@@ -65,7 +65,7 @@ OBJ_TOL = 1e-4
 
 def default_data_dir() -> str:
     """maros_meszaros_data inside the newest fetched proxsuite tarball."""
-    root = bc.BENCH_DIR.parent
+    root = bc.BENCH_DIR
     hits = sorted(
         glob.glob(str(root / "build*" / "_deps" / "proxsuite_src-src" /
                       "test" / "data" / "maros_meszaros_data")),

@@ -1,12 +1,19 @@
 // Correctness tests for elastiqp::Solver
 //
-// Checks against
-// (1) PIQP on hard-constrained-yet-feasible problems where the elastic
-// result should coincide with the PIQP result;
-// (2) PIQP on the expanded (n+p) variable form of the elastic problem
-// (3) the test-only IPM reference (ipm_reference.hpp) on identical
-// problems, including the kappa-relaxed central point that relax()
-// targets for differentiation
+// Self-contained (Eigen only): every check is against the test-only IPM
+// reference (tests/support/ipm_reference.hpp), which reaches the same
+// elastic solution and the same kappa-relaxed central point by a completely
+// different method. The reference itself, and elastiqp::Solver, are
+// cross-validated against vanilla PIQP in the benchmarks repo
+// (benchmarks/tests/), which is where the external-solver dependency lives.
+//
+// Checks:
+// (1) hard-constrained-yet-feasible problems, where the elastic result must
+//     coincide with the strict QP (t exactly 0);
+// (2) infeasible problems, where the elastic solution must match the
+//     reference solved on the identical elastic problem;
+// (3) relax() against the reference's kappa-relaxed central point, and the
+//     KKT VJP against finite differences.
 
 #include <cmath>
 #include <cstdio>
@@ -15,7 +22,6 @@
 #include "elastiqp/elastiqp.hpp"
 #include "elastiqp/kkt_vjp.hpp"
 #include "ipm_reference.hpp"
-#include "piqp/piqp.hpp"
 #include "problem_gen.hpp"
 
 using Eigen::MatrixXd;
@@ -83,65 +89,47 @@ elastiqp::Solution TightIpmSolve(Args&&... args) {
   return elastiqp::IpmSolve(std::forward<Args>(args)..., TightIpmSettings());
 }
 
-// Vanilla piqp on the expanded formulation (equalities carried over as hard
-// constraints on the x block); returns (x, t, y, z_t, z_ineq).
-struct ExpandedSol {
+// IPM reference on the identical elastic problem; the oracle for every
+// "matches" check below. The benchmarks repo runs the same checks with
+// vanilla PIQP on the expanded (n+p) formulation as the oracle
+// (tests/test_piqp_cross_validation.cc).
+struct RefSol {
   VectorXd x, t, y, z_t, z_ineq;
-  piqp::Status status;
+  int converged;
 };
 
-ExpandedSol SolveExpanded(const QPData& qp, const VectorXd& penalty,
-                          double eps = 1e-10) {
-  const Eigen::Index n = qp.q.size();
-  const Eigen::Index m = qp.b.size();
-  const Eigen::Index p = qp.h.size();
-  const problem_gen::ExpandedElastic e =
-      problem_gen::MakeExpanded(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
-  piqp::DenseSolver<double> solver;
-  solver.settings().eps_abs = eps;
-  solver.settings().eps_rel = 0;
-  solver.settings().verbose = false;
-  if (m > 0) {
-    solver.setup(e.P, e.c, e.A, e.b, e.Gt, piqp::nullopt, e.h, e.lb,
-                 piqp::nullopt);
-  } else {
-    solver.setup(e.P, e.c, piqp::nullopt, piqp::nullopt, e.Gt, piqp::nullopt,
-                 e.h, e.lb, piqp::nullopt);
-  }
-  ExpandedSol s;
-  s.status = solver.solve();
-  s.x = solver.result().x.head(n);
-  s.t = solver.result().x.tail(p);
-  s.y = solver.result().y;
-  s.z_t = solver.result().z_bl.tail(p);
-  s.z_ineq = solver.result().z_u;
-  return s;
+RefSol SolveRef(const QPData& qp, const VectorXd& penalty) {
+  const elastiqp::Solution s =
+      TightIpmSolve(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
+  RefSol r;
+  r.converged = s.converged;
+  r.x = s.x;
+  r.t = s.t;
+  r.y = s.y;
+  r.z_t = s.z_t;
+  r.z_ineq = s.z_ineq;
+  return r;
 }
 
-// Vanilla piqp on the ORIGINAL strict problem (hard A, b and hard G, h).
-// z are the inequality duals (used to place penalties relative to the
-// hard problem's dual in the exact-penalty tests).
+// Reference for the ORIGINAL strict problem (hard A, b and hard G, h):
+// the elastic reference with a penalty far above any inequality dual, so
+// the slacks vanish and z_ineq is the hard problem's inequality dual
+// (used to place penalties relative to it in the exact-penalty tests).
+// converged additionally requires the slacks to actually be ~0.
 struct StrictSol {
   VectorXd x, z;
-  piqp::Status status;
+  int converged;
 };
 
-StrictSol SolveStrictPiqp(const QPData& qp, double eps = 1e-10) {
-  piqp::DenseSolver<double> solver;
-  solver.settings().eps_abs = eps;
-  solver.settings().eps_rel = 0;
-  const bool has_eq = qp.b.size() > 0;
-  solver.setup(qp.Q, qp.q,
-               has_eq ? piqp::optional<piqp::CMatRef<double>>(qp.A)
-                      : piqp::nullopt,
-               has_eq ? piqp::optional<piqp::CVecRef<double>>(qp.b)
-                      : piqp::nullopt,
-               qp.G, piqp::nullopt, qp.h, piqp::nullopt, piqp::nullopt);
-  StrictSol s;
-  s.status = solver.solve();
-  s.x = solver.result().x;
-  s.z = solver.result().z_u;
-  return s;
+StrictSol SolveStrictRef(const QPData& qp, double penalty = 1e6) {
+  const elastiqp::Solution s = TightIpmSolve(
+      qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
+  StrictSol r;
+  r.converged = s.converged == 1 &&
+                (s.t.size() == 0 || s.t.maxCoeff() < 1e-8);
+  r.x = s.x;
+  r.z = s.z_ineq;
+  return r;
 }
 
 }  // namespace
@@ -153,14 +141,14 @@ int main() {
   for (auto [n, p] : {std::pair{10, 12}, {14, 100}, {58, 500}}) {
     const QPData qp = problem_gen::Feasible(rng, n, p);
     const auto esol = TightSolve(qp.Q, qp.q, qp.G, qp.h, 1e3);
-    const StrictSol ref = SolveStrictPiqp(qp);
+    const StrictSol ref = SolveStrictRef(qp);
     const double dx = (esol.x - ref.x).lpNorm<Eigen::Infinity>();
     char name[64];
     std::snprintf(name, sizeof(name), "n=%d p=%d", n, p);
     // The l1 penalty is exact (no barrier): below saturation the
     // reconstructed slack is identically zero, not just ~1e-6.
     Check(name,
-          esol.converged == 1 && ref.status == piqp::PIQP_SOLVED &&
+          esol.converged == 1 && ref.converged == 1 &&
               dx < 1e-5 && esol.t.maxCoeff() == 0.0,
           dx, "|dx|");
   }
@@ -177,17 +165,17 @@ int main() {
     Check(name, esol.converged == 1 && res < 1e-6, res, "kkt");
   }
 
-  std::printf("PDAL: infeasible => matches vanilla piqp (expanded)\n");
+  std::printf("PDAL: infeasible => matches the IPM reference\n");
   for (auto [n, p] : {std::pair{8, 10}, {14, 100}, {58, 300}}) {
     const QPData qp = problem_gen::Infeasible(rng, n, p, p / 4);
     const VectorXd penalty = VectorXd::Constant(p, 10.0);
     const auto esol = TightSolve(qp.Q, qp.q, qp.G, qp.h, penalty);
-    const ExpandedSol ref = SolveExpanded(qp, penalty);
+    const RefSol ref = SolveRef(qp, penalty);
     const double dx = (esol.x - ref.x).lpNorm<Eigen::Infinity>();
     char name[64];
     std::snprintf(name, sizeof(name), "n=%d p=%d", n, p);
     Check(name,
-          esol.converged == 1 && ref.status == piqp::PIQP_SOLVED && dx < 1e-5 &&
+          esol.converged == 1 && ref.converged == 1 && dx < 1e-5 &&
               esol.t.maxCoeff() > 0.1,
           dx, "|dx|");
   }
@@ -199,10 +187,10 @@ int main() {
     VectorXd penalty(p);
     for (int i = 0; i < p; ++i) penalty[i] = (i % 2) ? 100.0 : 5.0;
     const auto esol = TightSolve(qp.Q, qp.q, qp.G, qp.h, penalty);
-    const ExpandedSol ref = SolveExpanded(qp, penalty);
+    const RefSol ref = SolveRef(qp, penalty);
     const double dx = (esol.x - ref.x).lpNorm<Eigen::Infinity>();
     Check("n=10 p=40 mixed penalty",
-          esol.converged == 1 && ref.status == piqp::PIQP_SOLVED && dx < 1e-5,
+          esol.converged == 1 && ref.converged == 1 && dx < 1e-5,
           dx, "|dx|");
   }
 
@@ -214,26 +202,26 @@ int main() {
     qp.Q = R.transpose() * R;  // rank n/2
     const VectorXd penalty = VectorXd::Constant(p, 10.0);
     const auto esol = TightSolve(qp.Q, qp.q, qp.G, qp.h, penalty);
-    const ExpandedSol ref = SolveExpanded(qp, penalty);
+    const RefSol ref = SolveRef(qp, penalty);
     const double dx = (esol.x - ref.x).lpNorm<Eigen::Infinity>();
     Check("n=20 (rank 10) p=60",
-          esol.converged == 1 && ref.status == piqp::PIQP_SOLVED && dx < 1e-4,
+          esol.converged == 1 && ref.converged == 1 && dx < 1e-4,
           dx, "|dx|");
   }
 
-  std::printf("PDAL: hard equalities, feasible ineqs => matches strict piqp\n");
+  std::printf("PDAL: hard equalities, feasible ineqs => matches strict reference\n");
   for (auto [n, m, p] :
        {std::tuple{14, 4, 60}, {30, 8, 200}, {58, 15, 500}}) {
     const QPData qp = problem_gen::RandomFeasible(rng, n, m, p);
     const auto esol =
         TightSolve(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, 1e3);
-    const StrictSol ref = SolveStrictPiqp(qp);
+    const StrictSol ref = SolveStrictRef(qp);
     const double dx = (esol.x - ref.x).lpNorm<Eigen::Infinity>();
     const double eq_res = (qp.A * esol.x - qp.b).lpNorm<Eigen::Infinity>();
     char name[64];
     std::snprintf(name, sizeof(name), "n=%d m=%d p=%d", n, m, p);
     Check(name,
-          esol.converged == 1 && ref.status == piqp::PIQP_SOLVED &&
+          esol.converged == 1 && ref.converged == 1 &&
               dx < 1e-5 && eq_res < 1e-6 && esol.t.maxCoeff() == 0.0,
           std::max(dx, eq_res), "|dx|,eq");
   }
@@ -245,7 +233,7 @@ int main() {
     const VectorXd penalty = VectorXd::Constant(p, 10.0);
     const auto esol =
         TightSolve(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
-    const ExpandedSol ref = SolveExpanded(qp, penalty);
+    const RefSol ref = SolveRef(qp, penalty);
     const double dx = (esol.x - ref.x).lpNorm<Eigen::Infinity>();
     const double eq_res = (qp.A * esol.x - qp.b).lpNorm<Eigen::Infinity>();
     const double kkt = problem_gen::ElasticKKTResidual(
@@ -255,7 +243,7 @@ int main() {
     std::snprintf(name, sizeof(name), "n=%d m=%d p=%d eq_res=%.1e", n, m, p,
                   eq_res);
     Check(name,
-          esol.converged == 1 && ref.status == piqp::PIQP_SOLVED &&
+          esol.converged == 1 && ref.converged == 1 &&
               dx < 1e-5 && eq_res < 1e-6 && kkt < 1e-6 &&
               esol.t.maxCoeff() > 0.1,
           dx, "|dx|");
@@ -561,10 +549,10 @@ int main() {
     const QPData qp = problem_gen::Infeasible(rng, n, p, p / 2);
     const VectorXd penalty = VectorXd::Constant(p, 10.0);
     const auto esol = TightSolve(qp.Q, qp.q, qp.G, qp.h, penalty);
-    const ExpandedSol ref = SolveExpanded(qp, penalty);
+    const RefSol ref = SolveRef(qp, penalty);
     const double dx = (esol.x - ref.x).lpNorm<Eigen::Infinity>();
     Check("n=12 p=40 all-conflict",
-          esol.converged == 1 && ref.status == piqp::PIQP_SOLVED && dx < 1e-5,
+          esol.converged == 1 && ref.converged == 1 && dx < 1e-5,
           dx, "|dx|");
   }
 
@@ -831,24 +819,24 @@ int main() {
     // dual vector, requiring no violation at all.
     const int n = 16, p = 12;
     const QPData qp = problem_gen::Feasible(rng, n, p);
-    const StrictSol ref = SolveStrictPiqp(qp);
+    const StrictSol ref = SolveStrictRef(qp);
     const double zmax = ref.z.maxCoeff();
     // Penalty above the hard dual: exact recovery, slack identically zero.
     const auto hi =
         TightSolve(qp.Q, qp.q, qp.G, qp.h, 2.0 * zmax + 1.0);
     const double dx_hi = (hi.x - ref.x).lpNorm<Eigen::Infinity>();
     Check("penalty > ||z*||: hard recovery, t == 0",
-          hi.converged == 1 && ref.status == piqp::PIQP_SOLVED &&
+          hi.converged == 1 && ref.converged == 1 &&
               dx_hi < 1e-5 && hi.t.maxCoeff() == 0.0,
           dx_hi, "|dx|");
     // Penalty below the largest dual: that row saturates, genuine
-    // violation appears; ground truth is the expanded formulation.
+    // violation appears; ground truth is the elastic reference.
     const VectorXd pen_lo = VectorXd::Constant(p, 0.5 * zmax);
     const auto lo = TightSolve(qp.Q, qp.q, qp.G, qp.h, pen_lo);
-    const ExpandedSol eref = SolveExpanded(qp, pen_lo);
+    const RefSol eref = SolveRef(qp, pen_lo);
     const double dx_lo = (lo.x - eref.x).lpNorm<Eigen::Infinity>();
-    Check("penalty < ||z*||: saturates, matches expanded",
-          lo.converged == 1 && eref.status == piqp::PIQP_SOLVED &&
+    Check("penalty < ||z*||: saturates, matches ref",
+          lo.converged == 1 && eref.converged == 1 &&
               dx_lo < 1e-5 && lo.t.maxCoeff() > 1e-6,
           dx_lo, "|dx|");
     // Numerically extreme penalty: same recovery, well conditioned.
@@ -866,7 +854,7 @@ int main() {
     // stays unique (strictly convex Q) and must still be found.
     const int n = 14, p = 40;
     const QPData qp = problem_gen::Feasible(rng, n, p);
-    const StrictSol ref = SolveStrictPiqp(qp);
+    const StrictSol ref = SolveStrictRef(qp);
     Eigen::Index imax;
     const double zmax = ref.z.maxCoeff(&imax);
     VectorXd pen = VectorXd::Constant(p, 2.0 * zmax + 1.0);

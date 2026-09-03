@@ -71,9 +71,6 @@ Testing/
 __pycache__/
 *.pyc
 
-# benchmark CSV/figure output
-benchmarks/results/
-
 # other
 untracked/
 .vscode/

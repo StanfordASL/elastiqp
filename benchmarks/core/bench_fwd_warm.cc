@@ -8,7 +8,7 @@
 // This benchmark maps warm vs cold across the same grid as
 // bench_relax_warm (problem size, structure, penalty tier, drift size
 // and composition, on random drifting trajectories from
-// common/drift_traj.hpp), and doubles as a regression watch for
+// elastiqp tests/support/drift_traj.hpp), and doubles as a regression watch for
 // warm-start-specific pathologies: the rst column counts ticks where
 // the BCL cold reset fired (Settings::cold_reset_limit) -- the
 // mechanism behind the 2026-08 warm-solve stall, which fired only on
