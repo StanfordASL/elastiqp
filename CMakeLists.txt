@@ -102,7 +102,9 @@ if(ELASTIQP_BUILD_PYTHON)
     if(NB_RESULT EQUAL 0)
       list(APPEND CMAKE_PREFIX_PATH "${NB_CMAKE_DIR}")
       find_package(nanobind CONFIG REQUIRED)
-      nanobind_add_module(elastiqp_ext NB_STATIC bindings/bindings.cc)
+      # NOMINSIZE: nanobind defaults to -Os, which would override -O3 for the
+      # solver code compiled into the module (measured ~2x slower solves).
+      nanobind_add_module(elastiqp_ext NB_STATIC NOMINSIZE bindings/bindings.cc)
       set_target_properties(elastiqp_ext PROPERTIES OUTPUT_NAME _core)
       target_link_libraries(elastiqp_ext PRIVATE elastiqp::elastiqp)
       if(SKBUILD)
