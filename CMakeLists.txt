@@ -71,6 +71,11 @@ if(ELASTIQP_BUILD_TESTS)
   # see tests/test_gap_creep.cc).
   elastiqp_test(test_gap_creep)
   add_test(NAME elastiqp.gap_creep COMMAND test_gap_creep)
+
+  # Ruiz equilibration: column/objective drift through the automatic
+  # re-equilibration, long-horizon oscillating drift, user-frame reporting.
+  elastiqp_test(test_ruiz)
+  add_test(NAME elastiqp.ruiz COMMAND test_ruiz)
 endif()
 
 # --- Python bindings + JAX FFI -----------------------------------------------

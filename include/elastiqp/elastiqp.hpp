@@ -310,14 +310,33 @@ class Solver {
   // the drift exceeds settings.ruiz_refresh_ratio.
   void reequilibrate() {
     if (!ruiz_) return;
+    if (scaling_pass(dxw_, dew_, diw_) <= settings.ruiz_tol) return;
     const VectorXd dx0 = dx_s_, de0 = de_s_, di0 = di_s_;
     const double c0 = c_s_;
-    equilibrate();  // incremental: continues from the current scaled data
-    if (c_s_ == c0 && (dx_s_.array() == dx0.array()).all() &&
-        (de_s_.array() == de0.array()).all() &&
-        (di_s_.array() == di0.array()).all()) {
-      return;
+    // Undo the current scaling and equilibrate from identity, exactly as
+    // setup() would. Continuing incrementally from the scaled data is NOT
+    // equivalent: the max-norm fixed point of the constraint blocks is only
+    // determined up to (E, D) -> (a E, D / a), and only Q pins the split. A
+    // row that grew dominates its columns and pushes half its scale into
+    // dx; when it shrinks back other rows dominate and nothing pushes it
+    // out, so repeated refreshes leak the row scale into the column factors
+    // without bound (scaled Q -> 0, tests/test_ruiz.cc).
+    const VectorXd ix = dx0.cwiseInverse(), ie = de0.cwiseInverse(),
+                   ii = di0.cwiseInverse();
+    Q_ = (ix.asDiagonal() * Q_ * ix.asDiagonal()) / c0;
+    q_ = q_.cwiseProduct(ix) / c0;
+    if (m_ > 0) {
+      A_ = ie.asDiagonal() * A_ * ix.asDiagonal();
+      b_ = b_.cwiseProduct(ie);
     }
+    G_ = ii.asDiagonal() * G_ * ix.asDiagonal();
+    h_ = h_.cwiseProduct(ii);
+    penalty_ = penalty_.cwiseProduct(di0) / c0;
+    dx_s_.setOnes();
+    de_s_.setOnes();
+    di_s_.setOnes();
+    c_s_ = 1.0;
+    equilibrate();
     // Old scaled frame -> new scaled frame. Primal x scales like 1/dx,
     // t (and s) like di, duals like c/de and c/di.
     const VectorXd dx = dx_s_.cwiseQuotient(dx0);
@@ -684,9 +703,9 @@ class Solver {
 
   // Ruiz equilibration of the stacked (Q, A, G) system
   // proxqp ruiz logic + piqp limit_scaling + elastic penalty scaling.
-  // Incremental: starts from the currently stored (possibly already scaled)
-  // data and accumulates into the cumulative factors, so it doubles as the
-  // refresh step of reequilibrate().
+  // Runs on the currently stored data and accumulates into the cumulative
+  // factors; both setup() and reequilibrate() call it on unscaled data with
+  // identity factors (see reequilibrate() for why not incrementally).
   void equilibrate() {
     VectorXd &dx = dxw_, &de = dew_, &di = diw_;
     for (int iter = 0; iter < settings.ruiz_max_iter; ++iter) {
