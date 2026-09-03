@@ -195,7 +195,7 @@ def main():
         return w_loss @ s.x + w_t @ s.t
 
     def loss_relaxed(Q_, q_, A_, b_, G_, h_, penalty_, kap=kappa):
-        out = elastiqp.jax._ffi_pdal_solve(
+        out = elastiqp.jax._ffi_solve(
             Q_, q_, A_, b_, G_, h_, penalty_, 1e-11, 300, False, "sequential", kap
         )
         xr, tr = out[5], out[6]
@@ -303,7 +303,7 @@ def main():
     # relaxation would otherwise mean silently wrong gradients). s1 = t and
     # s2 = h + t - Gx are the slacks of t >= 0 and Gx - t <= h; s2 is
     # reconstructed from x, so it carries the O(tol) primal residual.
-    out = elastiqp.jax._ffi_pdal_solve(
+    out = elastiqp.jax._ffi_solve(
         *args, 1e-11, 300, False, "sequential", kappa
     )
     xr, tr, z1r, z2r, info = out[5], out[6], out[8], out[9], out[10]
@@ -322,7 +322,7 @@ def main():
     # silently: an absurd kappa converges the solve (info[0]) but stalls the
     # relaxation (info[2]), and solve() folds that into converged on the
     # differentiated path.
-    out = elastiqp.jax._ffi_pdal_solve(
+    out = elastiqp.jax._ffi_solve(
         *args, 1e-11, 300, False, "sequential", 1e8
     )
     tight_ok, relax_bad = float(out[10][0]) == 1.0, float(out[10][2]) == 0.0
@@ -426,8 +426,8 @@ def main():
         f"|dx|={dx:.1e}",
     )
 
-    jit_pdal = jax.jit(lambda q_: elastiqp.jax.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx))
-    dj = float(jnp.abs(jit_pdal(qx).x - ps.x).max())
+    jit_solve = jax.jit(lambda q_: elastiqp.jax.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx))
+    dj = float(jnp.abs(jit_solve(qx).x - ps.x).max())
     check("jit matches eager (infeasible)", dj == 0.0, f"|dx|={dj:.1e}")
 
     qs = qx + 0.01 * np.random.default_rng(5).standard_normal((8, 14))

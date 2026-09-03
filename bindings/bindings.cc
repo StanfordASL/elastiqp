@@ -333,7 +333,7 @@ NB_MODULE(_core, m) {
   //   (x, t, y, z_t, z_ineq, xr, tr, yr, z_t_r, z_ineq_r, info)
   // with info = [converged, iters, relax_converged] as float64.
   m.def(
-      "_pdal_solve_relaxed",
+      "_solve_relaxed",
       [](const Eigen::MatrixXd& Q, const Eigen::VectorXd& q,
          const Eigen::MatrixXd& A, const Eigen::VectorXd& b,
          const Eigen::MatrixXd& G, const Eigen::VectorXd& h,
@@ -365,7 +365,7 @@ NB_MODULE(_core, m) {
 
   // Reverse-mode implicit differentiation of the elastic KKT system at a
   // relaxed point (include/elastiqp/kkt_vjp.hpp). Pass the relaxed block of
-  // _pdal_solve_relaxed as (x, t, y, z_t, z_ineq) and the loss cotangents;
+  // _solve_relaxed as (x, t, y, z_t, z_ineq) and the loss cotangents;
   // empty cotangent vectors are treated as zero. Returns
   //   (Q_bar, q_bar, A_bar, b_bar, G_bar, h_bar, penalty_bar).
   m.def(

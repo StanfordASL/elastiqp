@@ -62,7 +62,7 @@ def _find_library():
 
 _lib = ctypes.cdll.LoadLibrary(str(_find_library()))
 jax.ffi.register_ffi_target(
-    "elastiqp_pdal_solve", jax.ffi.pycapsule(_lib.ElastiqpPdalSolve), platform="cpu"
+    "elastiqp_solve", jax.ffi.pycapsule(_lib.ElastiqpSolve), platform="cpu"
 )
 
 
@@ -76,7 +76,7 @@ class Result(NamedTuple):
     iters: jax.Array
 
 
-def _ffi_pdal_solve(
+def _ffi_solve(
     Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, vmap_method, target_kappa
 ):
     n = Q.shape[-1]
@@ -100,7 +100,7 @@ def _ffi_pdal_solve(
         vec(p),
         vec(3),
     ]
-    call = jax.ffi.ffi_call("elastiqp_pdal_solve", out_types, vmap_method=vmap_method)
+    call = jax.ffi.ffi_call("elastiqp_solve", out_types, vmap_method=vmap_method)
     return call(
         Q,
         q,
@@ -224,7 +224,7 @@ def _solve(
     Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, vmap_method, target_kappa
 ):
     # Tight solution when not differentiating: no relaxation runs.
-    out = _ffi_pdal_solve(
+    out = _ffi_solve(
         Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, vmap_method, 0.0
     )
     return tuple(out[:5]) + (out[10],)  # solution + info
@@ -240,7 +240,7 @@ def _solve_fwd(
             "the exact KKT derivative is undefined. Set target_kappa > 0 "
             "(e.g. 1e-3) for log-barrier smoothed gradients"
         )
-    out = _ffi_pdal_solve(
+    out = _ffi_solve(
         Q,
         q,
         A,

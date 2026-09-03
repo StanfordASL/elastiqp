@@ -183,7 +183,7 @@ def main():
         return s.x @ w_loss + s.t @ w_t
 
     def loss_relaxed(Q_, q_, A_, b_, G_, h_, penalty_, kap=kappa):
-        out = torch.ops.elastiqp.pdal_solve(
+        out = torch.ops.elastiqp.solve(
             Q_, q_, A_, b_, G_, h_, penalty_, 1e-11, 300, False, kap
         )
         xr, tr = out[5], out[6]
@@ -275,13 +275,13 @@ def main():
     # The relaxation runs only when differentiating: a no-grad solve and a
     # grad-enabled solve report the same iters, and the relaxed block of the
     # raw op is a copy of the tight block at kappa = 0.
-    out0 = torch.ops.elastiqp.pdal_solve(*args, 1e-11, 300, False, 0.0)
+    out0 = torch.ops.elastiqp.solve(*args, 1e-11, 300, False, 0.0)
     check(
         "kappa=0: relaxed block == tight block",
         all(torch.equal(out0[i], out0[i + 5]) for i in range(5)),
         "",
     )
-    out = torch.ops.elastiqp.pdal_solve(*args, 1e-11, 300, False, kappa)
+    out = torch.ops.elastiqp.solve(*args, 1e-11, 300, False, kappa)
     xr, tr, z1r, z2r, info = out[5], out[6], out[8], out[9], out[10]
     s2r = args[5] + tr - args[4] @ xr
     comp = max(maxabs(tr * z1r - kappa), maxabs(s2r * z2r - kappa))
@@ -292,7 +292,7 @@ def main():
     )
 
     # A stalled relaxation is reported through converged on the grad path.
-    out = torch.ops.elastiqp.pdal_solve(*args, 1e-11, 300, False, 1e8)
+    out = torch.ops.elastiqp.solve(*args, 1e-11, 300, False, 1e8)
     tight_ok, relax_bad = float(out[10][0]) == 1.0, float(out[10][2]) == 0.0
     q_ = args[1].clone().requires_grad_(True)
     s = elastiqp.torch.solve(

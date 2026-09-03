@@ -1,7 +1,7 @@
 """ElastiQP PyTorch interface
 
 The torch analogue of the JAX FFI (elastiqp.jax): the solve is registered as
-a custom operator (``torch.ops.elastiqp.pdal_solve``), so it composes with
+a custom operator (``torch.ops.elastiqp.solve``), so it composes with
 autograd and torch.compile as an opaque primitive rather than as unrolled
 solver iterations, and the forward and backward passes each cross into C++
 exactly once per problem.
@@ -126,7 +126,7 @@ def _solve_impl(
     batch = tuple(Q.shape[:-2])
     n, m, p = Q.shape[-1], b.shape[-1], h.shape[-1]
     if not batch:  # fast path: no reshapes, C++ outputs handed to torch as-is
-        res = _core._pdal_solve_relaxed(
+        res = _core._solve_relaxed(
             _np(Q), _np(q), _np(A), _np(b), _np(G), _np(h), _np(penalty),
             eps_abs, max_iter, ruiz, target_kappa,
         )
@@ -140,7 +140,7 @@ def _solve_impl(
     dims = (n, p, m, p, p, n, p, m, p, p, 3)
     out = [np.empty((nb, d)) for d in dims]
     for i in range(nb):
-        res = _core._pdal_solve_relaxed(
+        res = _core._solve_relaxed(
             Qf[i], qf[i], Af[i], bf[i], Gf[i], hf[i], pf[i],
             eps_abs, max_iter, ruiz, target_kappa,
         )
@@ -149,12 +149,12 @@ def _solve_impl(
     return tuple(torch.from_numpy(o).reshape(batch + (d,)) for o, d in zip(out, dims))
 
 
-_pdal_solve = torch.library.custom_op(
-    "elastiqp::pdal_solve", _solve_impl, mutates_args=(), device_types="cpu"
+_solve_op = torch.library.custom_op(
+    "elastiqp::solve", _solve_impl, mutates_args=(), device_types="cpu"
 )
 
 
-@_pdal_solve.register_fake
+@_solve_op.register_fake
 def _(Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, target_kappa):
     batch = Q.shape[:-2]
     n, m, p = Q.shape[-1], b.shape[-1], h.shape[-1]
@@ -265,11 +265,11 @@ def _vmap_rule(call, info, in_dims, Q, q, A, b, G, h, penalty, *opts):
     return out, tuple(0 for _ in out)
 
 
-_pdal_solve.register_autograd(
+_solve_op.register_autograd(
     lambda ctx, *grads: _backward(ctx, grads, _kkt_vjp), setup_context=_setup_context
 )
-_pdal_solve.register_vmap(
-    lambda info, in_dims, *args: _vmap_rule(_pdal_solve, info, in_dims, *args)
+_solve_op.register_vmap(
+    lambda info, in_dims, *args: _vmap_rule(_solve_op, info, in_dims, *args)
 )
 
 
@@ -451,7 +451,7 @@ def solve(
 
     # Under torch.compile the solve must be an opaque custom op (with a
     # shape function); eagerly, the autograd.Function is much cheaper.
-    call = _pdal_solve if torch.compiler.is_compiling() else _Solve.apply
+    call = _solve_op if torch.compiler.is_compiling() else _Solve.apply
     if device.type != "cpu":
         args = tuple(x.cpu() for x in args)
     out = call(*args, float(eps_abs), int(max_iter), bool(ruiz), kappa)

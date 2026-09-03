@@ -41,7 +41,7 @@ using RowMajorMatrix =
 using MapMatrix = Eigen::Map<const RowMajorMatrix>;
 using MapVector = Eigen::Map<const Eigen::VectorXd>;
 
-ffi::Error ElastiqpPdalImpl(
+ffi::Error ElastiqpSolveImpl(
     double eps_abs, int64_t max_iter, int64_t ruiz, double target_kappa,
     ffi::Buffer<ffi::F64> Q, ffi::Buffer<ffi::F64> q, ffi::Buffer<ffi::F64> A,
     ffi::Buffer<ffi::F64> b, ffi::Buffer<ffi::F64> G, ffi::Buffer<ffi::F64> h,
@@ -95,7 +95,7 @@ ffi::Error ElastiqpPdalImpl(
 
 }  // namespace
 
-XLA_FFI_DEFINE_HANDLER_SYMBOL(ElastiqpPdalSolve, ElastiqpPdalImpl,
+XLA_FFI_DEFINE_HANDLER_SYMBOL(ElastiqpSolve, ElastiqpSolveImpl,
                               ffi::Ffi::Bind()
                                   .Attr<double>("eps_abs")
                                   .Attr<int64_t>("max_iter")
