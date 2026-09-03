@@ -327,6 +327,43 @@ def main():
     )
     rq.reequilibrate()
     check("reequilibrate() no-op when equilibrated", rq.solve().iters == 0, "")
+    # Objective scale through set_Q: x invariant, duals scale, refresh fires;
+    # and the relax() warm iterate is carried through the refresh
+    rq.set_G(Gp)
+    rq.set_h(hp)
+    rq.set_penalty(np.full(60, 10.0))
+    base = rq.solve()
+    rbase = rq.relax(1e-3)
+    alpha = 1e5
+    rq.set_Q(alpha * Qp)
+    rq.set_q(alpha * qp_)
+    rq.set_penalty(np.full(60, alpha * 10.0))
+    drift_q = rq.scaling_drift()
+    rs = rq.solve()
+    rr = rq.relax(1e-3)
+    fresh = elastiqp.Solver()
+    fresh.settings.ruiz = True
+    fresh.settings.eps_abs = 1e-8
+    fresh.setup(alpha * Qp, alpha * qp_, Gp, hp, alpha * 10.0, A=Ap, b=bp)
+    fresh.solve()
+    fr = fresh.relax(1e-3)
+    dx = np.abs(np.asarray(rs.x) - np.asarray(base.x)).max()
+    dz = np.abs(np.asarray(rs.z_ineq) - alpha * np.asarray(base.z_ineq)).max() / alpha
+    rdx = np.abs(np.asarray(rr.x) - np.asarray(fr.x)).max()
+    check(
+        "set_Q objective scale: refresh, x invariant, duals scale",
+        drift_q > rq.settings.ruiz_refresh_ratio
+        and rq.scaling_drift() <= rq.settings.ruiz_refresh_ratio
+        and rs.converged == 1
+        and dx < 1e-5
+        and dz < 1e-5,
+        f"drift {drift_q:.1e} |dx|={dx:.1e} |dz|/a={dz:.1e}",
+    )
+    check(
+        "relax() through the refresh matches fresh setup",
+        rbase.converged == 1 and rr.converged == 1 and fr.converged == 1 and rdx < 1e-5,
+        f"|dx|={rdx:.1e}",
+    )
 
     print("Solver.relax: kappa relaxation (smoothed differentiation point)")
     kappa = 1e-3

@@ -19,7 +19,13 @@
 //     frame: they must match an independent recomputation on the unscaled
 //     data, and relative termination (eps_abs = 0) must work under Ruiz;
 // (5) a drifting matrix update before any solve (no warm iterate) and on top
-//     of a pending set_warm_start() must not corrupt the remapped state.
+//     of a pending set_warm_start() must not corrupt the remapped state;
+// (6) limit_scaling through the update path: a row exploding past the 1e4
+//     clamp in one tick, and a row decaying to the noise floor after setup;
+// (7) the certified equality-infeasibility gate across a refresh, and the
+//     frame independence of eq_infeasibility();
+// (8) semantics pins: ruiz_refresh_ratio <= 1 refreshes on any drift past
+//     ruiz_tol, and settings.ruiz is latched at setup().
 
 #include <algorithm>
 #include <cmath>
@@ -421,6 +427,163 @@ int main() {
     const double dx2 = RelDiff(ref.x, s2.x);
     Check("explicit warm start through refresh",
           s2.converged == 1 && s2.iters <= 2 && dx2 < 1e-5, s2.iters, "iters");
+  }
+
+  std::printf("Ruiz: limit_scaling through the update path\n");
+  {
+    // Row scaling by s with penalty / s leaves the elastic QP unchanged, so
+    // the base solution is the reference throughout (q fixed).
+    const int n = 16, m = 4, p = 60;
+    const QPData qp = problem_gen::InfeasibleEq(rng, n, m, p, p / 4);
+    const VectorXd penalty = VectorXd::Constant(p, 10.0);
+    elastiqp::Solver solver;
+    solver.settings = TightSettings();
+    solver.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
+    const auto s0 = solver.solve();
+
+    // One row explodes by 1e7: the per-pass factor is clamped to 0.01, so
+    // the refresh needs several passes to bring the row back to O(1)
+    MatrixXd G = qp.G;
+    VectorXd h = qp.h, pen = penalty;
+    const int i_big = 3;
+    G.row(i_big) *= 1e7;
+    h[i_big] *= 1e7;
+    pen[i_big] /= 1e7;
+    solver.set_G(G);
+    solver.set_h(h);
+    solver.set_penalty(pen);
+    const double drift_big = solver.scaling_drift();
+    const auto s1 = solver.solve();
+    const double dx1 = RelDiff(s0.x, s1.x);
+    std::printf("  row x1e7: drift %.1e -> %.2f iters=%d\n", drift_big,
+                solver.scaling_drift(), s1.iters);
+    Check("row x1e7 refresh reaches O(1)",
+          drift_big >= 1e4 && solver.scaling_drift() < 1.5 &&
+              s0.converged == 1 && s1.converged == 1 && dx1 < 1e-5,
+          dx1, "|dx|");
+
+    // A different row decays to the noise floor (constraint and rhs both
+    // ~1e-13, penalty unchanged): limit_scaling must leave it alone, the
+    // drift must not report it, and the solution must match the problem
+    // without that row
+    const int i_noise = 7;
+    std::normal_distribution<double> dist;
+    for (int j = 0; j < n; ++j) G(i_noise, j) = 1e-13 * dist(rng);
+    h[i_noise] = 1e-13 * dist(rng);
+    solver.set_G(G);
+    solver.set_h(h);
+    const double drift_noise = solver.scaling_drift();
+    const auto s2 = solver.solve();
+    MatrixXd Gr(p - 1, n);
+    VectorXd hr(p - 1), pr(p - 1);
+    Gr << G.topRows(i_noise), G.bottomRows(p - i_noise - 1);
+    hr << h.head(i_noise), h.tail(p - i_noise - 1);
+    pr << pen.head(i_noise), pen.tail(p - i_noise - 1);
+    const auto ref = elastiqp::Solve(qp.Q, qp.q, qp.A, qp.b, Gr, hr, pr,
+                                     TightSettings());
+    const double dx2 = RelDiff(ref.x, s2.x);
+    std::printf("  row -> noise: drift %.2f iters=%d\n", drift_noise, s2.iters);
+    Check("noise row ignored by drift, solved",
+          drift_noise < 1.5 && s2.converged == 1 && ref.converged == 1 &&
+              dx2 < 1e-5,
+          dx2, "|dx|");
+  }
+
+  std::printf("Ruiz: equality-infeasibility gate across a refresh\n");
+  {
+    // The certificate is computed on unscaled (A, b): it must fire through a
+    // drift-triggered refresh, report a frame-independent bound, and leave
+    // the warm start usable once b is consistent again.
+    const int n = 10, p = 20;
+    const QPData qp = problem_gen::Feasible(rng, n, p);
+    MatrixXd Ai(2, n);
+    Ai.row(0) = problem_gen::Randn(rng, 1, n);
+    Ai.row(1) = Ai.row(0);  // rank-deficient by construction
+    VectorXd bc(2), bi(2);
+    bc << 0.5, 0.5;
+    bi << 0.0, 1.0;
+    // The refresh is tripped through G (row scale s with penalty / s keeps
+    // the QP, and so the warm iterate, unchanged); A is re-set unscaled
+    const double s = 100.0;
+    elastiqp::Solver on, off;  // library defaults (eps_rel = 0 gates)
+    on.settings.ruiz = true;
+    on.setup(qp.Q, qp.q, Ai, bc, qp.G, qp.h, 10.0);
+    off.setup(qp.Q, qp.q, Ai, bi, qp.G, qp.h, 10.0);
+    const auto good = on.solve();
+    on.set_G(s * qp.G);
+    on.set_h(s * qp.h);
+    on.set_penalty(VectorXd::Constant(p, 10.0 / s));
+    on.set_A(Ai);
+    on.set_b(bi);
+    const double drift = on.scaling_drift();
+    const auto fail = on.solve();
+    const auto off_fail = off.solve();
+    const double lb_err =
+        std::abs(on.eq_infeasibility() - off.eq_infeasibility()) /
+        off.eq_infeasibility();
+    Check("gate fires through refresh",
+          good.status == elastiqp::Status::kSolved && drift > 4 &&
+              on.scaling_drift() < 1.5 &&
+              fail.status == elastiqp::Status::kInfeasible && fail.iters == 0 &&
+              off_fail.status == elastiqp::Status::kInfeasible,
+          on.eq_infeasibility(), "eq_infeas");
+    Check("eq_infeasibility() frame-independent", lb_err < 1e-9, lb_err,
+          "rel");
+    on.set_b(bc);
+    const auto again = on.solve();
+    Check("warm start survives gated tick",
+          again.status == elastiqp::Status::kSolved &&
+              again.iters <= good.iters && on.eq_infeasibility() < 1e-10,
+          again.iters, "iters");
+  }
+
+  std::printf("Ruiz: settings semantics\n");
+  {
+    const int n = 12, m = 3, p = 40;
+    const QPData qp = problem_gen::InfeasibleEq(rng, n, m, p, p / 4);
+    MatrixXd G = qp.G;
+    G.row(0) *= 1.05;  // drift 1.05: under the default ratio, stays
+
+    // ruiz_refresh_ratio <= 1: any drift past ruiz_tol refreshes
+    elastiqp::Solver eager, lazy;
+    eager.settings = TightSettings();
+    lazy.settings = TightSettings();
+    eager.settings.ruiz_refresh_ratio = 1.0;
+    eager.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, 10.0);
+    lazy.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, 10.0);
+    eager.set_G(G);
+    lazy.set_G(G);
+    const double before = eager.scaling_drift();
+    eager.solve();
+    lazy.solve();
+    Check("ratio <= 1 refreshes on any drift",
+          before > 1.01 && eager.scaling_drift() < 1.005 &&
+              lazy.scaling_drift() > 1.01,
+          eager.scaling_drift(), "drift");
+
+    // settings.ruiz is latched at setup(): flipping it afterwards changes
+    // nothing until the next setup()
+    elastiqp::Solver late, off, early;
+    late.settings = TightSettings();
+    off.settings = TightSettings();
+    early.settings = TightSettings();
+    late.settings.ruiz = false;
+    off.settings.ruiz = false;
+    late.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, 10.0);
+    off.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, 10.0);
+    late.settings.ruiz = true;
+    late.reequilibrate();
+    const auto sl = late.solve();
+    const auto so = off.solve();
+    Check("ruiz=true after setup() is inert",
+          late.scaling_drift() == 1.0 && sl.iters == so.iters &&
+              InfNorm(sl.x - so.x) == 0.0,
+          sl.iters, "iters");
+    early.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, 10.0);
+    early.settings.ruiz = false;
+    early.set_G(G);
+    Check("ruiz=false after setup() keeps scaling",
+          early.scaling_drift() > 1.01, early.scaling_drift(), "drift");
   }
 
   return g_all_ok ? 0 : 1;
