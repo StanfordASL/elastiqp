@@ -79,6 +79,10 @@ pip install .
 
 Same as above, but specify the `[jax]` option to pull in the the JAX dependencies and FFI, i.e. `pip install "elastiqp[jax]"`. The JAX interface can then be imported via `elastiqp.jax` 
 
+### PyTorch
+
+Same as above with the `[torch]` option, i.e. `pip install "elastiqp[torch]"`. The PyTorch interface can then be imported via `elastiqp.torch`. It needs no extra compiled code beyond the standard bindings (the solve is registered as a torch custom operator on top of them), so it also works from a source build that was configured without torch installed.
+
 Note: if using UV, you can directly replace the above `pip` commands with `uv pip`
 
 ## Usage
@@ -155,7 +159,32 @@ batch_q = jnp.tile(q, (10, 1))
 batch_ls = vmap_loss(batch_q)
 ```
 
-For runnable Python/JAX examples, see the `examples` folder
+### PyTorch
+
+```python
+import elastiqp.torch
+
+# Same API again; tensors in, float64 tensors out (solved on the CPU)
+sol = elastiqp.torch.solve(Q, q, G, h, penalty, A=A, b=b)
+
+# Compatible with autograd (implicit differentiation of the KKT system,
+# smoothed at target_kappa=1e-3 by default; target_kappa=0 forbids it)
+q_ = q.clone().requires_grad_(True)
+loss = torch.sum(elastiqp.torch.solve(Q, q_, G, h, penalty, A=A, b=b).x ** 2)
+loss.backward()
+grad_q = q_.grad
+
+# Compatible with torch.compile: the solve is an opaque custom op
+compiled = torch.compile(lambda q_: elastiqp.torch.solve(Q, q_, G, h, penalty, A=A, b=b).x)
+
+# Batched: leading batch dims solve one problem per entry (or use torch.vmap)
+batch_x = elastiqp.torch.solve(Q, q.expand(10, -1), G, h, penalty, A=A, b=b).x
+
+# torch.func transforms work too (grad, jacrev, vmap(grad))
+J = torch.func.jacrev(lambda q_: elastiqp.torch.solve(Q, q_, G, h, penalty, A=A, b=b).x)(q)
+```
+
+For runnable Python/JAX/PyTorch examples, see the `examples` folder
 
 ## Benchmarks
 
@@ -164,7 +193,7 @@ See [StanfordASL/elastiqp_benchmarks](https://github.com/StanfordASL/elastiqp_be
 
 ## Assorted Tips
 
-- If differentiating through problems with large penalty weights (roughly >= 1e4), or for badly row-scaled constraints (mixed units), consider turning on Ruiz equilibration. In Python/JAX: `ruiz=True`; in C++: `settings.ruiz = true`. The scaling is computed at `setup()` and carried through the `set_*` updates (still exact, only the conditioning drifts); `solve()` re-equilibrates automatically once a matrix update has drifted a scaled row/column norm past `settings.ruiz_refresh_ratio` (4x by default), keeping the warm start. `scaling_drift()` reports the current drift and `reequilibrate()` refreshes on demand, so a control loop never needs a second `setup()` for this.
+- If differentiating through problems with large penalty weights (roughly >= 1e4), or for badly row-scaled constraints (mixed units), consider turning on Ruiz equilibration. In Python/JAX/PyTorch: `ruiz=True`; in C++: `settings.ruiz = true`. The scaling is computed at `setup()` and carried through the `set_*` updates (still exact, only the conditioning drifts); `solve()` re-equilibrates automatically once a matrix update has drifted a scaled row/column norm past `settings.ruiz_refresh_ratio` (4x by default), keeping the warm start. `scaling_drift()` reports the current drift and `reequilibrate()` refreshes on demand, so a control loop never needs a second `setup()` for this.
 
 
 ## Acknowledgments

@@ -124,9 +124,11 @@ def _kkt_bwd(res, ct):
     """Implicit differentiation of the elastic KKT conditions.
 
     MIRROR: include/elastiqp/kkt_vjp.hpp is the C++ port of this function
-    (for gradients without JAX); keep the two in sync. tests/test_pdal.cc
-    pins the C++ side against finite differences of the relaxed map,
-    tests/test_jax_ffi.py pins this one.
+    (for gradients without JAX) and _vjp_torch in python/elastiqp/torch.py
+    the torch port (for torch.func transforms); keep the three in sync.
+    tests/test_pdal.cc pins the C++ side against finite differences of the
+    relaxed map, tests/test_jax_ffi.py pins this one, tests/test_torch.py
+    pins the torch one against the C++ path.
 
     Below, z1 and z2 are the duals Result calls z_t and z_ineq; the numeric
     subscripts keep the block algebra (g4/g5, v2/v5, rb1/rb2) readable.

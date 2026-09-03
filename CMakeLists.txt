@@ -129,6 +129,17 @@ if(ELASTIQP_BUILD_PYTHON)
         else()
           message(STATUS "elastiqp: jax not importable -- skipping the jax_ffi test")
         endif()
+        execute_process(
+          COMMAND "${Python_EXECUTABLE}" -c "import torch"
+          RESULT_VARIABLE TORCH_IMPORT_RESULT OUTPUT_QUIET ERROR_QUIET)
+        if(TORCH_IMPORT_RESULT EQUAL 0)
+          add_test(NAME elastiqp.torch
+            COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_torch.py)
+          set_tests_properties(elastiqp.torch PROPERTIES
+            ENVIRONMENT "${_elastiqp_test_env}")
+        else()
+          message(STATUS "elastiqp: torch not importable -- skipping the torch test")
+        endif()
       endif()
     else()
       message(STATUS "elastiqp: Python found but nanobind not importable -- skipping bindings")

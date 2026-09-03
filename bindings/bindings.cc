@@ -3,14 +3,17 @@
 #include <nanobind/eigen/dense.h>
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
+#include <nanobind/stl/tuple.h>
 #include <nanobind/stl/variant.h>
 
+#include <algorithm>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <variant>
 
 #include "elastiqp/elastiqp.hpp"
+#include "elastiqp/kkt_vjp.hpp"
 
 namespace nb = nanobind;
 using elastiqp::Settings;
@@ -321,4 +324,71 @@ NB_MODULE(_core, m) {
       nb::arg("penalty"), nb::kw_only(), nb::arg("A") = nb::none(),
       nb::arg("b") = nb::none(), nb::arg("eps_abs") = 1e-5,
       nb::arg("max_iter") = 250, nb::arg("ruiz") = false, solve_doc);
+
+  // --- differentiation primitives (used by elastiqp.torch) -----------------
+  //
+  // Mirror of the JAX FFI handler (bindings/jax_ffi.cc): one cold solve, plus
+  // the kappa-relaxed central point when target_kappa > 0, in a single call
+  // so an autograd framework pays one crossing per solve. Returns the tuple
+  //   (x, t, y, z_t, z_ineq, xr, tr, yr, z_t_r, z_ineq_r, info)
+  // with info = [converged, iters, relax_converged] as float64.
+  m.def(
+      "_pdal_solve_relaxed",
+      [](const Eigen::MatrixXd& Q, const Eigen::VectorXd& q,
+         const Eigen::MatrixXd& A, const Eigen::VectorXd& b,
+         const Eigen::MatrixXd& G, const Eigen::VectorXd& h,
+         const Eigen::VectorXd& penalty, double eps_abs, int max_iter,
+         bool ruiz, double target_kappa) {
+        Solver solver;
+        solver.settings.eps_abs = eps_abs;
+        solver.settings.eps_duality_gap_abs = eps_abs;
+        solver.settings.max_outer_iter = max_iter;
+        solver.settings.ruiz = ruiz;
+        solver.setup(Q, q, A, b, G, h, penalty);
+        const Solution sol = solver.solve();
+        // Same relax tolerance rule as the JAX FFI: decoupled from eps_abs,
+        // since the VJP's accuracy is set by this residual.
+        const Solution& rsol =
+            (target_kappa > 0 && h.size() > 0)
+                ? solver.relax(target_kappa, std::min(eps_abs, 1e-6), 50)
+                : sol;
+        Eigen::Vector3d info(static_cast<double>(sol.converged),
+                             static_cast<double>(sol.iters),
+                             static_cast<double>(rsol.converged));
+        return std::make_tuple(sol.x, sol.t, sol.y, sol.z_t, sol.z_ineq,
+                               rsol.x, rsol.t, rsol.y, rsol.z_t, rsol.z_ineq,
+                               Eigen::VectorXd(info));
+      },
+      nb::arg("Q"), nb::arg("q"), nb::arg("A"), nb::arg("b"), nb::arg("G"),
+      nb::arg("h"), nb::arg("penalty"), nb::arg("eps_abs"),
+      nb::arg("max_iter"), nb::arg("ruiz"), nb::arg("target_kappa"));
+
+  // Reverse-mode implicit differentiation of the elastic KKT system at a
+  // relaxed point (include/elastiqp/kkt_vjp.hpp). Pass the relaxed block of
+  // _pdal_solve_relaxed as (x, t, y, z_t, z_ineq) and the loss cotangents;
+  // empty cotangent vectors are treated as zero. Returns
+  //   (Q_bar, q_bar, A_bar, b_bar, G_bar, h_bar, penalty_bar).
+  m.def(
+      "_kkt_vjp",
+      [](const Eigen::MatrixXd& Q, const Eigen::MatrixXd& A,
+         const Eigen::MatrixXd& G, const Eigen::VectorXd& h,
+         const Eigen::VectorXd& x, const Eigen::VectorXd& t,
+         const Eigen::VectorXd& y, const Eigen::VectorXd& z_t,
+         const Eigen::VectorXd& z_ineq, const Eigen::VectorXd& ct_x,
+         const Eigen::VectorXd& ct_t, const Eigen::VectorXd& ct_y,
+         const Eigen::VectorXd& ct_z_t, const Eigen::VectorXd& ct_z_ineq) {
+        Solution sol;
+        sol.x = x;
+        sol.t = t;
+        sol.y = y;
+        sol.z_t = z_t;
+        sol.z_ineq = z_ineq;
+        elastiqp::Cotangents ct{ct_x, ct_t, ct_y, ct_z_t, ct_z_ineq};
+        const elastiqp::DataGrads g = elastiqp::Vjp(Q, A, G, h, sol, ct);
+        return std::make_tuple(g.Q, g.q, g.A, g.b, g.G, g.h, g.penalty);
+      },
+      nb::arg("Q"), nb::arg("A"), nb::arg("G"), nb::arg("h"), nb::arg("x"),
+      nb::arg("t"), nb::arg("y"), nb::arg("z_t"), nb::arg("z_ineq"),
+      nb::arg("ct_x"), nb::arg("ct_t"), nb::arg("ct_y"), nb::arg("ct_z_t"),
+      nb::arg("ct_z_ineq"));
 }
