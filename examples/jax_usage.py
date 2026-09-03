@@ -74,7 +74,7 @@ def main():
 
     def loss(q_, kappa=1e-6):
         sol = elastiqp.jax.solve(
-            Q, q_, G, h, penalty, A=A, b=b, target_kappa=kappa
+            Q, q_, G, h, penalty, A=A, b=b, target_kappa=kappa, eps_abs=1e-10
         )
         return jnp.sum(sol.x**2)
 
@@ -112,8 +112,7 @@ def main():
         g_sharp = jax.grad(x0)(h0, 1e-9)
         g_smooth = jax.grad(x0)(h0, 1e-3)
         print(
-            f"h0 = {h0:.1f}:  kappa=1e-9: {g_sharp:+.4f}   "
-            f"kappa=1e-3: {g_smooth:+.4f}"
+            f"h0 = {h0:.1f}:  kappa=1e-9: {g_sharp:+.4f}   kappa=1e-3: {g_smooth:+.4f}"
         )
 
     print("\nThe near-exact (kappa=1e-9) gradient snaps from 1 to 0 at the")
