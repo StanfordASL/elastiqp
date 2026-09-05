@@ -127,9 +127,64 @@ active row (141-467), which is the combinatorial cost the paper should name.
 One caveat on tolerances: DAQP-style tolerances are on the normalized rows,
 so with w = 1e4 an inactive row violated by 3e-5 shows up as a 0.3
 complementarity product in the full KKT residual; the primal and dual
-residuals themselves are 1e-8 to 1e-5.
+residuals themselves are 1e-8 to 1e-5 (addressed below by stating the
+tolerances in user units).
 
-Robot loops, same run as the tables above (`edaqp` = elastic DAQP):
+### Robustness additions (Ruiz, equality certificate, cycle guard)
+
+All on by default, each covered by `elastiqp_bench.elastic_daqp`:
+
+* Ruiz equilibration, ElastiQP's pass (column/row factors 1/sqrt(max-norm),
+  cost scaling, penalties scaled with their rows), at setup and refreshed
+  when a matrix update drifts the scaled norms more than 4x from 1. On the
+  same problem reparametrized with column scales 10^(+-3) and row scales
+  10^(+-2), the bare method hits the iteration cap (1104 changes, wrong
+  answer); with Ruiz it solves in 67 changes to 1e-11 in x. The LDP's own
+  row normalization does not help there: the column and cost scaling is
+  what conditions R and M = C R^-1.
+* Equality consistency certificate: dependent equality rows surface as a
+  singular pivot while the working set is built; before any iteration they
+  are checked against the least-norm solution of the independent ones, and
+  inconsistent data returns kInfeasible with `eq_infeasibility()` (0.5 on
+  the test's shifted duplicate row, 0 iterations spent).
+* DAQP's cycle guard: the dual objective must increase between dual-feasible
+  points; after cycle_tol stalls the working set is refactored from scratch
+  in a different pivot order, a second stall is kNumerics; a pivot below
+  refactor_tol at optimality triggers the same refactor before accepting.
+  The duplicated-rows case (dependent working sets at every step) solves
+  without it firing; the guard is insurance, not a hot path.
+
+Cost: 0.3-0.5 us per tick on the 6-DoF loops and ~5 us on hum-wbc for the
+per-tick drift check and scaled copies (the refresh never fires on the
+robot data).
+
+### Tolerances in user units, factorization reuse
+
+* Tolerances: `eps_abs` / `eps_rel` are stated on the user-frame row
+  violation G_i x - h_i (and on a saturated row's slack), converted per row
+  into the normalized LDP units (tol_i = eps scale_i dr_i); the row with the
+  largest user-unit violation enters the working set. `eta_prox` is the
+  user-frame stationarity residual of the unshifted problem. On the creep
+  cells the inactive-row violations drop from 3e-5 to 0 at the same
+  iteration counts, x matches ElastiQP to 1e-8, and the full KKT residual
+  (complementarity included) goes from 0.3 to 1.5e-4. Complementarity is
+  bounded by penalty_i * eps, which is what a user-unit constraint
+  tolerance implies for an l1-elastic row.
+* Factorization reuse: the Cholesky of Q is kept whenever Q is unchanged;
+  set_G / set_A diff their rows and only the changed rows are re-solved
+  against R in one batched triangular solve; the working-set LDL' is kept
+  unless one of its rows changed; q / h / b updates touch only the LDP
+  right-hand side. `reuse_factorization = false` forces the full path. On a
+  hum-wbc-sized chain (n=46, m=18, p=132) with constant Q and a fifth of
+  the G rows changing per tick: 43 us/tick against 74 with a full
+  refactorization every tick; with only q/h changing, 34 against 117.
+  Identical solutions (2e-10). The robot loops below change Q every tick,
+  so the reuse does not show there: forming M = G R^-1 is about half of the
+  per-tick floor at that size and is unavoidable when R changes. The
+  remaining per-iteration cost (~5 us at n=46, p=132) is Eigen small-op
+  overhead in the prototype and the next lever.
+
+Robot loops, all of the above on (`edaqp` = elastic DAQP):
 
 | scenario | variant | elastiqp cold / warm us | edaqp cold / warm us (it) | daqp-hard cold / warm |
 |---|---|---|---|---|
