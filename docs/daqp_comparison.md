@@ -209,3 +209,23 @@ M = G R^-1, no equality elimination in the prototype) plus ~5 us of Ruiz
 bookkeeping, which ElastiQP warm undercuts on the feasible sequence. The gap
 to DAQP-hard on the 6-DoF problems is Eigen overhead and the per-tick
 scaling pass in the prototype, not the method.
+
+## Maros-Meszaros small dense subset (`bench_maros_meszaros`, edaqp route)
+
+Same harness as the paper's Table III route (n <= 200, elastic form with
+penalty 10x the hard problem's largest dual, cold, eps 1e-6, Ruiz on for
+both), CSV `elastiqp_benchmarks/results/maros_meszaros_results_edaqp_20260905.csv`.
+
+* Robustness: edaqp 36/36 converged and 34 matched the hard reference
+  objective to 1e-5, identical to ElastiQP (the two unmatched instances,
+  QPCBOEI2 and QSCAGR7, are the ones where the PIQP reference itself fails).
+  ProxQP-hard: 35/36, 33 matched. Every objective gap is 1e-9 or better.
+  Singular P instances go through the proximal loop without incident.
+* Speed: geometric mean 2.0x faster than ElastiQP over the 36 problems.
+  Large wins where p >> n (DUALC*, KSIP: 5-27x; HS118 7x), typical 1.2-2.5x,
+  slower on DUAL2/3/4 (0.5-0.9x: n ~ 100, many active rows, 2-3 PDAL
+  iterations suffice) and QISRAEL (0.9x, 715 working-set changes against
+  292 Newton steps). Against piqp-hard it is faster on 28 of 36.
+* Read with the same caveat as the rest of the note: cold solves, iteration
+  count combinatorial (QISRAEL, QSHARE2B, QADLITTL at 160-715 changes).
+
