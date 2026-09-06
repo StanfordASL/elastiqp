@@ -175,6 +175,15 @@ l = jit_loss(q)
 vmap_loss = jax.vmap(loss)
 batch_q = jnp.tile(q, (10, 1))
 batch_ls = vmap_loss(batch_q)
+
+# Warm starting is explicit (the call stays pure): pass the previous Result
+# as warm_start= and carry it as loop state, e.g. a lax.scan carry. Works
+# with every backend under jit / vmap / scan; not differentiable.
+def step(state, q_k):
+    sol = elastiqp.jax.solve(Q, q_k, G, h, penalty, A=A, b=b, warm_start=state)
+    return sol, sol.x
+init = elastiqp.jax.solve(Q, qs[0], G, h, penalty, A=A, b=b)
+_, xs = jax.lax.scan(step, init, qs)
 ```
 
 ### PyTorch

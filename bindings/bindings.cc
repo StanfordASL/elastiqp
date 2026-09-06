@@ -333,7 +333,15 @@ NB_MODULE(_core, m) {
         .def("refactored", &Sv::refactored,
              "the Cholesky of Q was recomputed in the last solve()")
         .def("refactors", &Sv::refactors,
-             "cycle-guard / pivot working-set refactorizations in the last solve()");
+             "cycle-guard / pivot working-set refactorizations in the last solve()")
+        .def("set_warm_start", &Sv::set_warm_start, nb::arg("x"), nb::arg("y"),
+             nb::arg("z"),
+             "Seed the next solve() from a user-frame point (x, y, z), e.g. "
+             "a previous Solution of a nearby problem: the working set is "
+             "read off z (0 inactive, (0, penalty) active, penalty "
+             "saturated), y seeds the equality multipliers and x the "
+             "proximal center. Takes effect once, for the next solve() "
+             "only; the working-set LDL' is rebuilt.");
   }
 
   // --- PDAL ----------------------------------------------------------------
@@ -476,9 +484,18 @@ NB_MODULE(_core, m) {
            nb::arg("rho") = 0.0, nb::arg("delta") = 0.0,
            "Seed the next solve() with an explicit interior iterate, used "
            "exactly as given (slacks and duals must be strictly positive).")
-        .def("warm_start_from", &Sv::warm_start_from, nb::arg("solution"),
+        .def("warm_start_from",
+             [](Sv& s, const Solution& sol) { s.warm_start_from(sol); },
+             nb::arg("solution"),
              "Seed the next solve() from any backend's Solution, applying "
-             "the interior-point boundary floor.");
+             "the interior-point boundary floor.")
+        .def("warm_start_from",
+             [](Sv& s, const Eigen::VectorXd& x, const Eigen::VectorXd& y,
+                const Eigen::VectorXd& z) { s.warm_start_from(x, y, z); },
+             nb::arg("x"), nb::arg("y"), nb::arg("z"),
+             "Seed the next solve() from an elastic point (x, y, z) of any "
+             "backend; the slacks are reconstructed and floored off the "
+             "boundary.");
   }
 
   // --- one-shot solve ------------------------------------------------------

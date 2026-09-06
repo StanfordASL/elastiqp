@@ -182,6 +182,7 @@ class Solver {
     col_dirty_.assign(static_cast<size_t>(mp_), 1);
     rhs_dirty_ = true;
     have_solution_ = false;
+    explicit_warm_ = false;
     eps_ = 0.0;
     tol_.resize(mp_);
     res_.resize(mp_);
@@ -231,6 +232,23 @@ class Solver {
   }
 
   const Solution& solution() const { return sol_; }
+
+  // Seed the next solve() from a user-frame point (x, y, z), e.g. the
+  // Solution of a previous solve of a nearby problem (by any backend) or
+  // state carried through a functional (JAX) loop. The working set is read
+  // off the three-state classification of z: 0 inactive, (0, penalty)
+  // active with multiplier z, penalty saturated; rows within
+  // settings.eps_abs of a bound are put on it. y seeds the equality
+  // multipliers and x the proximal center. Dimensions must match setup().
+  // Takes effect once, for the next solve() only, regardless of
+  // settings.warm_start; unlike the implicit warm start it has no
+  // factorization to reuse (the working-set LDL' is rebuilt).
+  void set_warm_start(const VectorXd& x, const VectorXd& y, const VectorXd& z) {
+    warm_x_ = x;
+    warm_y_ = y;
+    warm_z_ = z;
+    explicit_warm_ = true;
+  }
 
   RowState row_state(int i) const { return state_[static_cast<size_t>(m_ + i)]; }
   bool proximal() const { return eps_ > 0; }
@@ -287,7 +305,11 @@ class Solver {
     // Row tolerances in normalized units: mu_i = scale_i dr_i (C_i x - rhs_i).
     for (int i = 0; i < mp_; ++i)
       tol_[i] = (settings.eps_abs + settings.eps_rel * std::abs(rhs_[i])) * scale_[i] * dr_[i];
-    if (!settings.warm_start || !have_solution_) {
+    if (explicit_warm_) {
+      explicit_warm_ = false;
+      seed_working_set();
+      rebuild = true;
+    } else if (!settings.warm_start || !have_solution_) {
       // Cold start: equalities only, nothing saturated, prox center at 0.
       for (int i = m_; i < mp_; ++i) state_[static_cast<size_t>(i)] = RowState::kInactive;
       lam_full_.setZero();
@@ -596,6 +618,36 @@ class Solver {
     if (s == RowState::kSaturated && cur != RowState::kSaturated)
       uS_ -= hi_[row] * Mt_.col(row);
     cur = s;
+  }
+
+  // set_warm_start(): map the user-frame (x, y, z) onto the scaled iterate,
+  // the working-set states and the normalized-row multipliers (the inverse
+  // of finish()'s unscaling). Needs the current scaling and hi_, so it runs
+  // in solve() after factor() / the penalty update.
+  void seed_working_set() {
+    x_ = warm_x_.cwiseQuotient(dx_);
+    xc_ = x_;
+    const double tol = settings.eps_abs;
+    for (int i = 0; i < mp_; ++i) {
+      RowState& s = state_[static_cast<size_t>(i)];
+      const double to_lam = c_ / (scale_[i] * dr_[i]);
+      if (i < m_) {
+        s = RowState::kEquality;
+        lam_full_[i] = warm_y_[i] * to_lam;
+        continue;
+      }
+      const double z = warm_z_[i - m_];
+      if (std::isfinite(hi_[i]) && z >= penalty_[i - m_] - tol) {
+        s = RowState::kSaturated;
+        lam_full_[i] = hi_[i];
+      } else if (z > tol) {
+        s = RowState::kActive;
+        lam_full_[i] = z * to_lam;
+      } else {
+        s = RowState::kInactive;
+        lam_full_[i] = 0.0;
+      }
+    }
   }
 
   // Rebuild the LDL' for the warm (or cold) working set on the current M.
@@ -941,6 +993,9 @@ class Solver {
   MatrixXd L_, Gram_;
   VectorXd D_, lam_, lam_star_, dir_, work_;
   bool Q_dirty_ = true, penalty_dirty_ = false, rhs_dirty_ = true, have_solution_ = false;
+  // set_warm_start() point (user frame), consumed by the next solve()
+  bool explicit_warm_ = false;
+  VectorXd warm_x_, warm_y_, warm_z_;
   std::vector<char> col_dirty_;
   VectorXd tol_;
   int rows_updated_ = 0, refactors_ = 0;

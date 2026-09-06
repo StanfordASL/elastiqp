@@ -15,7 +15,11 @@ default).
 Supports JIT and vmap (under "sequential" mode, which performs one solve
 per entry in the batch). Requires float64 (JAX_ENABLE_X64).
 
-Currently, does not support warm-starting for functional purity
+Warm starting is explicit, to keep the call pure: pass the previous
+``Result`` (or an ``(x, y, z)`` tuple) as ``warm_start=`` and the fresh
+solver is seeded from it. Carry the Result through your loop (a
+``lax.scan`` carry, a Python loop variable) like any other state. The
+warm-started path is not differentiable.
 """
 
 import ctypes
@@ -79,6 +83,11 @@ _lib = ctypes.cdll.LoadLibrary(str(_find_library()))
 jax.ffi.register_ffi_target(
     "elastiqp_solve", jax.ffi.pycapsule(_lib.ElastiqpSolve), platform="cpu"
 )
+jax.ffi.register_ffi_target(
+    "elastiqp_solve_warm",
+    jax.ffi.pycapsule(_lib.ElastiqpSolveWarm),
+    platform="cpu",
+)
 
 
 class Result(NamedTuple):
@@ -131,6 +140,68 @@ def _ffi_solve(
         target_kappa=np.float64(target_kappa),
         method=np.int64(_METHOD_ID[method]),
     )
+
+
+def _ffi_solve_warm(
+    Q, q, A, b, G, h, penalty, x0, y0, z0, eps_abs, max_iter, ruiz, vmap_method,
+    method,
+):
+    n = Q.shape[-1]
+    m = b.shape[-1]
+    p = h.shape[-1]
+    batch = Q.shape[:-2]
+    vec = lambda d: jax.ShapeDtypeStruct(batch + (d,), jnp.float64)
+    # (x, t, y, z_t, z), then info = [converged, iters].
+    out_types = [vec(n), vec(p), vec(m), vec(p), vec(p), vec(2)]
+    call = jax.ffi.ffi_call(
+        "elastiqp_solve_warm", out_types, vmap_method=vmap_method
+    )
+    return call(
+        Q,
+        q,
+        A,
+        b,
+        G,
+        h,
+        penalty,
+        x0,
+        y0,
+        z0,
+        eps_abs=np.float64(eps_abs),
+        max_iter=np.int64(max_iter),
+        ruiz=np.int64(bool(ruiz)),
+        method=np.int64(_METHOD_ID[method]),
+    )
+
+
+# The warm-started solve is a plain (non-differentiable) primitive. The
+# custom_vjp only exists to turn jax.grad through it into a clear error
+# instead of "differentiation rule for ffi_call not implemented".
+@partial(jax.custom_vjp, nondiff_argnums=(10, 11, 12, 13, 14))
+def _solve_warm(
+    Q, q, A, b, G, h, penalty, x0, y0, z0, eps_abs, max_iter, ruiz, vmap_method,
+    method,
+):
+    return _ffi_solve_warm(
+        Q, q, A, b, G, h, penalty, x0, y0, z0, eps_abs, max_iter, ruiz,
+        vmap_method, method,
+    )
+
+
+def _solve_warm_fwd(*args):
+    raise TypeError(
+        "elastiqp.jax.solve is not differentiable when warm_start is given: "
+        "gradients use the kappa relaxation, which the warm-started path "
+        "does not run. Drop warm_start (and use method='pdal' or 'ipm') to "
+        "differentiate"
+    )
+
+
+def _solve_warm_bwd(*args):  # pragma: no cover - fwd raises first
+    raise TypeError("elastiqp.jax.solve is not differentiable with warm_start")
+
+
+_solve_warm.defvjp(_solve_warm_fwd, _solve_warm_bwd)
 
 
 def _outer(a, b):
@@ -311,6 +382,7 @@ def solve(
     ruiz=None,
     target_kappa=1e-3,
     vmap_method="sequential",
+    warm_start=None,
 ):
     """Solve the elastic QP
 
@@ -329,8 +401,18 @@ def solve(
     (on for "das", off for "pdal" / "ipm"); set it explicitly for
     badly-scaled data.
 
-    Every call here is a cold solve. With method "pdal" or "ipm" it is
-    differentiable in reverse mode w.r.t. all array arguments when
+    `warm_start` seeds the solve from a previous point: a `Result` from an
+    earlier call (of any method) or an `(x, y, z)` tuple with shapes (n,),
+    (m,), (p,). The C++ solver is still constructed fresh (the call stays
+    pure, so it composes with jit, vmap and lax.scan; carry the Result as
+    loop state), but starts from that point: the active-set backend reads
+    its working set off z, PDAL / IPM start their iterates there. This
+    keeps the iteration savings of a persistent solver but not its cached
+    factorization. A warm-started solve is never differentiable (jax.grad
+    raises at trace time). `y` must be empty when there are no equalities.
+
+    Without `warm_start` every call is a cold solve. With method "pdal" or
+    "ipm" it is differentiable in reverse mode w.r.t. all array arguments when
     target_kappa > 0 (the default); jax.grad with method="das" or with an
     explicit target_kappa=0 raises at trace time (the active-set backend
     has no relaxation; the certificate sits exactly on the constraint
@@ -381,6 +463,47 @@ def solve(
         b = jnp.asarray(b)
     # penalty may be a scalar or a per-constraint vector of length p
     penalty = jnp.broadcast_to(jnp.asarray(penalty, dtype=jnp.float64), h.shape)
+
+    if warm_start is not None:
+        if isinstance(warm_start, Result):
+            x0, y0, z0 = warm_start.x, warm_start.y, warm_start.z
+        else:
+            x0, y0, z0 = warm_start
+        x0 = jnp.asarray(x0, dtype=jnp.float64)
+        y0 = jnp.asarray(y0, dtype=jnp.float64)
+        z0 = jnp.asarray(z0, dtype=jnp.float64)
+        if x0.shape != q.shape or y0.shape != b.shape or z0.shape != h.shape:
+            raise ValueError(
+                "warm_start (x, y, z) must have shapes "
+                f"{q.shape}, {b.shape}, {h.shape}; got "
+                f"{x0.shape}, {y0.shape}, {z0.shape}"
+            )
+        x, t, y, z_t, z, info = _solve_warm(
+            Q,
+            q,
+            A,
+            b,
+            G,
+            h,
+            penalty,
+            x0,
+            y0,
+            z0,
+            float(eps_abs),
+            int(max_iter),
+            bool(ruiz),
+            vmap_method,
+            method,
+        )
+        return Result(
+            x=x,
+            t=t,
+            y=y,
+            z_t=z_t,
+            z=z,
+            converged=info[..., 0].astype(jnp.int32),
+            iters=info[..., 1].astype(jnp.int32),
+        )
 
     x, t, y, z_t, z, info = _solve(
         Q,

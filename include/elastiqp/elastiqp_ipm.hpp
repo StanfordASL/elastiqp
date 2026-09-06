@@ -290,6 +290,29 @@ class Solver {
     explicit_warm_ = true;
   }
 
+  // Seed the next solve() from an elastic point (x, y, z) in the user
+  // frame, e.g. a previous Solution of any backend or state carried
+  // through a functional (JAX) loop; the expanded-form slacks and duals
+  // are reconstructed from it (t = [G x - h]_+, s_ineq = [h - G x]_+,
+  // z_t = penalty - z) and floored off the boundary as above. Dimensions
+  // must match setup(). Takes effect once, for the next solve() only.
+  void warm_start_from(const VectorXd& x, const VectorXd& y,
+                       const VectorXd& z) {
+    // User-frame G x - h and penalty from the stored (possibly scaled) data
+    VectorXd r = G_ * (ruiz_ ? VectorXd(x.cwiseQuotient(dx_s_)) : x) - h_;
+    VectorXd w = penalty_;
+    if (ruiz_) {
+      r = r.cwiseQuotient(di_s_);
+      w = w.cwiseProduct(di_s_) / c_s_;
+    }
+    const VectorXd t = r.cwiseMax(0.0);
+    scale_iterate(x, t, y, t, (-r).cwiseMax(0.0), w - z, z);
+    if (rho_ <= 0) rho_ = settings.rho_init;
+    if (delta_ <= 0) delta_ = settings.delta_init;
+    if (p_ > 0) init_warm();
+    explicit_warm_ = true;
+  }
+
   const Solution& solution() const { return sol_; }
 
   // Lower bound on the reachable equality residual (0 if consistent or the
