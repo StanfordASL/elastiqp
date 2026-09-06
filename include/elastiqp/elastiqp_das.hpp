@@ -944,19 +944,15 @@ class Solver {
     }
     sol_.converged = st == Status::kSolved ? 1 : 0;
     have_solution_ = st == Status::kSolved;
-    // Certificate in the user frame: expanded-form slacks/duals and the
-    // elastic KKT residuals (one Q x, one C' [y; z], one C x).
+    // Certificate in the user frame: t, z_t and the elastic KKT residuals
+    // (one Q x, one C' [y; z], one C x).
     res_.noalias() = Ct_.transpose() * sol_.x - rhs_;  // [A x - b; G x - h]
     if (p_ > 0) {
       const auto r = res_.tail(p_);
       sol_.t = r.cwiseMax(0.0);
-      sol_.s_t = sol_.t;
-      sol_.s_ineq = (-r).cwiseMax(0.0);
       sol_.z_t = penalty_ - sol_.z;
     } else {
       sol_.t.resize(0);
-      sol_.s_t.resize(0);
-      sol_.s_ineq.resize(0);
       sol_.z_t.resize(0);
     }
     wQx_.noalias() = Q_ * sol_.x;

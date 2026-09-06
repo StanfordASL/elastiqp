@@ -1290,8 +1290,6 @@ class Solver {
     sol_.t = tr_.cwiseProduct(inv_di_);
     sol_.y = yr_.cwiseProduct(y_us_);
     sol_.z = z2r_.cwiseProduct(z_us_);
-    sol_.s_t = s1r_.cwiseProduct(inv_di_);
-    sol_.s_ineq = s2r_.cwiseProduct(inv_di_);
     sol_.z_t = z1r_.cwiseProduct(z_us_);
     sol_.status = status;
     sol_.converged = status == Status::kSolved ? 1 : 0;
@@ -1426,8 +1424,6 @@ class Solver {
     sol_.t = t_.cwiseProduct(inv_di_);
     sol_.y = y_.cwiseProduct(y_us_);
     sol_.z = z_.cwiseProduct(z_us_);
-    sol_.s_t = sol_.t;
-    sol_.s_ineq = s2_.cwiseProduct(inv_di_);
     sol_.z_t = (penalty_ - z_).cwiseProduct(z_us_);
     sol_.status = status;
     sol_.converged = status == Status::kSolved ? 1 : 0;

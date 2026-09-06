@@ -57,7 +57,7 @@ struct Backend<elastiqp::das::Solver> {
   static constexpr bool has_relax = false;
   static constexpr bool has_refresh = true;  // drift-gated Ruiz refresh
   static constexpr double slack_tol = 1e-10;  // t at a feasible solution
-  static constexpr double invariant_tol = 1e-12;  // z_t + z == w, s_t == t
+  static constexpr double invariant_tol = 1e-12;  // z_t + z == w
   static Settings Tight() {
     Settings s;
     s.eps_abs = 1e-8;

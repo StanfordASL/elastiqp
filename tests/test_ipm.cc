@@ -43,16 +43,19 @@ double Kkt(const MatrixXd& Q, const VectorXd& q, const MatrixXd& A,
 }
 
 // Worst |s.z - kappa| over both blocks, plus stationarity and equality
-// residuals at a relaxed point.
+// residuals at a relaxed point. The slacks are reconstructed from t and
+// G x - h (s_t = t, s_ineq = h + t - G x), so the complementarity error
+// includes the relaxed point's primal residual times the dual.
 struct RelaxRes {
   double comp, stat, eq;
 };
 RelaxRes RelaxResiduals(const QPData& qp, double kappa,
                         const elastiqp::Solution& r) {
   RelaxRes res{0, 0, 0};
+  const VectorXd s_ineq = qp.h + r.t - qp.G * r.x;
   for (Eigen::Index i = 0; i < qp.h.size(); ++i) {
-    res.comp = std::max(res.comp, std::abs(r.s_t[i] * r.z_t[i] - kappa));
-    res.comp = std::max(res.comp, std::abs(r.s_ineq[i] * r.z[i] - kappa));
+    res.comp = std::max(res.comp, std::abs(r.t[i] * r.z_t[i] - kappa));
+    res.comp = std::max(res.comp, std::abs(s_ineq[i] * r.z[i] - kappa));
   }
   VectorXd stat = qp.Q * r.x + qp.q + qp.G.transpose() * r.z;
   if (qp.b.size() > 0) stat += qp.A.transpose() * r.y;
@@ -94,17 +97,19 @@ int main() {
       solver.set_b(b);
       if (k > 0) {
         const auto& prev = solver.solution();
-        // External floor at 0.1x the previous iterate's KKT residual under
-        // the new data (primal residual includes the interior-point slacks).
+        // Expanded-form slacks of the previous certificate (s_t = t,
+        // s_ineq = h + t - G x under the new data), then an external floor
+        // at 0.1x its KKT residual.
+        const VectorXd s_t = prev.t;
+        const VectorXd s_ineq = h + prev.t - qp0.G * prev.x;
         const VectorXd rd = qp0.Q * prev.x + q + qp0.G.transpose() * prev.z +
                             qp0.A.transpose() * prev.y;
         const double r = std::max(
             {InfNorm(rd), InfNorm(penalty - prev.z_t - prev.z),
-             InfNorm(b - qp0.A * prev.x), InfNorm(prev.t - prev.s_t),
-             InfNorm(h - (qp0.G * prev.x - prev.t) - prev.s_ineq)});
+             InfNorm(b - qp0.A * prev.x), InfNorm(s_ineq.cwiseMin(0.0))});
         const double f = std::min(std::max(0.1 * r, 1e-8), 1.0);
-        solver.set_warm_start(prev.x, prev.t, prev.y, prev.s_t.cwiseMax(f),
-                              prev.s_ineq.cwiseMax(f), prev.z_t.cwiseMax(f),
+        solver.set_warm_start(prev.x, prev.t, prev.y, s_t.cwiseMax(f),
+                              s_ineq.cwiseMax(f), prev.z_t.cwiseMax(f),
                               prev.z.cwiseMax(f));
       }
       const auto& ws = solver.solve();

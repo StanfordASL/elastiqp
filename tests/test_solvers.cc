@@ -664,9 +664,6 @@ void GenericSuite() {
     const auto sol = SolveWith<Solver>(qp.Q, qp.q, qp.G, qp.h, w);
     const VectorXd r = qp.G * sol.x - qp.h;
     const double e_w = InfNorm(w - sol.z_t - sol.z);
-    const double e_s1 = InfNorm(sol.s_t - sol.t);
-    const double e_s2 =
-        InfNorm(sol.s_ineq - (sol.t - r).cwiseMax(0.0));
     const double e_t = InfNorm(sol.t - r.cwiseMax(0.0));
     // (the interior point keeps its slacks positive, not t itself, and
     // z_t + z = w only holds to eps, so the box is checked to the
@@ -678,10 +675,10 @@ void GenericSuite() {
         std::abs(sol.primal_obj -
                  problem_gen::ElasticObjective(qp.Q, qp.q, qp.G, qp.h, w, sol.x));
     const double tol = std::max(B::invariant_tol, 1e-8);
-    Check(L("z_t+z==w, s_t==t, s_ineq==[t-r]+, box, obj"),
-          sol.converged == 1 && e_w <= B::invariant_tol && e_s1 <= B::invariant_tol &&
-              e_s2 < tol && e_t < tol && boxed && e_obj < 1e-7,
-          std::max({e_w, e_s1, e_s2, e_t, e_obj}), "inv");
+    Check(L("z_t+z==w, t==[r]+, box, obj"),
+          sol.converged == 1 && e_w <= B::invariant_tol && e_t < tol &&
+              boxed && e_obj < 1e-7,
+          std::max({e_w, e_t, e_obj}), "inv");
     int n_act = 0, n_sat = 0;
     elastiqp::count_row_states(sol.t, sol.z, 1e-6, n_act, n_sat);
     Check(L("n_active / n_saturated reported"),

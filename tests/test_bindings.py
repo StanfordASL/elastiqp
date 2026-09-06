@@ -95,12 +95,11 @@ def main():
         f"{[(s.n_active, s.n_saturated) for s in sols.values()]}",
     )
     check(
-        "z in [0, penalty], z_t = penalty - z, s_t = t",
+        "z in [0, penalty], z_t = penalty - z",
         all(
             (s.z >= -1e-12).all()
             and (s.z <= penc + 1e-12).all()
             and np.abs(s.z_t - (penc - s.z)).max() < 1e-9
-            and np.abs(s.s_t - s.t).max() < 1e-12
             for s in sols.values()
         ),
         "",
@@ -442,17 +441,20 @@ def main():
     print("pdal.Solver.relax: kappa relaxation (smoothed differentiation point)")
     kappa = 1e-3
     tight = pdal.solution()
-    rsol = pdal.relax(kappa)
-    comp = np.concatenate(
-        [
-            np.asarray(rsol.s_t) * np.asarray(rsol.z_t),
-            np.asarray(rsol.s_ineq) * np.asarray(rsol.z),
-        ]
-    )
+    rsol = pdal.relax(kappa, 1e-10)
+
+    def relaxed_comp(s):
+        # Expanded-form slacks reconstructed from the certificate (s_t = t,
+        # s_ineq = h + t - G x): complementarity holds to the relaxed point's
+        # primal residual times the dual.
+        s_ineq = hp + np.asarray(s.t) - Gp @ np.asarray(s.x)
+        return np.concatenate([np.asarray(s.t) * np.asarray(s.z_t), s_ineq * np.asarray(s.z)])
+
+    comp = relaxed_comp(rsol)
     moved = np.abs(np.asarray(rsol.x) - np.asarray(tight.x)).max()
     check(
         "relaxed point on s.z = kappa hyperbola",
-        rsol.converged == 1 and np.abs(comp - kappa).max() < 1e-10 and moved > 0.0,
+        rsol.converged == 1 and np.abs(comp - kappa).max() < 1e-8 and moved > 0.0,
         f"comp_err={np.abs(comp - kappa).max():.1e}",
     )
     pdal.settings.warm_start = True  # warm re-solve from the tight iterate
@@ -472,11 +474,11 @@ def main():
     dx = np.abs(isol.x - tight.x).max()
     check("ipm matches pdal", isol.converged == 1 and dx < 1e-6, f"|dx|={dx:.1e}")
     irs = ipm.relax(kappa, 1e-8)
-    comp = np.concatenate([irs.s_t * irs.z_t, irs.s_ineq * irs.z])
+    comp = relaxed_comp(irs)
     rdx = np.abs(irs.x - rsol.x).max()
     check(
         "ipm relax reaches the same relaxed point as pdal",
-        irs.converged == 1 and np.abs(comp - kappa).max() < 1e-7 and rdx < 1e-5,
+        irs.converged == 1 and np.abs(comp - kappa).max() < 1e-6 and rdx < 1e-5,
         f"comp_err={np.abs(comp - kappa).max():.1e} |dx|={rdx:.1e}",
     )
     ipm2 = elastiqp.Solver("ipm")
@@ -561,7 +563,7 @@ def main():
         s.x.dtype == np.float64
         and s.x.shape == (14,)
         and s.y.shape == (0,)
-        and all(v.shape == (14,) for v in (s.t, s.s_t, s.s_ineq, s.z_t, s.z))
+        and all(v.shape == (14,) for v in (s.t, s.z_t, s.z))
         and isinstance(s.outer_iters, int)
         and isinstance(s.n_active, int)
         and isinstance(s.converged, int)

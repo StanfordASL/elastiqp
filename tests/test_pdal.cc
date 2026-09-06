@@ -437,12 +437,15 @@ int main() {
 
       const double dx = (rel.x - iref.x).lpNorm<Eigen::Infinity>();
       const double dz = (rel.z - iref.z).lpNorm<Eigen::Infinity>();
-      // Complementarity is enforced by the retraction: exact to round-off.
+      // Complementarity is enforced by the retraction exactly; seen through
+      // the reported (t, z_t, z) with the slacks reconstructed as s_t = t,
+      // s_ineq = h + t - G x, it holds to the relaxed point's primal
+      // residual (1e-10) times the dual (<= penalty).
+      const VectorXd s_ineq = qp.h + rel.t - qp.G * rel.x;
       double comp = 0;
       for (int i = 0; i < 60; ++i) {
-        comp = std::max(comp, std::abs(rel.s_t[i] * rel.z_t[i] - kappa));
-        comp = std::max(comp,
-                        std::abs(rel.s_ineq[i] * rel.z[i] - kappa));
+        comp = std::max(comp, std::abs(rel.t[i] * rel.z_t[i] - kappa));
+        comp = std::max(comp, std::abs(s_ineq[i] * rel.z[i] - kappa));
       }
       char name[64];
       std::snprintf(name, sizeof(name), "kappa=%.0e matches IPM relax",
@@ -450,7 +453,7 @@ int main() {
       Check(name,
             tight.converged == 1 && rel.converged == 1 &&
                 iref.converged == 1 && dx < 1e-7 && dz < 1e-6 &&
-                comp < 1e-14 * std::max(1.0, 1.0 / kappa) &&
+                comp < 1e-8 &&
                 rel.iters <= 12,
             std::max(dx, dz), "|dx|,|dz|");
     }

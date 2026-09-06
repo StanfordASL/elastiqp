@@ -275,27 +275,24 @@ class Solver {
     explicit_warm_ = true;
   }
 
-  // Seed the next solve() from a Solution produced by either solver.
-  // Unlike set_warm_start(), this applies the interior-point
-  // boundary floor for you, which a foreign solution needs: a converged
-  // PDAL certificate sits exactly on the boundary, and an unfloored
-  // interior-point start there collapses the fraction-to-boundary step
-  // length. Dimensions must match setup(). Takes effect once, for the
-  // next solve() only.
+  // Seed the next solve() from a Solution produced by any backend (see the
+  // (x, y, z) overload; the certificate carries nothing beyond that
+  // point that the reconstruction would not recover to within its
+  // residuals).
   void warm_start_from(const Solution& sol) {
-    scale_iterate(sol.x, sol.t, sol.y, sol.s_t, sol.s_ineq, sol.z_t, sol.z);
-    if (rho_ <= 0) rho_ = settings.rho_init;
-    if (delta_ <= 0) delta_ = settings.delta_init;
-    if (p_ > 0) init_warm();  // floor slacks/duals off the boundary
-    explicit_warm_ = true;
+    warm_start_from(sol.x, sol.y, sol.z);
   }
 
   // Seed the next solve() from an elastic point (x, y, z) in the user
   // frame, e.g. a previous Solution of any backend or state carried
   // through a functional (JAX) loop; the expanded-form slacks and duals
   // are reconstructed from it (t = [G x - h]_+, s_ineq = [h - G x]_+,
-  // z_t = penalty - z) and floored off the boundary as above. Dimensions
-  // must match setup(). Takes effect once, for the next solve() only.
+  // z_t = penalty - z). Unlike set_warm_start(), this applies the
+  // interior-point boundary floor for you, which such a point needs: a
+  // converged PDAL certificate sits exactly on the boundary, and an
+  // unfloored interior-point start there collapses the
+  // fraction-to-boundary step length. Dimensions must match setup().
+  // Takes effect once, for the next solve() only.
   void warm_start_from(const VectorXd& x, const VectorXd& y,
                        const VectorXd& z) {
     // User-frame G x - h and penalty from the stored (possibly scaled) data
@@ -1032,8 +1029,6 @@ class Solver {
     sol_.t = t_.cwiseProduct(inv_di_);
     sol_.y = y_.cwiseProduct(y_us_);
     sol_.z = z2_.cwiseProduct(z_us_);
-    sol_.s_t = s1_.cwiseProduct(inv_di_);
-    sol_.s_ineq = s2_.cwiseProduct(inv_di_);
     sol_.z_t = z1_.cwiseProduct(z_us_);
     sol_.status = status;
     sol_.converged = status == Status::kSolved ? 1 : 0;

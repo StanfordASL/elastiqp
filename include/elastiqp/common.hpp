@@ -53,11 +53,13 @@ struct Solution {
   VectorXd t;  // elastic slacks max(G x - h, 0) at a solution
   VectorXd y;  // equality duals
   VectorXd z;  // inequality duals, in [0, penalty]
-  // Expanded-form slacks and duals: s_t and z_t belong to t >= 0, s_ineq to
-  // G x - t <= h (whose dual is z). At a solution s_t = t,
-  // s_ineq = [t - (G x - h)]_+ and z_t = penalty - z; only the kappa-relaxed
-  // point of relax() (PDAL, IPM) moves them off these identities.
-  VectorXd s_t, s_ineq, z_t;
+  // Dual of t >= 0 in the expanded form. At a solution z_t = penalty - z;
+  // only the kappa-relaxed point of relax() (PDAL, IPM) moves it off that
+  // identity, which is why the backward pass (kkt_vjp.hpp) reads it rather
+  // than reconstructing it. The expanded-form slacks are not reported: at a
+  // solution they are t and [t - (G x - h)]_+, and at a relaxed point they
+  // equal those to within primal_res.
+  VectorXd z_t;
   Status status = Status::kUnsolved;
   int converged = 0;    // 1 iff status == kSolved
   int iters = 0;        // method's inner iterations (Newton steps, IPM

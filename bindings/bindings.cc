@@ -261,12 +261,9 @@ NB_MODULE(_core, m) {
                    "equality duals (empty without A, b)")
       .def_prop_ro("z", [](const Solution& s) { return s.z; },
                    "inequality duals of G x - t <= h, in [0, penalty]")
-      .def_prop_ro("s_t", [](const Solution& s) { return s.s_t; },
-                   "slacks of t >= 0 (= t at a solution)")
-      .def_prop_ro("s_ineq", [](const Solution& s) { return s.s_ineq; },
-                   "slacks of G x - t <= h")
       .def_prop_ro("z_t", [](const Solution& s) { return s.z_t; },
-                   "duals of t >= 0 (= penalty - z at a solution)")
+                   "duals of t >= 0 (= penalty - z at a solution; differs "
+                   "only at a relax() point)")
       .def_ro("status", &Solution::status)
       .def_ro("converged", &Solution::converged,
               "1 iff status == Status.Solved")
