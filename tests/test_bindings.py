@@ -455,6 +455,50 @@ def main():
     noj = off.solve()
     print(f"  [info] bcl_release_jump=False: iters={noj.iters} (logged 30)")
 
+    print("Hard case: warm-start dual overshoot (OSCBF Panda teleop, step 10155)")
+    # Captured spike, still open: the previous step's dual on row 28 is 2.4x
+    # the new optimum's and two rows join the active set, so the warm solve
+    # took 15 iters vs 14 cold (median 2). Warm-starting from the same stale x
+    # with the correct duals converges in 2 iters, so the stale duals are the
+    # cost. Pinned as a regression guard (bounds hold ~1.3x headroom); tighten
+    # the warm-iters bound once a fix lands.
+    d2 = np.load(os.path.join(os.path.dirname(__file__), "data", "warmstart_dual_overshoot.npz"))
+    tol2 = float(d2["solver_tol"])
+
+    def overshoot_solver():
+        s = elastiqp.Solver()
+        s.settings.eps_abs = tol2
+        s.settings.eps_duality_gap_abs = tol2
+        s.setup(d2["P"], d2["q"], d2["G"], d2["h"], d2["penalties"])
+        return s
+
+    cold2 = overshoot_solver().solve()
+    check(
+        "cold reference converges",
+        cold2.converged == 1 and cold2.iters <= 20,
+        f"iters={cold2.iters}",
+    )
+    ws2 = overshoot_solver()
+    ws2.set_warm_start(d2["warm_x"], d2["warm_y"], d2["warm_z_ineq"])
+    warm2 = ws2.solve()
+    dx2 = np.abs(warm2.x - d2["expected_x"]).max()
+    check(
+        "warm solve converges accurately",
+        warm2.converged == 1 and dx2 < 10 * tol2,
+        f"|dx|={dx2:.1e}",
+    )
+    check(
+        "warm solve stays within 20 iters (open spike)",
+        warm2.iters <= 20,
+        f"iters={warm2.iters} (logged 15, cold {cold2.iters})",
+    )
+    # Informational: the release jump helps here but does not close the gap.
+    off2 = overshoot_solver()
+    off2.settings.bcl_release_jump = False
+    off2.set_warm_start(d2["warm_x"], d2["warm_y"], d2["warm_z_ineq"])
+    noj2 = off2.solve()
+    print(f"  [info] bcl_release_jump=False: iters={noj2.iters} (logged 15)")
+
     n_fail = RESULTS.count(False)
     print(f"\n{'All binding tests passed.' if n_fail == 0 else f'{n_fail} FAILURES'}")
     return 1 if n_fail else 0
