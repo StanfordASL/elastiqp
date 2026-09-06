@@ -100,7 +100,7 @@ struct Settings {
   // bound by eps_abs + eps_rel |h_i| in user units. Complementarity is then
   // bounded by penalty_i * eps, which is what a user-unit row tolerance
   // implies for an l1-elastic row.
-  double eps_abs = 1e-5;
+  double eps_abs = 1e-6;
   double eps_rel = 0.0;
   double sing_tol = 3.7e-11; // LDL' pivot below which the working set is dependent
   double zero_tol = 1e-11;   // Cholesky pivot ratio below which Q is treated as singular

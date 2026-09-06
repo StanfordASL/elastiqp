@@ -213,7 +213,7 @@ See [StanfordASL/elastiqp_benchmarks](https://github.com/StanfordASL/elastiqp_be
 ## Assorted Tips
 
 - If differentiating through problems with large penalty weights (roughly >= 1e4), or for badly row-scaled constraints (mixed units), consider turning on Ruiz equilibration. In Python/JAX/PyTorch: `ruiz=True`; in C++: `settings.ruiz = true` (the active-set backend has it on by default). The scaling is computed at `setup()` and carried through the `set_*` updates (still exact, only the conditioning drifts); the `das` and `pdal` backends re-equilibrate automatically in `solve()` once a matrix update has drifted a scaled row/column norm past `settings.ruiz_refresh_ratio` (4x by default), keeping the warm start. `scaling_drift()` reports the current drift and (PDAL) `reequilibrate()` refreshes on demand, so a control loop never needs a second `setup()` for this.
-- `eps_abs` defaults to 1e-5 on every backend but means slightly different things: `das` terminates when no row violates its bound by more than `eps_abs` (user units; dual feasibility is exact, complementarity is bounded by `penalty * eps_abs`), while `pdal` and `ipm` terminate on the inf-norm of the elastic KKT residuals and the duality gap. The one-shot `solve(..., eps_abs=)` sets whichever applies.
+- `eps_abs` defaults to 1e-6 on `das` and 1e-5 on `pdal` and `ipm`, and means different things: `das` terminates when no row violates its bound by more than `eps_abs` (user units; dual feasibility is exact, complementarity is bounded by `penalty * eps_abs`), while `pdal` and `ipm` terminate on the inf-norm of the elastic KKT residuals and the duality gap. The one-shot `solve(..., eps_abs=)` sets whichever applies.
 
 
 ## Acknowledgments

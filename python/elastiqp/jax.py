@@ -39,6 +39,8 @@ _METHOD_ID = {"das": 0, "pdal": 1, "ipm": 2}
 # Default outer budget per backend (active-set iterations / BCL rounds /
 # interior-point iterations), used when max_iter is None.
 _DEFAULT_MAX_ITER = {"das": 10000, "pdal": 250, "ipm": 250}
+# Backend eps_abs defaults (see Settings in each header).
+_DEFAULT_EPS_ABS = {"das": 1e-6, "pdal": 1e-5, "ipm": 1e-5}
 # Ruiz equilibration default per backend (on for the active set, whose LDP
 # conditioning depends on it; off for PDAL / IPM), used when ruiz is None.
 _DEFAULT_RUIZ = {"das": True, "pdal": False, "ipm": False}
@@ -304,7 +306,7 @@ def solve(
     A=None,
     b=None,
     method="das",
-    eps_abs=1e-5,
+    eps_abs=None,
     max_iter=None,
     ruiz=None,
     target_kappa=1e-3,
@@ -356,6 +358,8 @@ def solve(
     """
     if method not in METHODS:
         raise ValueError(f"method must be one of {METHODS}, got {method!r}")
+    if eps_abs is None:
+        eps_abs = _DEFAULT_EPS_ABS[method]
     if max_iter is None:
         max_iter = _DEFAULT_MAX_ITER[method]
     if ruiz is None:
