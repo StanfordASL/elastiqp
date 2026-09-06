@@ -13,10 +13,11 @@ endif()
 # Tests and Python bindings are built when this is the top-level project.
 # A consumer that pulls this tree in via add_subdirectory (the
 # elastiqp_benchmarks repo, a robot stack) gets only the header-only target
-# unless it opts in. The tests are self-contained (Eigen only; the oracle is
-# the in-tree IPM reference). Cross-validation against external solvers
-# (PIQP, ProxQP) and all benchmarks live in the separate elastiqp_benchmarks
-# repo, which consumes this one.
+# unless it opts in. The tests are self-contained (Eigen only; the three
+# backends are cross-checked against each other, with the IPM backend as the
+# oracle). Cross-validation against external solvers (PIQP, ProxQP, DAQP) and
+# all benchmarks live in the separate elastiqp_benchmarks repo, which
+# consumes this one.
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   set(_elastiqp_top_level ON)
 else()
@@ -41,8 +42,8 @@ target_link_libraries(elastiqp INTERFACE Eigen3::Eigen)
 target_compile_features(elastiqp INTERFACE cxx_std_17)
 
 # Dev-only headers shared by the tests here and by the benchmarks repo:
-# problem generators, the drifting-trajectory generator, and the test-only
-# IPM reference solver (tests/support/). Never installed.
+# problem generators, the drifting-trajectory generator and the test helpers
+# (tests/support/). Never installed.
 add_library(elastiqp_testing INTERFACE)
 add_library(elastiqp::testing ALIAS elastiqp_testing)
 target_include_directories(elastiqp_testing INTERFACE
@@ -57,28 +58,50 @@ if(ELASTIQP_BUILD_TESTS)
     target_link_libraries(${name} PRIVATE elastiqp::testing)
   endfunction()
 
-  # Solver correctness, relax() and the KKT VJP against the IPM reference.
+  # The elastic QP itself, for every backend (as / pdal / ipm) through one
+  # template: feasible, conflicting, equalities, edge dimensions, warm
+  # chains, Ruiz, exact-penalty behaviour; each backend against the IPM
+  # oracle, then all three cross-checked on the same instances.
+  elastiqp_test(test_solvers)
+  add_test(NAME elastiqp.solvers COMMAND test_solvers)
+
+  # Active set: proximal loop (singular Q, LP), hard rows, cycle guard,
+  # factorization reuse, Ruiz refresh, the creep and pinch/release
+  # regimes as warm chains.
+  elastiqp_test(test_das)
+  add_test(NAME elastiqp.das COMMAND test_das)
+
+  # PDAL: factorization cache and rank-one updates, set_warm_start, Ruiz
+  # remap of the warm iterates, relax() against the IPM's relaxed point,
+  # the KKT VJP against finite differences.
   elastiqp_test(test_pdal)
   add_test(NAME elastiqp.pdal COMMAND test_pdal)
 
-  # Regression watch for the warm-start saturation-creep failure mode
+  # IPM: warm-start flooring, set_warm_start / warm_start_from, relax()
+  # with and without Ruiz, the equality gate and the warm-start state.
+  elastiqp_test(test_ipm)
+  add_test(NAME elastiqp.ipm COMMAND test_ipm)
+
+  # PDAL regression watch for the warm-start saturation-creep failure mode
   # (isolated by bench_bcl_strategies in the benchmarks repo).
   elastiqp_test(test_bcl_creep)
   add_test(NAME elastiqp.bcl_creep COMMAND test_bcl_creep)
 
-  # Regression watch for the warm-start deactivation-creep failure mode
+  # PDAL regression watch for the warm-start deactivation-creep failure mode
   # (pinch-release tick from examples/experiments/constraint_conflict_demo.py;
   # see tests/test_gap_creep.cc).
   elastiqp_test(test_gap_creep)
   add_test(NAME elastiqp.gap_creep COMMAND test_gap_creep)
 
   # Ruiz equilibration: column/objective drift through the automatic
-  # re-equilibration, long-horizon oscillating drift, user-frame reporting.
+  # re-equilibration (pdal, as), long-horizon oscillating drift, user-frame
+  # reporting (all three).
   elastiqp_test(test_ruiz)
   add_test(NAME elastiqp.ruiz COMMAND test_ruiz)
 
-  # Linear programs (Q = 0): vertex optima known by construction, degenerate
-  # face, and the unbounded-LP limitation (not certified, just fails).
+  # Linear programs (Q = 0), every backend: vertex optima known by
+  # construction, degenerate face, and the unbounded-LP limitation (not
+  # certified, just fails).
   elastiqp_test(test_lp)
   add_test(NAME elastiqp.lp COMMAND test_lp)
 endif()

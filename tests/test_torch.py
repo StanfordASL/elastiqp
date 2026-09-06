@@ -50,17 +50,19 @@ maxabs = lambda a: float(torch.as_tensor(a).abs().max())
 
 
 def main():
-    print("torch vs nanobind: same C++ code, same answers")
+    print("torch vs nanobind: same C++ code, same answers (every backend)")
     Q, q, A, b, G, h, x_star = random_qp(0, 14, 0, 40)
+    for method in elastiqp.torch.METHODS:
+        sol = elastiqp.torch.solve(Q, q, G, h, 10.0, method=method)
+        nb_sol = elastiqp.solve(Q, q, G, h, 10.0, method=method)
+        dx = maxabs(sol.x - T(nb_sol.x))
+        # Same shared object, same thread: bit-identical.
+        check(
+            f"inequality-only n=14 p=40 [{method}]",
+            int(sol.converged) == 1 and dx == 0.0 and sol.x.dtype == torch.float64,
+            f"|dx|={dx:.1e}",
+        )
     sol = elastiqp.torch.solve(Q, q, G, h, 10.0)
-    nb_sol = elastiqp.solve(Q, q, G, h, 10.0)
-    dx = maxabs(sol.x - T(nb_sol.x))
-    # Same shared object, same thread: bit-identical.
-    check(
-        "inequality-only n=14 p=40",
-        int(sol.converged) == 1 and dx == 0.0 and sol.x.dtype == torch.float64,
-        f"|dx|={dx:.1e}",
-    )
     check("y empty without equalities", tuple(sol.y.shape) == (0,), "")
 
     Q, q, A, b, G, h, x_star = random_qp(1, 14, 4, 60)
@@ -175,16 +177,16 @@ def main():
     w_t = T(0.3 * rngd.standard_normal(8))
     args = tuple(T(v) for v in (Qf, qf, Af, bf, Gf, hf, pen))
 
-    def loss_smooth(Q_, q_, A_, b_, G_, h_, penalty_, kap=kappa, **kw):
+    def loss_smooth(Q_, q_, A_, b_, G_, h_, penalty_, kap=kappa, method="pdal", **kw):
         s = elastiqp.torch.solve(
-            Q_, q_, G_, h_, penalty_, A=A_, b=b_,
+            Q_, q_, G_, h_, penalty_, A=A_, b=b_, method=method,
             eps_abs=1e-11, max_iter=300, target_kappa=kap, **kw,
         )
         return s.x @ w_loss + s.t @ w_t
 
     def loss_relaxed(Q_, q_, A_, b_, G_, h_, penalty_, kap=kappa):
         out = torch.ops.elastiqp.solve(
-            Q_, q_, A_, b_, G_, h_, penalty_, 1e-11, 300, False, kap
+            Q_, q_, A_, b_, G_, h_, penalty_, 1e-11, 300, False, kap, "pdal"
         )
         xr, tr = out[5], out[6]
         return xr @ w_loss + tr @ w_t
@@ -230,7 +232,7 @@ def main():
         with torch.no_grad():
             s = elastiqp.torch.solve(
                 args[0], q_, args[4], args[5], args[6], A=args[2], b=args[3],
-                eps_abs=1e-11, max_iter=300,
+                method="pdal", eps_abs=1e-11, max_iter=300,
             )
         return s.x @ w_loss + s.t @ w_t
 
@@ -275,13 +277,13 @@ def main():
     # The relaxation runs only when differentiating: a no-grad solve and a
     # grad-enabled solve report the same iters, and the relaxed block of the
     # raw op is a copy of the tight block at kappa = 0.
-    out0 = torch.ops.elastiqp.solve(*args, 1e-11, 300, False, 0.0)
+    out0 = torch.ops.elastiqp.solve(*args, 1e-11, 300, False, 0.0, "pdal")
     check(
         "kappa=0: relaxed block == tight block",
         all(torch.equal(out0[i], out0[i + 5]) for i in range(5)),
         "",
     )
-    out = torch.ops.elastiqp.solve(*args, 1e-11, 300, False, kappa)
+    out = torch.ops.elastiqp.solve(*args, 1e-11, 300, False, kappa, "pdal")
     xr, tr, z1r, z2r, info = out[5], out[6], out[8], out[9], out[10]
     s2r = args[5] + tr - args[4] @ xr
     comp = max(maxabs(tr * z1r - kappa), maxabs(s2r * z2r - kappa))
@@ -292,12 +294,12 @@ def main():
     )
 
     # A stalled relaxation is reported through converged on the grad path.
-    out = torch.ops.elastiqp.solve(*args, 1e-11, 300, False, 1e8)
+    out = torch.ops.elastiqp.solve(*args, 1e-11, 300, False, 1e8, "pdal")
     tight_ok, relax_bad = float(out[10][0]) == 1.0, float(out[10][2]) == 0.0
     q_ = args[1].clone().requires_grad_(True)
     s = elastiqp.torch.solve(
         args[0], q_, args[4], args[5], args[6], A=args[2], b=args[3],
-        eps_abs=1e-11, max_iter=300, target_kappa=1e8,
+        method="pdal", eps_abs=1e-11, max_iter=300, target_kappa=1e8,
     )
     check(
         "failed relaxation is reported via converged",
@@ -345,7 +347,7 @@ def main():
     check("vmap(grad) matches batched backward", maxabs(g_v - g_b) < 1e-9, "")
     solve_x = lambda q_: elastiqp.torch.solve(
         args[0], q_, args[4], args[5], args[6], A=args[2], b=args[3],
-        eps_abs=1e-11, max_iter=300,
+        method="pdal", eps_abs=1e-11, max_iter=300,
     ).x
     J = torch.func.jacrev(solve_x)(args[1])
     q_j = args[1].clone().requires_grad_(True)
@@ -392,7 +394,7 @@ def main():
 
     try:
         q_ = T(qx).requires_grad_(True)
-        elastiqp.torch.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx, target_kappa=0.0)
+        elastiqp.torch.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx, method="pdal", target_kappa=0.0)
         msg = None
     except TypeError as e:
         msg = str(e)
@@ -403,12 +405,35 @@ def main():
         "",
     )
     with torch.no_grad():
-        s0 = elastiqp.torch.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx, target_kappa=0.0)
+        s0 = elastiqp.torch.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx, method="pdal", target_kappa=0.0)
     check("...but solves fine under no_grad", int(s0.converged) == 1, "")
 
-    q_ = T(qx).requires_grad_(True)
-    elastiqp.torch.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx).x.sum().backward()
-    check("grad with default target_kappa is finite", bool(torch.isfinite(q_.grad).all()), "")
+    for method in ("pdal", "ipm"):
+        q_ = T(qx).requires_grad_(True)
+        elastiqp.torch.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx, method=method).x.sum().backward()
+        check(f"grad with default target_kappa is finite [{method}]", bool(torch.isfinite(q_.grad).all()), "")
+    g_ipm = g_q(kappa, method="ipm")
+    dpi = maxabs(g_ipm - grads[1])
+    check("pdal and ipm smoothed d/dq agree", dpi < 1e-5, f"|dg|={dpi:.1e}")
+
+    print("Active-set backend: forward only")
+    a_sol = elastiqp.torch.solve(Qx, qx, Gx, hx, 10.0, A=Ax, b=bx, method="das")
+    a_ref = elastiqp.solve(Qx, qx, Gx, hx, 10.0, A=Ax, b=bx, method="das")
+    check("as forward matches nanobind", int(a_sol.converged) == 1 and maxabs(a_sol.x - T(a_ref.x)) == 0.0, "")
+    with torch.no_grad():
+        a_b = elastiqp.torch.solve(Qx, T(qx).expand(3, -1), Gx, hx, 10.0, A=Ax, b=bx, method="das")
+    check("as batched", tuple(a_b.x.shape) == (3, 14) and maxabs(a_b.x[1] - a_sol.x) == 0.0, "")
+    try:
+        q_ = T(qx).requires_grad_(True)
+        elastiqp.torch.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx, method="das")
+        msg = None
+    except TypeError as e:
+        msg = str(e)
+    check(
+        "grad with method='das' raises, pointing at pdal/ipm",
+        msg is not None and "pdal" in msg and "not differentiable" in msg,
+        "",
+    )
 
     g_rz = g_q(kappa, ruiz=True)
     dg = float(torch.linalg.norm(g_rz - grads[1]))

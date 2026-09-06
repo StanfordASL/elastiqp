@@ -16,6 +16,9 @@ def main():
 
     print("\nElastiQP provides JAX support via the FFI, so solves can sit inside")
     print("jit-compiled, vmapped, and differentiated code like any JAX function")
+    print("\nmethod= picks the backend ('das' by default). Gradients need the kappa")
+    print("relaxation, which the 'pdal' and 'ipm' backends provide; the examples")
+    print("below that differentiate use method='pdal'")
 
     print("\nConsider a 4D problem where x is pulled towards a goal x_des")
     n = 4
@@ -74,7 +77,8 @@ def main():
 
     def loss(q_, kappa=1e-6):
         sol = elastiqp.jax.solve(
-            Q, q_, G, h, penalty, A=A, b=b, target_kappa=kappa, eps_abs=1e-10
+            Q, q_, G, h, penalty, A=A, b=b, method="pdal",
+            target_kappa=kappa, eps_abs=1e-10,
         )
         return jnp.sum(sol.x**2)
 
@@ -102,7 +106,7 @@ def main():
     def x0(h0, kappa):
         h_mod = h.at[0].set(h0)
         return elastiqp.jax.solve(
-            Q, q, G, h_mod, penalty, A=A, b=b, target_kappa=kappa
+            Q, q, G, h_mod, penalty, A=A, b=b, method="pdal", target_kappa=kappa
         ).x[0]
 
     print("\nTo see this, let's compare d(x0)/d(h0): the sensitivity of x0 to its")

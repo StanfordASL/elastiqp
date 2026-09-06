@@ -14,6 +14,9 @@ def main():
 
     print("\nElastiQP registers its solve as a torch custom operator, so it sits")
     print("inside autograd, torch.compile, and torch.vmap like any torch function")
+    print("\nmethod= picks the backend ('das' by default). Gradients need the kappa")
+    print("relaxation, which the 'pdal' and 'ipm' backends provide; the examples")
+    print("below that differentiate use method='pdal'")
 
     print("\nConsider a 4D problem where x is pulled towards a goal x_des")
     n = 4
@@ -66,7 +69,8 @@ def main():
 
     def loss(q_, kappa=1e-6):
         sol = elastiqp.torch.solve(
-            Q, q_, G, h, penalty, A=A, b=b, target_kappa=kappa, eps_abs=1e-10
+            Q, q_, G, h, penalty, A=A, b=b, method="pdal",
+            target_kappa=kappa, eps_abs=1e-10,
         )
         return torch.sum(sol.x**2)
 
@@ -112,7 +116,9 @@ def main():
     def dx0_dh0(h0, kappa):
         h0 = torch.tensor(h0, requires_grad=True)
         h_mod = torch.cat([h0.reshape(1), h[1:]])
-        x0 = elastiqp.torch.solve(Q, q, G, h_mod, penalty, A=A, b=b, target_kappa=kappa).x[0]
+        x0 = elastiqp.torch.solve(
+            Q, q, G, h_mod, penalty, A=A, b=b, method="pdal", target_kappa=kappa
+        ).x[0]
         x0.backward()
         return float(h0.grad)
 

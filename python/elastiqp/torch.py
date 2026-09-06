@@ -6,12 +6,17 @@ autograd and torch.compile as an opaque primitive rather than as unrolled
 solver iterations, and the forward and backward passes each cross into C++
 exactly once per problem.
 
-Solves are differentiable with ``target_kappa > 0`` (log-barrier smoothed
-gradients, evaluated at the kappa-relaxed central point with complementarity
-s.z = kappa). The default target_kappa=1e-3 (qpax's default) makes
-loss.backward() work out of the box; set it to 0 to forbid differentiation.
+``method`` selects the backend: "das" (dual active set, the default),
+"pdal" (primal-dual augmented Lagrangian) or "ipm" (interior point).
+Forward solves work with all three. Gradients need the kappa relaxation,
+which only the PDAL and IPM backends have: with ``method="pdal"`` or
+``"ipm"`` and ``target_kappa > 0`` (log-barrier smoothed gradients,
+evaluated at the kappa-relaxed central point with complementarity
+s.z = kappa; the default 1e-3 is qpax's) loss.backward() works out of the
+box. Differentiating a ``method="das"`` solve raises.
 
-Set ruiz=True for badly-scaled data.
+Set ruiz=True for badly-scaled data (the active-set backend has it on by
+default).
 
 Leading batch dimensions are supported directly (one solve per entry;
 batch shapes of the arguments broadcast) and via torch.vmap. Gradients
@@ -35,7 +40,15 @@ import numpy as np
 
 from elastiqp import _core
 
-__all__ = ["solve", "Result"]
+__all__ = ["solve", "Result", "METHODS"]
+
+METHODS = ("das", "pdal", "ipm")
+# Default outer budget per backend (active-set iterations / BCL rounds /
+# interior-point iterations), used when max_iter is None.
+_DEFAULT_MAX_ITER = {"das": 10000, "pdal": 250, "ipm": 250}
+# Ruiz equilibration default per backend (on for the active set, whose LDP
+# conditioning depends on it; off for PDAL / IPM), used when ruiz is None.
+_DEFAULT_RUIZ = {"das": True, "pdal": False, "ipm": False}
 
 if not hasattr(torch.library, "custom_op"):
     raise ImportError("elastiqp.torch requires torch >= 2.4 (torch.library.custom_op)")
@@ -46,7 +59,7 @@ class Result(NamedTuple):
     t: torch.Tensor  # elastic slacks (per-row constraint violations)
     y: torch.Tensor  # equality duals (empty if no equalities)
     z_t: torch.Tensor  # duals of t >= 0
-    z_ineq: torch.Tensor  # duals of G x - t <= h
+    z: torch.Tensor  # duals of G x - t <= h, in [0, penalty]
     converged: torch.Tensor  # 0/1; includes the kappa relaxation when it runs
     iters: torch.Tensor
 
@@ -56,6 +69,11 @@ _NOT_DIFFERENTIABLE_MSG = (
     "the solution sits exactly on the constraint boundary, where "
     "the exact KKT derivative is undefined. Set target_kappa > 0 "
     "(e.g. 1e-3) for log-barrier smoothed gradients"
+)
+_AS_NOT_DIFFERENTIABLE_MSG = (
+    "elastiqp.torch.solve is not differentiable with method='das': the "
+    "active-set backend has no kappa relaxation. Use method='pdal' or "
+    "method='ipm' (with target_kappa > 0) for gradients"
 )
 
 
@@ -80,8 +98,8 @@ def _requires_grad(x: torch.Tensor) -> bool:
 
 # --- the primitive -----------------------------------------------------------
 #
-# (Q, q, A, b, G, h, penalty) -> (x, t, y, z_t, z_ineq,
-#                                  xr, tr, yr, z_t_r, z_ineq_r, info)
+# (Q, q, A, b, G, h, penalty) -> (x, t, y, z_t, z,
+#                                  xr, tr, yr, z_t_r, z_r, info)
 #
 # Same contract as the JAX FFI handler: the first block is the tight
 # solution, the second the kappa-relaxed central point used as the
@@ -122,13 +140,14 @@ def _solve_impl(
     max_iter: int,
     ruiz: bool,
     target_kappa: float,
+    method: str,
 ) -> _SOLVE_OUT:
     batch = tuple(Q.shape[:-2])
     n, m, p = Q.shape[-1], b.shape[-1], h.shape[-1]
     if not batch:  # fast path: no reshapes, C++ outputs handed to torch as-is
         res = _core._solve_relaxed(
             _np(Q), _np(q), _np(A), _np(b), _np(G), _np(h), _np(penalty),
-            eps_abs, max_iter, ruiz, target_kappa,
+            eps_abs, max_iter, ruiz, target_kappa, method,
         )
         return tuple(torch.from_numpy(r) for r in res)
     nb = int(np.prod(batch))
@@ -142,7 +161,7 @@ def _solve_impl(
     for i in range(nb):
         res = _core._solve_relaxed(
             Qf[i], qf[i], Af[i], bf[i], Gf[i], hf[i], pf[i],
-            eps_abs, max_iter, ruiz, target_kappa,
+            eps_abs, max_iter, ruiz, target_kappa, method,
         )
         for o, r in zip(out, res):
             o[i] = r
@@ -155,7 +174,7 @@ _solve_op = torch.library.custom_op(
 
 
 @_solve_op.register_fake
-def _(Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, target_kappa):
+def _(Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, target_kappa, method):
     batch = Q.shape[:-2]
     n, m, p = Q.shape[-1], b.shape[-1], h.shape[-1]
     dims = (n, p, m, p, p, n, p, m, p, p, 3)
@@ -163,11 +182,12 @@ def _(Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, target_kappa):
 
 
 def _setup_context(ctx, inputs, output):
-    Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, target_kappa = inputs
+    Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, target_kappa, method = inputs
     xr, tr, yr, z1r, z2r = output[5:10]
     # Differentiate at the kappa-relaxed point (the tight block is the value).
     ctx.save_for_backward(Q, A, G, h, xr, tr, yr, z1r, z2r)
     ctx.target_kappa = target_kappa
+    ctx.method = method
 
 
 # The backward is itself a custom op so that torch.compile / AOTAutograd can
@@ -187,7 +207,7 @@ def _vjp_impl(
     ct_t: torch.Tensor,
     ct_y: torch.Tensor,
     ct_z_t: torch.Tensor,
-    ct_z_ineq: torch.Tensor,
+    ct_z: torch.Tensor,
 ) -> Tuple[
     torch.Tensor,
     torch.Tensor,
@@ -201,13 +221,13 @@ def _vjp_impl(
     if not batch:
         res = _core._kkt_vjp(
             _np(Q), _np(A), _np(G), _np(h), _np(xr), _np(tr), _np(yr), _np(z1r),
-            _np(z2r), _np(ct_x), _np(ct_t), _np(ct_y), _np(ct_z_t), _np(ct_z_ineq),
+            _np(z2r), _np(ct_x), _np(ct_t), _np(ct_y), _np(ct_z_t), _np(ct_z),
         )
         return tuple(torch.from_numpy(r) for r in res)
     n, m, p = Q.shape[-1], A.shape[-2], G.shape[-2]
     nb = int(np.prod(batch))
     flat = lambda x, d: _np(x).reshape((nb,) + d)
-    ctf = [flat(c, (c.shape[-1],)) for c in (ct_x, ct_t, ct_y, ct_z_t, ct_z_ineq)]
+    ctf = [flat(c, (c.shape[-1],)) for c in (ct_x, ct_t, ct_y, ct_z_t, ct_z)]
     Qf, Af, Gf, hf = flat(Q, (n, n)), flat(A, (m, n)), flat(G, (p, n)), flat(h, (p,))
     xf, tf, yf = flat(xr, (n,)), flat(tr, (p,)), flat(yr, (m,))
     z1f, z2f = flat(z1r, (p,)), flat(z2r, (p,))
@@ -229,7 +249,7 @@ _kkt_vjp = torch.library.custom_op(
 
 
 @_kkt_vjp.register_fake
-def _(Q, A, G, h, xr, tr, yr, z1r, z2r, ct_x, ct_t, ct_y, ct_z_t, ct_z_ineq):
+def _(Q, A, G, h, xr, tr, yr, z1r, z2r, ct_x, ct_t, ct_y, ct_z_t, ct_z):
     batch = Q.shape[:-2]
     n, m, p = Q.shape[-1], A.shape[-2], G.shape[-2]
     dims = ((n, n), (n,), (m, n), (m,), (p, n), (p,), (p,))
@@ -237,16 +257,18 @@ def _(Q, A, G, h, xr, tr, yr, z1r, z2r, ct_x, ct_t, ct_y, ct_z_t, ct_z_ineq):
 
 
 def _backward(ctx, grads, vjp):
+    if ctx.method == "das":
+        raise RuntimeError(_AS_NOT_DIFFERENTIABLE_MSG)
     if not ctx.target_kappa > 0:
         raise RuntimeError(_NOT_DIFFERENTIABLE_MSG)
     saved = ctx.saved_tensors
     Q = saved[0]
-    # Cotangents of the tight solution (x, t, y, z_t, z_ineq). The relaxed
+    # Cotangents of the tight solution (x, t, y, z_t, z). The relaxed
     # block and info are internal and never carry a gradient. Missing
     # cotangents travel as size-0 vectors (zero).
     zero = Q.new_zeros(Q.shape[:-2] + (0,))
     ct = tuple(zero if c is None else c for c in grads[:5])
-    return tuple(vjp(*saved, *ct)) + (None, None, None, None)
+    return tuple(vjp(*saved, *ct)) + (None, None, None, None, None)
 
 
 def _vmap_rule(call, info, in_dims, Q, q, A, b, G, h, penalty, *opts):
@@ -277,8 +299,10 @@ class _Solve(torch.autograd.Function):
     """Eager path: the same primitive without the custom-op dispatch cost."""
 
     @staticmethod
-    def forward(Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, target_kappa):
-        return _solve_impl(Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, target_kappa)
+    def forward(Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, target_kappa, method):
+        return _solve_impl(
+            Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, target_kappa, method
+        )
 
     @staticmethod
     def setup_context(ctx, inputs, output):
@@ -301,7 +325,7 @@ class _Solve(torch.autograd.Function):
         return _vmap_rule(_Solve.apply, info, in_dims, *args)
 
 
-def _vjp_torch(Q, A, G, h, x, t, y, z1, z2, ct_x, ct_t, ct_y, ct_z_t, ct_z_ineq):
+def _vjp_torch(Q, A, G, h, x, t, y, z1, z2, ct_x, ct_t, ct_y, ct_z_t, ct_z):
     """KKT VJP in torch ops, for the torch.func transforms.
 
     Port of _kkt_bwd in python/elastiqp/jax.py (see its docstring for the
@@ -313,7 +337,7 @@ def _vjp_torch(Q, A, G, h, x, t, y, z1, z2, ct_x, ct_t, ct_y, ct_z_t, ct_z_ineq)
     n, m, p = Q.shape[-1], A.shape[-2], G.shape[-2]
     fill = lambda c, d: c if c.shape[-1] == d else Q.new_zeros(Q.shape[:-2] + (d,))
     xb, tb, yb = fill(ct_x, n), fill(ct_t, p), fill(ct_y, m)
-    z1b, z2b = fill(ct_z_t, p), fill(ct_z_ineq, p)
+    z1b, z2b = fill(ct_z_t, p), fill(ct_z, p)
 
     Qs = 0.5 * (Q + Q.transpose(-1, -2))
     Gt = G.transpose(-1, -2)
@@ -363,9 +387,10 @@ def solve(
     *,
     A=None,
     b=None,
+    method="das",
     eps_abs=1e-5,
-    max_iter=250,
-    ruiz=False,
+    max_iter=None,
+    ruiz=None,
     target_kappa=1e-3,
 ):
     """Solve the elastic QP
@@ -374,18 +399,27 @@ def solve(
         s.t. A x == b (hard, optional), G x - t <= h, t >= 0
 
     `penalty` may be a scalar or a per-constraint vector of length p.
-    `eps_abs`, `max_iter`, `ruiz` and `target_kappa` are Python scalars
-    (constants under torch.compile).
+    `method`, `eps_abs`, `max_iter`, `ruiz` and `target_kappa` are Python
+    scalars (constants under torch.compile).
+
+    `method` selects the backend: "das" (dual active set, the default),
+    "pdal" (primal-dual augmented Lagrangian) or "ipm" (interior point).
+    `max_iter` is the backend's outer budget (active-set iterations, BCL
+    rounds, interior-point iterations); None uses the backend default
+    (10000 / 250 / 250). `ruiz=None` likewise uses the backend default
+    (on for "das", off for "pdal" / "ipm"); set it explicitly for
+    badly-scaled data.
 
     Leading batch dimensions (Q: (..., n, n), q: (..., n), ...) solve one
     problem per entry; the batch shapes of the arguments broadcast against
     each other, so a single Q may be shared across a batch of q.
 
-    Every call here is a cold solve. It is differentiable in reverse mode
-    w.r.t. all tensor arguments when target_kappa > 0 (the default);
-    backward() with an explicit target_kappa=0 raises (the certificate sits
-    exactly on the constraint boundary, where the exact KKT derivative is
-    undefined). `ruiz=True` enables Ruiz equilibration for badly-scaled
+    Every call here is a cold solve. With method "pdal" or "ipm" it is
+    differentiable in reverse mode w.r.t. all tensor arguments when
+    target_kappa > 0 (the default); a solve with method="das" or with an
+    explicit target_kappa=0 raises when some input requires grad (the
+    active-set backend has no relaxation; the certificate sits exactly on
+    the constraint boundary, where the exact KKT derivative is undefined). `ruiz=True` enables Ruiz equilibration for badly-scaled
     data; the solver terminates on and returns unscaled quantities, so it
     does not affect gradients.
 
@@ -404,6 +438,12 @@ def solve(
     either the solve or the relaxation failed, so a bad gradient
     evaluation point is never silent.
     """
+    if method not in METHODS:
+        raise ValueError(f"method must be one of {METHODS}, got {method!r}")
+    if max_iter is None:
+        max_iter = _DEFAULT_MAX_ITER[method]
+    if ruiz is None:
+        ruiz = _DEFAULT_RUIZ[method]
     Q = torch.as_tensor(Q)
     device = Q.device
     to = lambda x: torch.as_tensor(x, device=device).to(torch.float64)
@@ -444,6 +484,8 @@ def solve(
 
     args = (Q, q, A, b, G, h, penalty)
     differentiating = torch.is_grad_enabled() and any(_requires_grad(x) for x in args)
+    if differentiating and method == "das":
+        raise TypeError(_AS_NOT_DIFFERENTIABLE_MSG)
     if differentiating and not target_kappa > 0:
         raise TypeError(_NOT_DIFFERENTIABLE_MSG)
     # Tight solution only when not differentiating: no relaxation runs.
@@ -454,8 +496,8 @@ def solve(
     call = _solve_op if torch.compiler.is_compiling() else _Solve.apply
     if device.type != "cpu":
         args = tuple(x.cpu() for x in args)
-    out = call(*args, float(eps_abs), int(max_iter), bool(ruiz), kappa)
-    x, t, y, z_t, z_ineq = (o.to(device) for o in out[:5])
+    out = call(*args, float(eps_abs), int(max_iter), bool(ruiz), kappa, method)
+    x, t, y, z_t, z = (o.to(device) for o in out[:5])
     info = out[10]
     # info = [converged, iters, relax_converged]: converged folds in the
     # relaxation, which agrees with the tight flag whenever it does not run.
@@ -465,7 +507,7 @@ def solve(
         t=t,
         y=y,
         z_t=z_t,
-        z_ineq=z_ineq,
+        z=z,
         converged=converged.to(torch.int32).to(device),
         iters=info[..., 1].to(torch.int32).to(device),
     )

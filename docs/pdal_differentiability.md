@@ -3,14 +3,15 @@
 *Notes on the implementation of `elastiqp::Solver::relax()` and the
 differentiable JAX path (`target_kappa > 0`).*
 
-*Historical note: when this work was done, ElastiQP shipped a secondary
-proximal interior-point (IPM) backend, and the IPM's `relax()` was the
-existing differentiability path this work replaces. This result made the
-IPM backend redundant, and it has since been removed from the library; it
-survives as a test-only reference implementation
-(`tests/ipm_reference.hpp`, not installed or distributed) that
-cross-validates both the solver and the relaxed point. References to "the
-IPM" below mean that reference implementation.*
+*Historical note: when this work was done, the proximal interior-point
+(IPM) backend's `relax()` was the existing differentiability path this work
+replaces. The IPM was demoted to a test-only oracle for a while and is a
+full backend again since the 2026-09 restructure
+(`include/elastiqp/elastiqp_ipm.hpp`, `elastiqp::ipm::Solver`); both
+`pdal::Solver::relax()` and `ipm::Solver::relax()` reach the same relaxed
+point and the test suite cross-validates them. References to "the IPM"
+below mean that backend. `elastiqp::Solver` in this note means the PDAL
+solver (`elastiqp::pdal::Solver`); the active-set backend has no relax().*
 
 ## Summary
 
@@ -45,7 +46,7 @@ iterations.
 
 ### The IPM's existing differentiability
 
-The IPM (`tests/ipm_reference.hpp`) follows qpax: after `solve()`,
+The IPM (`include/elastiqp/elastiqp_ipm.hpp`) follows qpax: after `solve()`,
 `relax(kappa)` re-solves from the
 optimum toward the same KKT system with complementarity `s ⊙ z = κ` (Newton
 steps toward the kappa-hyperbola with fraction-to-boundary step limiting,

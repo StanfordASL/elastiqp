@@ -9,6 +9,11 @@ def main():
 
     print("\n--- ElastiQP: Basic Usage ---")
 
+    print("\nElastiQP has three backends: 'das' (dual active set, the default),")
+    print("'pdal' (primal-dual augmented Lagrangian) and 'ipm' (interior point).")
+    print("They solve the same problem and return the same Solution; pick one")
+    print("with method= in solve() or elastiqp.Solver(method)")
+
     print("\nConsider a 2D toy problem where x is 'pulled towards' a goal (2, 0)")
     x_des = np.array([2.0, 0.0])
     Q = np.eye(2)
@@ -50,7 +55,7 @@ def main():
     )
     print("exceeds the constraint's optimal Lagrange multiplier, the elastic solution")
     print("is exactly the hard-constrained solution. Here, the multipliers are")
-    print(f"z = {sol.z_ineq}")
+    print(f"z = {sol.z}")
     print("so the active constraint (2ii) stays exact for any penalty above 2")
 
     print("\nAs a special case, if we set a penalty below the multiplier, that")
@@ -90,9 +95,15 @@ def main():
         "\nNote that a hard-constrained solver would return 'infeasible' on this problem"
     )
 
+    print("\nEvery backend agrees on the answer:")
+    for method in elastiqp.METHODS:
+        s = elastiqp.solve(Q, q, G2, h2, penalty2, A=A, b=b, method=method)
+        print(f"  {method:>4s}: x = {s.x}  iters = {s.iters}")
+
     print("\n--- Warm-Starting ---")
 
     print("\nTo warm-start, we first need to construct a Solver object")
+    print("(elastiqp.Solver(method) picks the backend; the default is 'das')")
     solver = elastiqp.Solver()
     print("Then, we call setup() with initial problem data, and update() in the loop")
     solver.setup(Q, q, G, h, penalty, A=A, b=b)
@@ -119,7 +130,13 @@ def main():
     print("\nNote that this speedup can be significant on robot control problems!")
 
     print("\n--- Differentiability ---")
-    print("\nFor differentiability, please see the JAX usage example")
+    print("\nThe 'pdal' and 'ipm' backends can relax() a solution to the")
+    print("kappa-smoothed differentiation point; see the JAX and PyTorch examples")
+    pdal = elastiqp.Solver("pdal")
+    pdal.setup(Q, q, G, h, penalty, A=A, b=b)
+    pdal.solve()
+    relaxed = pdal.relax(1e-3)
+    print(f"relaxed x = {relaxed.x} (s.z = kappa on every row)")
 
 
 if __name__ == "__main__":

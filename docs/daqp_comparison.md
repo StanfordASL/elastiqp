@@ -82,7 +82,7 @@ measured and what it means for the paper. Raw data:
    a third "saturated" state (lambda = w, row leaves the working set and
    contributes a fixed force). Prototyped and measured below.
 
-## Elastic DAQP prototype (`elastiqp_benchmarks/common/elastic_daqp.hpp`)
+## Elastic DAQP prototype (`elastiqp_benchmarks/common/elastic_daqp.hpp`, now `include/elastiqp/elastiqp_das.hpp`, the `das` backend)
 
 Single-header, Eigen-only re-implementation of DAQP's core (least-distance
 problem in u = R x + R^-T q, recursive LDL' of the working-set Gram matrix,
@@ -330,7 +330,7 @@ cap left a 2e-3 violation). Files:
 | piqp-expanded | 35/36 | 6.65 | 26.1 |
 | qpax-hard | 17/36 | 26.4 | 103 |
 
-(`ipm` = `tests/support/ipm_reference.hpp`, the original elastic-PIQP
+(`ipm` = `include/elastiqp/elastiqp_ipm.hpp` (formerly `tests/support/ipm_reference.hpp`), the original elastic-PIQP
 experiment, cold on the same elastic form, same eps and Ruiz as elastiqp;
 added in a second pinned pass, so the other rows moved by a few percent.)
 

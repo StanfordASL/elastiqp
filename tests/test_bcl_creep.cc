@@ -1,4 +1,4 @@
-// Regression test for the warm-start saturation-creep failure mode and
+// PDAL regression test for the warm-start saturation-creep failure mode and
 // the mixed-penalty jump regression.
 //
 // Uniform cells: penalty 1e4, sigma 1e-4 qh drift, n=14 p=100 (feas and
@@ -54,7 +54,7 @@ void RunCell(Structure st, Size sz, const VectorXd& penalty, double sigma,
   const Trajectory traj = drift_traj::MakeTrajectory(
       sz, st, penalty, sigma, Drift::kQH, seed, kTicks);
 
-  elastiqp::Solver s;  // shipped defaults; only eps/ruiz pinned
+  elastiqp::pdal::Solver s;  // shipped defaults; only eps/ruiz pinned
   s.settings.eps_abs = 1e-5;
   s.settings.eps_rel = 0;
   s.settings.ruiz = true;

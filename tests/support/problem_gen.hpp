@@ -97,27 +97,27 @@ inline QPData InfeasibleEq(std::mt19937& rng, int n, int m, int p,
 }
 
 // Max KKT residual of the elastic QP (with hard equalities Ax = b, dual y)
-// at (x, t, y, z_t, z_ineq), where z_t are the duals of t >= 0 and z_ineq
-// those of Gx - t <= h. Covers stationarity in x and t, primal feasibility
+// at (x, t, y, z_t, z), where z_t are the duals of t >= 0 and z those of
+// Gx - t <= h. Covers stationarity in x and t, primal feasibility
 // (equality and inequality), dual feasibility, and complementarity.
 inline double ElasticKKTResidual(const MatrixXd& Q, const VectorXd& q,
                                  const MatrixXd& A, const VectorXd& b,
                                  const MatrixXd& G, const VectorXd& h,
                                  const VectorXd& penalty, const VectorXd& x,
                                  const VectorXd& t, const VectorXd& y,
-                                 const VectorXd& z_t, const VectorXd& z_ineq) {
-  VectorXd stat = Q * x + q + G.transpose() * z_ineq;
+                                 const VectorXd& z_t, const VectorXd& z) {
+  VectorXd stat = Q * x + q + G.transpose() * z;
   if (b.size() > 0) stat += A.transpose() * y;
   double res = stat.lpNorm<Eigen::Infinity>();
   if (b.size() > 0)
     res = std::max(res, (A * x - b).lpNorm<Eigen::Infinity>());
-  res = std::max(res, (penalty - z_t - z_ineq).lpNorm<Eigen::Infinity>());
+  res = std::max(res, (penalty - z_t - z).lpNorm<Eigen::Infinity>());
   const VectorXd viol = G * x - t - h;  // <= 0 at feasibility
   res = std::max(res, viol.cwiseMax(0.0).maxCoeff());
   res = std::max(res, (-t).cwiseMax(0.0).maxCoeff());
   res = std::max(res, (-z_t).cwiseMax(0.0).maxCoeff());
-  res = std::max(res, (-z_ineq).cwiseMax(0.0).maxCoeff());
-  res = std::max(res, z_ineq.cwiseProduct(viol).lpNorm<Eigen::Infinity>());
+  res = std::max(res, (-z).cwiseMax(0.0).maxCoeff());
+  res = std::max(res, z.cwiseProduct(viol).lpNorm<Eigen::Infinity>());
   res = std::max(res, z_t.cwiseProduct(t).lpNorm<Eigen::Infinity>());
   return res;
 }
@@ -127,9 +127,9 @@ inline double ElasticKKTResidual(const MatrixXd& Q, const VectorXd& q,
                                  const MatrixXd& G, const VectorXd& h,
                                  const VectorXd& penalty, const VectorXd& x,
                                  const VectorXd& t, const VectorXd& z_t,
-                                 const VectorXd& z_ineq) {
+                                 const VectorXd& z) {
   return ElasticKKTResidual(Q, q, MatrixXd(0, q.size()), VectorXd(0), G, h,
-                            penalty, x, t, VectorXd(0), z_t, z_ineq);
+                            penalty, x, t, VectorXd(0), z_t, z);
 }
 
 // Elastic objective 0.5 x'Qx + q'x + penalty' max(0, Gx - h) evaluated with

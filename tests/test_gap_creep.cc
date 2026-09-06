@@ -1,4 +1,4 @@
-// Regression test for the warm-start deactivation-creep failure mode.
+// PDAL regression test for the warm-start deactivation-creep failure mode.
 //
 // Scenario captured from examples/experiments/constraint_conflict_demo.py
 // ("Equal penalties", ticks 463/464 at dt=0.01): a 2D double-integrator
@@ -62,17 +62,17 @@ int main() {
   h464 << 5.3894716545331169, -5.4329140545125938, 5.017615727279078;
 
   // Ground truth for the release tick (a cold solve never stalls here).
-  const elastiqp::Solution ref = elastiqp::Solve(Q, q464, G464, h464, penalty);
+  const elastiqp::Solution ref = elastiqp::pdal::Solve(Q, q464, G464, h464, penalty);
   Check("cold reference converges", ref.converged == 1, ref.iters, "iters");
 
   // The warm chain at shipped defaults.
-  elastiqp::Solver s;
+  elastiqp::pdal::Solver s;
   s.setup(Q, q463, G463, h463, penalty);
   const elastiqp::Solution pinch = s.solve();
   Check("pinch tick converges", pinch.converged == 1, pinch.iters, "iters");
   // The scenario premise: conflicting rows at/near the penalty cap.
-  Check("pinch duals ride the cap", pinch.z_ineq.maxCoeff() > 0.99e3,
-        pinch.z_ineq.maxCoeff(), "zmax");
+  Check("pinch duals ride the cap", pinch.z.maxCoeff() > 0.99e3,
+        pinch.z.maxCoeff(), "zmax");
 
   s.set_q(q464);
   s.set_G(G464);
@@ -83,12 +83,12 @@ int main() {
   Check("release tick iters bounded", rel.iters <= 50, rel.iters, "iters");
   const double xerr = (rel.x - ref.x).lpNorm<Eigen::Infinity>();
   Check("release x matches cold", xerr <= 1e-3, xerr, "err");
-  const double zerr = (rel.z_ineq - ref.z_ineq).lpNorm<Eigen::Infinity>();
+  const double zerr = (rel.z - ref.z).lpNorm<Eigen::Infinity>();
   Check("release duals leave the cap", zerr <= 1.0, zerr, "err");
 
   // Informational: the repro still discriminates (not gated -- a future
   // deeper fix may legitimately clear it with the jump off).
-  elastiqp::Solver off;
+  elastiqp::pdal::Solver off;
   off.settings.bcl_release_jump = false;
   off.setup(Q, q463, G463, h463, penalty);
   off.solve();

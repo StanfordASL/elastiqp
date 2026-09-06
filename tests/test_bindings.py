@@ -49,16 +49,88 @@ def make_infeasible(G, h, n_conflicts, gap=1.0):
 
 
 def main():
-    print("solve: feasible => known strict optimum, t ~ 0")
+    print("solve: feasible => known strict optimum, t ~ 0 (every backend)")
     Q, q, A, b, G, h, x_star = random_qp(1, 10, 0, 30)
+    for method in elastiqp.METHODS:
+        sol = elastiqp.solve(Q, q, G, h, 1e3, method=method)
+        dx = np.abs(sol.x - x_star).max()
+        check(
+            f"n=10 p=30 [{method}]",
+            sol.converged == 1 and dx < 1e-5 and sol.t.max() < 1e-6,
+            f"|dx|={dx:.1e}",
+        )
     sol = elastiqp.solve(Q, q, G, h, 1e3)
-    dx = np.abs(sol.x - x_star).max()
-    check(
-        "n=10 p=30",
-        sol.converged == 1 and dx < 1e-5 and sol.t.max() < 1e-6,
-        f"|dx|={dx:.1e}",
-    )
     check("y empty without equalities", sol.y.shape == (0,), f"shape={sol.y.shape}")
+    check(
+        "default method is the active set (das.Solver)",
+        isinstance(elastiqp.Solver(), elastiqp.das.Solver)
+        and isinstance(elastiqp.Settings(), elastiqp.das.Settings),
+        "",
+    )
+
+    print("Backends agree with each other (x, z, objective)")
+    Qc, qc, Ac, bc, Gc, hc, _ = random_qp(4, 12, 3, 40)
+    Gc, hc = make_infeasible(Gc, hc, 6)
+    penc = np.where(np.arange(40) % 3 == 0, 2.0, 50.0)
+    sols = {
+        m: elastiqp.solve(Qc, qc, Gc, hc, penc, A=Ac, b=bc, method=m, eps_abs=1e-9)
+        for m in elastiqp.METHODS
+    }
+    ref = sols["das"]
+    for m in ("pdal", "ipm"):
+        dx = np.abs(sols[m].x - ref.x).max()
+        dz = np.abs(sols[m].z - ref.z).max()
+        dobj = abs(sols[m].primal_obj - ref.primal_obj)
+        check(
+            f"{m} == as (mixed penalties, conflicts, equalities)",
+            all(s.converged == 1 for s in sols.values())
+            and dx < 1e-6
+            and dz < 1e-5
+            and dobj < 1e-7,
+            f"|dx|={dx:.1e} |dz|={dz:.1e} |dobj|={dobj:.1e}",
+        )
+    check(
+        "row-state counts agree",
+        len({(s.n_active, s.n_saturated) for s in sols.values()}) == 1,
+        f"{[(s.n_active, s.n_saturated) for s in sols.values()]}",
+    )
+    check(
+        "z in [0, penalty], z_t = penalty - z, s_t = t",
+        all(
+            (s.z >= -1e-12).all()
+            and (s.z <= penc + 1e-12).all()
+            and np.abs(s.z_t - (penc - s.z)).max() < 1e-9
+            and np.abs(s.s_t - s.t).max() < 1e-12
+            for s in sols.values()
+        ),
+        "",
+    )
+    check(
+        "outer_iters: as >= 1 prox round, pdal >= 1 BCL round, ipm 0",
+        sols["das"].outer_iters >= 1 and sols["pdal"].outer_iters >= 1 and sols["ipm"].outer_iters == 0,
+        f"{[s.outer_iters for s in sols.values()]}",
+    )
+
+    def raises(exc, fn):
+        try:
+            fn()
+        except exc:
+            return True
+        except Exception:
+            return False
+        return False
+
+    check("unknown method raises", raises(ValueError, lambda: elastiqp.solve(Q, q, G, h, 1e3, method="sqp")), "")
+    check("Solver('sqp') raises", raises(ValueError, lambda: elastiqp.Solver("sqp")), "")
+    check(
+        "settings of the wrong backend raises",
+        raises(ValueError, lambda: elastiqp.solve(Q, q, G, h, 1e3, method="ipm", settings=elastiqp.pdal.Settings())),
+        "",
+    )
+    st = elastiqp.Settings("das")
+    st.eps_abs = 1e-10
+    ss = elastiqp.solve(Qc, qc, Gc, hc, penc, A=Ac, b=bc, settings=st)
+    check("settings= object honored", ss.converged == 1 and np.abs(ss.x - ref.x).max() < 1e-7, "")
 
     print("solve: infeasible => slacks activate")
     G2, h2 = make_infeasible(G, h, 5)
@@ -115,18 +187,29 @@ def main():
     )
 
     print("Solver: settings round-trip")
-    solver2 = elastiqp.Solver()
+    solver2 = elastiqp.Solver("pdal")
     solver2.settings.eps_abs = 1e-6
     solver2.settings.eps_duality_gap_abs = 1e-6
     solver2.settings.warm_start = False
     check(
-        "read back",
+        "read back (pdal.Settings)",
         solver2.settings.eps_abs == 1e-6
         and solver2.settings.warm_start is False
         and solver2.settings.max_outer_iter == 250
         and solver2.settings.max_iter_in == 1500
         and solver2.settings.mu_in_init == 1e-1
         and solver2.settings.ruiz is False,
+        "",
+    )
+    solver3 = elastiqp.Solver()
+    solver3.settings.eps_abs = 1e-7
+    solver3.settings.warm_start = False
+    check(
+        "read back (das.Settings)",
+        solver3.settings.eps_abs == 1e-7
+        and solver3.settings.warm_start is False
+        and solver3.settings.max_iter == 10000
+        and solver3.settings.ruiz is True,
         "",
     )
     print("Solver: warm start across a drifting sequence (q,h,b)")
@@ -138,7 +221,6 @@ def main():
     # The warm-vs-cold agreement threshold (1e-6) needs tighter solves
     # than the 1e-5 default.
     warm.settings.eps_abs = 1e-8
-    warm.settings.eps_duality_gap_abs = 1e-8
     warm.setup(Q, q0, G, h0, 10.0, A=A, b=b0)
     cold_iters = warm_iters = 0
     worst_dx = worst_eq = 0.0
@@ -203,15 +285,6 @@ def main():
         "",
     )
 
-    def raises(exc, fn):
-        try:
-            fn()
-        except exc:
-            return True
-        except Exception:
-            return False
-        return False
-
     check(
         "wrong-size q raises",
         raises(ValueError, lambda: upd.update(q=np.zeros(13))),
@@ -257,24 +330,24 @@ def main():
         "",
     )
 
-    print("Solver: factorizations(), explicit set_warm_start, ruiz flag")
+    print("pdal.Solver: factorizations(), explicit set_warm_start, ruiz flag")
     Qp, qp_, Ap, bp, Gp, hp, xp = random_qp(11, 20, 5, 60)
     Gp, hp = make_infeasible(Gp, hp, 15)
-    pdal = elastiqp.Solver()
+    pdal = elastiqp.Solver("pdal")
     pdal.setup(Qp, qp_, Gp, hp, 10.0, A=Ap, b=bp)
     pdal.solve()
     check("factorizations() exposed", isinstance(pdal.factorizations(), int), "")
     check(
-        "penalty - z_t - z_ineq == 0 (to rounding)",
+        "penalty - z_t - z == 0 (to rounding)",
         np.abs(
-            10.0 - np.asarray(pdal.solution().z_t) - np.asarray(pdal.solution().z_ineq)
+            10.0 - np.asarray(pdal.solution().z_t) - np.asarray(pdal.solution().z)
         ).max()
         < 1e-12,
         "",
     )
     seed = pdal.solution()
     pdal.settings.warm_start = False
-    pdal.set_warm_start(np.asarray(seed.x), np.asarray(seed.y), np.asarray(seed.z_ineq))
+    pdal.set_warm_start(np.asarray(seed.x), np.asarray(seed.y), np.asarray(seed.z))
     es = pdal.solve()
     check(
         "set_warm_start seeds the solve",
@@ -291,6 +364,7 @@ def main():
         10.0 / scale,
         A=Ap,
         b=bp,
+        method="pdal",
         eps_abs=1e-8,
         ruiz=True,
     )
@@ -303,7 +377,7 @@ def main():
     # Ruiz scaling is computed at setup(); matrix updates keep it (exact,
     # drifting), and solve() re-equilibrates past settings.ruiz_refresh_ratio
     # without losing the warm start. reequilibrate() is the manual form.
-    rq = elastiqp.Solver()
+    rq = elastiqp.Solver("pdal")
     rq.settings.ruiz = True
     rq.settings.eps_abs = 1e-8
     rq.setup(Qp, qp_, Gp, hp, 10.0, A=Ap, b=bp)
@@ -341,14 +415,14 @@ def main():
     drift_q = rq.scaling_drift()
     rs = rq.solve()
     rr = rq.relax(1e-3)
-    fresh = elastiqp.Solver()
+    fresh = elastiqp.Solver("pdal")
     fresh.settings.ruiz = True
     fresh.settings.eps_abs = 1e-8
     fresh.setup(alpha * Qp, alpha * qp_, Gp, hp, alpha * 10.0, A=Ap, b=bp)
     fresh.solve()
     fr = fresh.relax(1e-3)
     dx = np.abs(np.asarray(rs.x) - np.asarray(base.x)).max()
-    dz = np.abs(np.asarray(rs.z_ineq) - alpha * np.asarray(base.z_ineq)).max() / alpha
+    dz = np.abs(np.asarray(rs.z) - alpha * np.asarray(base.z)).max() / alpha
     rdx = np.abs(np.asarray(rr.x) - np.asarray(fr.x)).max()
     check(
         "set_Q objective scale: refresh, x invariant, duals scale",
@@ -365,14 +439,14 @@ def main():
         f"|dx|={rdx:.1e}",
     )
 
-    print("Solver.relax: kappa relaxation (smoothed differentiation point)")
+    print("pdal.Solver.relax: kappa relaxation (smoothed differentiation point)")
     kappa = 1e-3
     tight = pdal.solution()
     rsol = pdal.relax(kappa)
     comp = np.concatenate(
         [
             np.asarray(rsol.s_t) * np.asarray(rsol.z_t),
-            np.asarray(rsol.s_ineq) * np.asarray(rsol.z_ineq),
+            np.asarray(rsol.s_ineq) * np.asarray(rsol.z),
         ]
     )
     moved = np.abs(np.asarray(rsol.x) - np.asarray(tight.x)).max()
@@ -389,6 +463,90 @@ def main():
         f"iters={again.iters}",
     )
 
+    print("ipm.Solver: relax, warm_start_from a foreign solution, settings")
+    ipm = elastiqp.Solver("ipm")
+    ipm.settings.eps_abs = 1e-8
+    ipm.settings.eps_duality_gap_abs = 1e-8
+    ipm.setup(Qp, qp_, Gp, hp, 10.0, A=Ap, b=bp)
+    isol = ipm.solve()
+    dx = np.abs(isol.x - tight.x).max()
+    check("ipm matches pdal", isol.converged == 1 and dx < 1e-6, f"|dx|={dx:.1e}")
+    irs = ipm.relax(kappa, 1e-8)
+    comp = np.concatenate([irs.s_t * irs.z_t, irs.s_ineq * irs.z])
+    rdx = np.abs(irs.x - rsol.x).max()
+    check(
+        "ipm relax reaches the same relaxed point as pdal",
+        irs.converged == 1 and np.abs(comp - kappa).max() < 1e-7 and rdx < 1e-5,
+        f"comp_err={np.abs(comp - kappa).max():.1e} |dx|={rdx:.1e}",
+    )
+    ipm2 = elastiqp.Solver("ipm")
+    ipm2.settings.eps_abs = 1e-8
+    ipm2.settings.eps_duality_gap_abs = 1e-8
+    ipm2.setup(Qp, qp_, Gp, hp, 10.0, A=Ap, b=bp)
+    ipm2.warm_start_from(tight)  # a PDAL certificate seeds the IPM
+    iw = ipm2.solve()
+    check(
+        "warm_start_from(pdal solution) converges in fewer iters",
+        iw.converged == 1 and iw.iters < isol.iters,
+        f"{iw.iters} < {isol.iters}",
+    )
+    check(
+        "ipm.Settings round-trip",
+        ipm.settings.max_iter == 250 and ipm.settings.rho_init == 1e-6 and ipm.settings.eps_abs == 1e-8,
+        "",
+    )
+
+    print("das.Solver: row states, factorization reuse, penalty=inf hard rows")
+    asol = elastiqp.Solver("das")
+    asol.settings.eps_abs = 1e-9
+    asol.setup(Qp, qp_, Gp, hp, 10.0, A=Ap, b=bp)
+    a1 = asol.solve()
+    states = [asol.row_state(i) for i in range(60)]
+    check(
+        "row_state counts match the Solution",
+        states.count(elastiqp.RowState.Active) == a1.n_active
+        and states.count(elastiqp.RowState.Saturated) == a1.n_saturated
+        and a1.n_saturated > 0,
+        f"active={a1.n_active} saturated={a1.n_saturated}",
+    )
+    asol.update(q=qp_ + 1e-3)
+    a2 = asol.solve()
+    check(
+        "q-only update keeps the factorization, warm re-solve is short",
+        a2.converged == 1 and not asol.refactored() and asol.rows_updated() == 0 and a2.iters <= 5,
+        f"iters={a2.iters}",
+    )
+    check("das.Settings round-trip", asol.settings.max_iter == 10000 and asol.settings.eps_abs == 1e-9 and asol.settings.ruiz is True, "")
+    pen_inf = np.full(60, 10.0)
+    pen_inf[:4] = np.inf  # the first conflicting pair is now hard on both sides
+    hard = elastiqp.solve(Qp, qp_, Gp, hp, pen_inf, A=Ap, b=bp, method="das")
+    check(
+        "conflicting hard rows (penalty=inf) => Infeasible",
+        hard.status == elastiqp.Status.Infeasible and hard.converged == 0,
+        str(hard.status),
+    )
+    pen_inf = np.full(60, 10.0)
+    pen_inf[4] = np.inf  # one hard row that the elastic rest can accommodate
+    hard = elastiqp.solve(Qp, qp_, Gp, hp, pen_inf, A=Ap, b=bp, method="das")
+    check(
+        "single hard row holds exactly",
+        hard.converged == 1 and hard.t[4] < 1e-9 and (Gp[4] @ hard.x - hp[4]) <= 1e-9,
+        f"viol={Gp[4] @ hard.x - hp[4]:.1e}",
+    )
+
+    print("Inconsistent equalities => Status.Infeasible on every backend")
+    Ai = np.vstack([Ap, Ap[0]])
+    bi = np.append(bp, bp[0] + 1.0)
+    for method in elastiqp.METHODS:
+        s = elastiqp.Solver(method)
+        s.setup(Qp, qp_, Gp, hp, 10.0, A=Ai, b=bi)
+        r = s.solve()
+        check(
+            f"[{method}] Infeasible, eq_infeasibility > 0",
+            r.status == elastiqp.Status.Infeasible and s.eq_infeasibility() > 0.1,
+            f"lb={s.eq_infeasibility():.2f}",
+        )
+
     print("Return types and shapes")
     s = elastiqp.solve(
         Q[:14, :14],
@@ -403,7 +561,9 @@ def main():
         s.x.dtype == np.float64
         and s.x.shape == (14,)
         and s.y.shape == (0,)
-        and all(v.shape == (14,) for v in (s.t, s.s_t, s.s_ineq, s.z_t, s.z_ineq))
+        and all(v.shape == (14,) for v in (s.t, s.s_t, s.s_ineq, s.z_t, s.z))
+        and isinstance(s.outer_iters, int)
+        and isinstance(s.n_active, int)
         and isinstance(s.converged, int)
         and isinstance(s.iters, int)
         and s.status == elastiqp.Status.Solved
@@ -422,7 +582,7 @@ def main():
     tol = float(d["solver_tol"])
 
     def hard_case_solver():
-        s = elastiqp.Solver()
+        s = elastiqp.Solver("pdal")
         s.settings.eps_abs = tol
         s.settings.eps_duality_gap_abs = tol
         s.setup(d["P"], d["q"], d["G"], d["h"], d["penalties"])
@@ -466,7 +626,7 @@ def main():
     tol2 = float(d2["solver_tol"])
 
     def overshoot_solver():
-        s = elastiqp.Solver()
+        s = elastiqp.Solver("pdal")
         s.settings.eps_abs = tol2
         s.settings.eps_duality_gap_abs = tol2
         s.setup(d2["P"], d2["q"], d2["G"], d2["h"], d2["penalties"])

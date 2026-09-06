@@ -44,15 +44,62 @@ def _import_core():  # compiled nanobind core
     return _core
 
 
+import sys as _sys
+
 _core = _import_core()
 
-Settings = _core.Settings
 Solution = _core.Solution
-Solver = _core.Solver
 Status = _core.Status
 solve = _core.solve
 
+# One submodule per backend, mirroring the C++ namespaces: each has its own
+# Settings and Solver (das.RowState too). Registered in sys.modules so that
+# `import elastiqp.das` works as well as `elastiqp.das`.
+das = _core.das
+pdal = _core.pdal
+ipm = _core.ipm
+for _name, _mod in (("das", das), ("pdal", pdal), ("ipm", ipm)):
+    _sys.modules[f"elastiqp.{_name}"] = _mod
+RowState = das.RowState
+
+METHODS = ("das", "pdal", "ipm")
+_BACKENDS = {"das": das, "pdal": pdal, "ipm": ipm}
+
+
+def _lookup(table, method):
+    try:
+        return table[method]
+    except KeyError:
+        raise ValueError(
+            f"method must be one of {METHODS}, got {method!r}"
+        ) from None
+
+
+def Solver(method="das"):
+    """Factory: a solver object for the given backend.
+
+    method is "das" (dual active set, the default), "pdal" (primal-dual
+    augmented Lagrangian) or "ipm" (interior point); the returned object is
+    an elastiqp.das.Solver / pdal.Solver / ipm.Solver. All three share
+    setup(), update(), set_*(), solve() and the Solution type; relax() (the
+    differentiation point) exists on pdal.Solver and ipm.Solver only.
+    """
+    return _lookup(_BACKENDS, method).Solver()
+
+
+def Settings(method="das"):
+    """Factory: a default settings object for the given backend
+    (elastiqp.das.Settings / pdal.Settings / ipm.Settings); assign to
+    solver.settings."""
+    return _lookup(_BACKENDS, method).Settings()
+
+
 __all__ = [
+    "METHODS",
+    "das",
+    "pdal",
+    "ipm",
+    "RowState",
     "Settings",
     "Solution",
     "Solver",
@@ -67,4 +114,4 @@ try:
 except Exception:  # not installed (source checkout)
     __version__ = "0.0.0.dev0"
 
-del _core, _import_core
+del _core, _import_core, _name, _mod

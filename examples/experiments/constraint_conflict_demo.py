@@ -198,7 +198,7 @@ def simulate(scenario: Scenario) -> dict:
         log.margins.append(margins)
         log.cbf_slack.append(G @ u - h)
         log.t_elastic.append(sol.t.copy())
-        log.z.append(sol.z_ineq.copy())
+        log.z.append(sol.z.copy())
         log.iters.append(sol.iters)
 
         # Exact double-integrator step under zero-order-hold u

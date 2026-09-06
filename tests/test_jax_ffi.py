@@ -60,16 +60,18 @@ FFI_NB_TOL = 1e-9
 
 
 def main():
-    print("FFI vs nanobind: same C++ code, same answers")
+    print("FFI vs nanobind: same C++ code, same answers (every backend)")
     Q, q, A, b, G, h, x_star = random_qp(0, 14, 0, 40)
+    for method in elastiqp.jax.METHODS:
+        sol = elastiqp.jax.solve(Q, q, G, h, 10.0, method=method)
+        nb_sol = elastiqp.solve(Q, q, G, h, 10.0, method=method)
+        dx = np.abs(np.asarray(sol.x) - nb_sol.x).max()
+        check(
+            f"inequality-only n=14 p=40 [{method}]",
+            int(sol.converged) == 1 and dx < FFI_NB_TOL,
+            f"|dx|={dx:.1e}",
+        )
     sol = elastiqp.jax.solve(Q, q, G, h, 10.0)
-    nb_sol = elastiqp.solve(Q, q, G, h, 10.0)
-    dx = np.abs(np.asarray(sol.x) - nb_sol.x).max()
-    check(
-        "inequality-only n=14 p=40",
-        int(sol.converged) == 1 and dx < FFI_NB_TOL,
-        f"|dx|={dx:.1e}",
-    )
 
     Q, q, A, b, G, h, x_star = random_qp(1, 14, 4, 60)
     # eq < 1e-8 needs a tighter solve than the 1e-5 default.
@@ -188,6 +190,7 @@ def main():
             penalty_,
             A=A_,
             b=b_,
+            method="pdal",
             eps_abs=1e-11,
             max_iter=300,
             target_kappa=kap,
@@ -196,7 +199,8 @@ def main():
 
     def loss_relaxed(Q_, q_, A_, b_, G_, h_, penalty_, kap=kappa):
         out = elastiqp.jax._ffi_solve(
-            Q_, q_, A_, b_, G_, h_, penalty_, 1e-11, 300, False, "sequential", kap
+            Q_, q_, A_, b_, G_, h_, penalty_, 1e-11, 300, False, "sequential", kap,
+            "pdal",
         )
         xr, tr = out[5], out[6]
         return w_loss @ xr + w_t @ tr
@@ -247,6 +251,7 @@ def main():
             args[6],
             A=args[2],
             b=args[3],
+            method="pdal",
             eps_abs=1e-11,
             max_iter=300,
         )
@@ -304,7 +309,7 @@ def main():
     # s2 = h + t - Gx are the slacks of t >= 0 and Gx - t <= h; s2 is
     # reconstructed from x, so it carries the O(tol) primal residual.
     out = elastiqp.jax._ffi_solve(
-        *args, 1e-11, 300, False, "sequential", kappa
+        *args, 1e-11, 300, False, "sequential", kappa, "pdal"
     )
     xr, tr, z1r, z2r, info = out[5], out[6], out[8], out[9], out[10]
     s2r = args[5] + tr - args[4] @ xr
@@ -323,7 +328,7 @@ def main():
     # relaxation (info[2]), and solve() folds that into converged on the
     # differentiated path.
     out = elastiqp.jax._ffi_solve(
-        *args, 1e-11, 300, False, "sequential", 1e8
+        *args, 1e-11, 300, False, "sequential", 1e8, "pdal"
     )
     tight_ok, relax_bad = float(out[10][0]) == 1.0, float(out[10][2]) == 0.0
 
@@ -336,6 +341,7 @@ def main():
             args[6],
             A=args[2],
             b=args[3],
+            method="pdal",
             eps_abs=1e-11,
             max_iter=300,
             target_kappa=1e8,
@@ -463,7 +469,7 @@ def main():
         jax.grad(
             lambda q_: jnp.sum(
                 elastiqp.jax.solve(
-                    Qx, q_, Gx, hx, 10.0, A=Ax, b=bx, target_kappa=0.0
+                    Qx, q_, Gx, hx, 10.0, A=Ax, b=bx, method="pdal", target_kappa=0.0
                 ).x
             )
         )(qx)
@@ -477,13 +483,57 @@ def main():
         "",
     )
 
-    # With the default target_kappa (1e-3), grad works out of the box.
-    g_def = jax.grad(
-        lambda q_: jnp.sum(elastiqp.jax.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx).x)
-    )(qx)
+    # With the default target_kappa (1e-3), grad works out of the box on the
+    # pdal and ipm backends.
+    for method in ("pdal", "ipm"):
+        g_def = jax.grad(
+            lambda q_: jnp.sum(
+                elastiqp.jax.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx, method=method).x
+            )
+        )(qx)
+        check(
+            f"grad with default target_kappa is finite [{method}]",
+            bool(jnp.all(jnp.isfinite(g_def))),
+            "",
+        )
+    # ...and the two backends agree on it (same relaxed KKT point).
+    g_pd, g_ip = (
+        jax.grad(
+            lambda q_: loss_smooth(args[0], q_, *args[2:])
+            if m == "pdal"
+            else w_loss
+            @ elastiqp.jax.solve(
+                args[0], q_, args[4], args[5], args[6], A=args[2], b=args[3],
+                method="ipm", eps_abs=1e-11, max_iter=300, target_kappa=kappa,
+            ).x
+            + w_t
+            @ elastiqp.jax.solve(
+                args[0], q_, args[4], args[5], args[6], A=args[2], b=args[3],
+                method="ipm", eps_abs=1e-11, max_iter=300, target_kappa=kappa,
+            ).t
+        )(args[1])
+        for m in ("pdal", "ipm")
+    )
+    dpi = float(jnp.abs(g_pd - g_ip).max())
+    check("pdal and ipm smoothed d/dq agree", dpi < 1e-5, f"|dg|={dpi:.1e}")
+
+    print("Active-set backend: forward only")
+    a_sol = elastiqp.jax.solve(Qx, qx, Gx, hx, 10.0, A=Ax, b=bx, method="das")
+    a_ref = elastiqp.solve(Qx, qx, Gx, hx, 10.0, A=Ax, b=bx, method="das")
+    da = float(jnp.abs(a_sol.x - jnp.asarray(a_ref.x)).max())
+    check("as forward matches nanobind", int(a_sol.converged) == 1 and da < FFI_NB_TOL, f"|dx|={da:.1e}")
+    a_jit = jax.jit(lambda q_: elastiqp.jax.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx, method="das").x)(qx)
+    check("as under jit", float(jnp.abs(a_jit - a_sol.x).max()) == 0.0, "")
+    try:
+        jax.grad(
+            lambda q_: jnp.sum(elastiqp.jax.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx, method="das").x)
+        )(qx)
+        msg = None
+    except TypeError as e:
+        msg = str(e)
     check(
-        "grad with default target_kappa is finite",
-        bool(jnp.all(jnp.isfinite(g_def))),
+        "grad with method='das' raises, pointing at pdal/ipm",
+        msg is not None and "pdal" in msg and "not differentiable" in msg,
         "",
     )
 
@@ -499,6 +549,7 @@ def main():
             args[6],
             A=args[2],
             b=args[3],
+            method="pdal",
             eps_abs=1e-11,
             max_iter=300,
             ruiz=True,

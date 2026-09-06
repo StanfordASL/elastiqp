@@ -1,12 +1,16 @@
 """ElastiQP JAX FFI wrapper
 
-Solves are differentiable with ``target_kappa > 0`` (log-barrier smoothed
-gradients, evaluated at the kappa-relaxed central point with
-complementarity s.z = kappa). The default target_kappa=1e-3 (qpax's
-default) makes jax.grad work out of the box; set it to 0 to forbid
-differentiation.
+``method`` selects the backend: "das" (dual active set, the default),
+"pdal" (primal-dual augmented Lagrangian) or "ipm" (interior point).
+Forward solves work with all three. Gradients need the kappa relaxation,
+which only the PDAL and IPM backends have: with ``method="pdal"`` or
+``"ipm"`` and ``target_kappa > 0`` (log-barrier smoothed gradients,
+evaluated at the kappa-relaxed central point with complementarity
+s.z = kappa; the default 1e-3 is qpax's) jax.grad works out of the box.
+Differentiating an ``method="das"`` solve raises at trace time.
 
-Set ruiz=True for badly-scaled data.
+Set ruiz=True for badly-scaled data (the active-set backend has it on by
+default).
 
 Supports JIT and vmap (under "sequential" mode, which performs one solve
 per entry in the batch). Requires float64 (JAX_ENABLE_X64).
@@ -28,7 +32,16 @@ except ImportError as e:
 import jax.numpy as jnp
 import numpy as np
 
-__all__ = ["solve", "Result"]
+__all__ = ["solve", "Result", "METHODS"]
+
+METHODS = ("das", "pdal", "ipm")
+_METHOD_ID = {"das": 0, "pdal": 1, "ipm": 2}
+# Default outer budget per backend (active-set iterations / BCL rounds /
+# interior-point iterations), used when max_iter is None.
+_DEFAULT_MAX_ITER = {"das": 10000, "pdal": 250, "ipm": 250}
+# Ruiz equilibration default per backend (on for the active set, whose LDP
+# conditioning depends on it; off for PDAL / IPM), used when ruiz is None.
+_DEFAULT_RUIZ = {"das": True, "pdal": False, "ipm": False}
 
 
 def _find_library():
@@ -71,20 +84,21 @@ class Result(NamedTuple):
     t: jax.Array  # elastic slacks (per-row constraint violations)
     y: jax.Array  # equality duals (empty if no equalities)
     z_t: jax.Array  # duals of t >= 0
-    z_ineq: jax.Array  # duals of G x - t <= h
+    z: jax.Array  # duals of G x - t <= h, in [0, penalty]
     converged: jax.Array  # 0/1; includes the kappa relaxation when it runs
     iters: jax.Array
 
 
 def _ffi_solve(
-    Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, vmap_method, target_kappa
+    Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, vmap_method, target_kappa,
+    method="pdal",
 ):
     n = Q.shape[-1]
     m = b.shape[-1]
     p = h.shape[-1]
     batch = Q.shape[:-2]
     vec = lambda d: jax.ShapeDtypeStruct(batch + (d,), jnp.float64)
-    # (x, t, y, z_t, z_ineq) tight solution, then the kappa-relaxed central
+    # (x, t, y, z_t, z) tight solution, then the kappa-relaxed central
     # point (identical to the tight block when target_kappa <= 0), then
     # info = [converged, iters, relax_converged].
     out_types = [
@@ -113,6 +127,7 @@ def _ffi_solve(
         max_iter=np.int64(max_iter),
         ruiz=np.int64(bool(ruiz)),
         target_kappa=np.float64(target_kappa),
+        method=np.int64(_METHOD_ID[method]),
     )
 
 
@@ -130,7 +145,7 @@ def _kkt_bwd(res, ct):
     relaxed map, tests/test_jax_ffi.py pins this one, tests/test_torch.py
     pins the torch one against the C++ path.
 
-    Below, z1 and z2 are the duals Result calls z_t and z_ineq; the numeric
+    Below, z1 and z2 are the duals Result calls z_t and z; the numeric
     subscripts keep the block algebra (g4/g5, v2/v5, rb1/rb2) readable.
 
     F(w, theta) = 0 at the solution, with w = (x, t, y, z1, z2) and
@@ -219,20 +234,29 @@ def _kkt_bwd(res, ct):
 # raises unless target_kappa > 0: the solver's certificate sits exactly on
 # the constraint boundary, where the exact KKT derivative is undefined
 # (division by zero complementarity margins).
-@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11))
+@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12))
 def _solve(
-    Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, vmap_method, target_kappa
+    Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, vmap_method, target_kappa,
+    method,
 ):
     # Tight solution when not differentiating: no relaxation runs.
     out = _ffi_solve(
-        Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, vmap_method, 0.0
+        Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, vmap_method, 0.0,
+        method,
     )
     return tuple(out[:5]) + (out[10],)  # solution + info
 
 
 def _solve_fwd(
-    Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, vmap_method, target_kappa
+    Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, vmap_method, target_kappa,
+    method,
 ):
+    if method == "das":
+        raise TypeError(
+            "elastiqp.jax.solve is not differentiable with method='das': the "
+            "active-set backend has no kappa relaxation. Use method='pdal' "
+            "or method='ipm' (with target_kappa > 0) for gradients"
+        )
     if not target_kappa > 0:
         raise TypeError(
             "elastiqp.jax.solve is not differentiable with target_kappa=0: "
@@ -253,6 +277,7 @@ def _solve_fwd(
         ruiz,
         vmap_method,
         target_kappa,
+        method,
     )
     x, t, y, z1, z2, xr, tr, yr, z1r, z2r, info = out
     # Differentiate at the kappa-relaxed point; the returned VALUE is
@@ -260,7 +285,9 @@ def _solve_fwd(
     return (x, t, y, z1, z2, info), (Q, A, G, h, xr, tr, yr, z1r, z2r)
 
 
-def _solve_bwd(eps_abs, max_iter, ruiz, vmap_method, target_kappa, res, ct):
+def _solve_bwd(
+    eps_abs, max_iter, ruiz, vmap_method, target_kappa, method, res, ct
+):
     return _kkt_bwd(res, ct)
 
 
@@ -276,9 +303,10 @@ def solve(
     *,
     A=None,
     b=None,
+    method="das",
     eps_abs=1e-5,
-    max_iter=250,
-    ruiz=False,
+    max_iter=None,
+    ruiz=None,
     target_kappa=1e-3,
     vmap_method="sequential",
 ):
@@ -288,14 +316,23 @@ def solve(
         s.t. A x == b (hard, optional), G x - t <= h, t >= 0
 
     `penalty` may be a scalar or a per-constraint vector of length p.
-    `eps_abs`, `max_iter`, `ruiz` and `target_kappa` are static
+    `method`, `eps_abs`, `max_iter`, `ruiz` and `target_kappa` are static
     (compile-time) options.
 
-    Every call here is a cold solve. It is differentiable in reverse mode
-    w.r.t. all array arguments when target_kappa > 0 (the default);
-    jax.grad with an explicit target_kappa=0 raises at trace time (the
-    certificate sits exactly on the constraint boundary, where the exact
-    KKT derivative is undefined).
+    `method` selects the backend: "das" (dual active set, the default),
+    "pdal" (primal-dual augmented Lagrangian) or "ipm" (interior point).
+    `max_iter` is the backend's outer budget (active-set iterations, BCL
+    rounds, interior-point iterations); None uses the backend default
+    (10000 / 250 / 250). `ruiz=None` likewise uses the backend default
+    (on for "das", off for "pdal" / "ipm"); set it explicitly for
+    badly-scaled data.
+
+    Every call here is a cold solve. With method "pdal" or "ipm" it is
+    differentiable in reverse mode w.r.t. all array arguments when
+    target_kappa > 0 (the default); jax.grad with method="das" or with an
+    explicit target_kappa=0 raises at trace time (the active-set backend
+    has no relaxation; the certificate sits exactly on the constraint
+    boundary, where the exact KKT derivative is undefined).
     `ruiz=True` enables Ruiz equilibration for badly-scaled data; the
     solver terminates on and returns unscaled quantities, so it does not
     affect gradients.
@@ -317,6 +354,12 @@ def solve(
     solve or the relaxation failed, so a bad gradient evaluation point is
     never silent.
     """
+    if method not in METHODS:
+        raise ValueError(f"method must be one of {METHODS}, got {method!r}")
+    if max_iter is None:
+        max_iter = _DEFAULT_MAX_ITER[method]
+    if ruiz is None:
+        ruiz = _DEFAULT_RUIZ[method]
     Q = jnp.asarray(Q)
     q = jnp.asarray(q)
     G = jnp.asarray(G)
@@ -335,7 +378,7 @@ def solve(
     # penalty may be a scalar or a per-constraint vector of length p
     penalty = jnp.broadcast_to(jnp.asarray(penalty, dtype=jnp.float64), h.shape)
 
-    x, t, y, z_t, z_ineq, info = _solve(
+    x, t, y, z_t, z, info = _solve(
         Q,
         q,
         A,
@@ -348,6 +391,7 @@ def solve(
         bool(ruiz),
         vmap_method,
         float(target_kappa),
+        method,
     )
     # Recall: info = [converged, iters, relax_converged]. The converged
     # flag here considers both forward and backward (relax); the two agree
@@ -358,7 +402,7 @@ def solve(
         t=t,
         y=y,
         z_t=z_t,
-        z_ineq=z_ineq,
+        z=z,
         converged=converged.astype(jnp.int32),
         iters=info[..., 1].astype(jnp.int32),
     )

@@ -1,70 +1,93 @@
 // Ruiz equilibration and automatic re-equilibration under drift.
 //
 // The row-scaling paths (setup-time invariance, vector setters, auto refresh
-// on drifting G/A rows, exact remap of the warm iterates) are covered in
-// test_pdal.cc. This suite covers the paths that only column and objective
-// drift exercise, and the long-horizon behavior of the incremental refresh:
+// on drifting G/A rows) are covered for every backend in test_solvers.cc;
+// the exact remap of the PDAL's warm iterates is in test_pdal.cc. This suite
+// covers the paths that only column and objective drift exercise, and the
+// long-horizon behaviour of the drift-gated refresh, for the two backends
+// that refresh (PDAL: reequilibrate() from the user frame; active set:
+// rescale_matrices() on the next solve), plus the user-frame reporting for
+// all three:
 //
 // (1) column substitution x = D x' (Q' = DQD, q' = Dq, G' = GD, A' = AD)
-//     drives the dx (column) factors through reequilibrate(), so the x/xk/xr
-//     remap is checked rather than incidentally exercised;
+//     drives the dx (column) factors through the refresh, so the x remap
+//     is checked rather than incidentally exercised;
 // (2) objective scaling (alpha Q, alpha q, alpha penalty) leaves x unchanged
 //     and scales every dual by alpha; the refresh must change the cost scale
-//     c_s_ (gamma != 1), which also remaps the relax() kappa;
+//     (gamma != 1), which for the PDAL also remaps the relax() kappa;
 // (3) 200 ticks of oscillating row AND column scales: cumulative factors and
-//     the cost scale (gamma <= 1 per pass, so c_s_ can only ratchet down)
-//     must not degrade iteration counts or accuracy, and the refresh must
-//     stay sparse;
+//     the cost scale (gamma <= 1 per pass) must not degrade iteration counts
+//     or accuracy, and the refresh must stay sparse;
 // (4) reported Solution fields (objective, residuals, gap) are in the user's
 //     frame: they must match an independent recomputation on the unscaled
 //     data, and relative termination (eps_abs = 0) must work under Ruiz;
 // (5) a drifting matrix update before any solve (no warm iterate) and on top
-//     of a pending set_warm_start() must not corrupt the remapped state;
+//     of a pending set_warm_start() must not corrupt the remapped state (PDAL);
 // (6) limit_scaling through the update path: a row exploding past the 1e4
 //     clamp in one tick, and a row decaying to the noise floor after setup;
 // (7) the certified equality-infeasibility gate across a refresh, and the
 //     frame independence of eq_infeasibility();
-// (8) semantics pins: ruiz_refresh_ratio <= 1 refreshes on any drift past
-//     ruiz_tol, and settings.ruiz is latched at setup().
+// (8) semantics pins (PDAL): ruiz_refresh_ratio <= 1 refreshes on any drift
+//     past ruiz_tol, and settings.ruiz is latched at setup().
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <random>
+#include <type_traits>
 
 #include "elastiqp/elastiqp.hpp"
 #include "problem_gen.hpp"
+#include "test_util.hpp"
 
 using Eigen::MatrixXd;
 using Eigen::VectorXd;
 using problem_gen::QPData;
+using test_util::Backend;
+using test_util::Check;
+using test_util::InfNorm;
+using test_util::Label;
+using test_util::RelDiff;
+using test_util::SolveWith;
+namespace pdal = elastiqp::pdal;
 
 namespace {
 
-bool g_all_ok = true;
-
-void Check(const char* name, bool ok, double val, const char* what) {
-  std::printf("  %-38s %s=%9.2e %s\n", name, what, val, ok ? "OK" : "FAIL");
-  g_all_ok &= ok;
-}
-
-elastiqp::Settings TightSettings() {
-  elastiqp::Settings s;
-  s.eps_abs = 1e-8;
-  s.eps_rel = 1e-9;
-  s.eps_duality_gap_abs = 1e-8;
-  s.eps_duality_gap_rel = 1e-9;
+template <class Solver>
+typename Backend<Solver>::Settings Tight() {
+  auto s = Backend<Solver>::Tight();
   s.ruiz = true;
   return s;
 }
 
-double InfNorm(const VectorXd& v) {
-  return v.size() > 0 ? v.lpNorm<Eigen::Infinity>() : 0.0;
+// eps_rel-only termination: the gap clause exists for the PDAL and IPM only
+template <class S>
+void RelaxGapTolerances(S& s) {
+  if constexpr (!std::is_same_v<S, elastiqp::das::Settings>) {
+    s.eps_duality_gap_abs = 0.0;
+    s.eps_duality_gap_rel = 1e-9;
+  }
 }
 
-// |a - b|_inf relative to the scale of a
-double RelDiff(const VectorXd& a, const VectorXd& b) {
-  return InfNorm(a - b) / std::max(1.0, InfNorm(a));
+// Whether the pending matrix update will trigger (PDAL: scaling_drift() is
+// live; active set: only known after the solve, see Refreshed) / did
+// trigger a refresh on the solve that just ran.
+template <class Solver>
+bool DriftedBefore(const Solver& s) {
+  if constexpr (std::is_same_v<Solver, pdal::Solver>) {
+    return s.scaling_drift() > s.settings.ruiz_refresh_ratio;
+  } else {
+    (void)s;
+    return false;
+  }
+}
+template <class Solver>
+bool Refreshed(const Solver& s, bool drifted_before) {
+  if constexpr (std::is_same_v<Solver, pdal::Solver>) {
+    return drifted_before;
+  } else {
+    return s.rescaled();
+  }
 }
 
 // The user-frame residuals and objectives the solver reports, recomputed
@@ -79,9 +102,9 @@ Recomputed Recompute(const MatrixXd& Q, const VectorXd& q, const MatrixXd& A,
   Recomputed r;
   const VectorXd Qx = Q * s.x;
   r.primal_obj = 0.5 * s.x.dot(Qx) + q.dot(s.x) + penalty.dot(s.t);
-  r.dual_obj = -0.5 * s.x.dot(Qx) - h.dot(s.z_ineq) -
+  r.dual_obj = -0.5 * s.x.dot(Qx) - h.dot(s.z) -
                (b.size() > 0 ? b.dot(s.y) : 0.0);
-  VectorXd stat = Qx + q + G.transpose() * s.z_ineq;
+  VectorXd stat = Qx + q + G.transpose() * s.z;
   if (b.size() > 0) stat += A.transpose() * s.y;
   r.dual_res = InfNorm(stat);
   r.primal_res = std::max(0.0, (G * s.x - h - s.t).maxCoeff());
@@ -99,13 +122,16 @@ QPData ColumnScaled(const QPData& qp, const VectorXd& d) {
   return s;
 }
 
-}  // namespace
-
-int main() {
+// Cells (1), (2), (3), (6), (7): the two refreshing backends
+template <class Solver>
+void DriftSuite() {
+  using B = Backend<Solver>;
   std::mt19937 rng(7);
   const double kappa = 1e-4;
+  char name[96];
+  const auto L = [&](const char* cell) { return Label<Solver>(name, sizeof name, cell); };
 
-  std::printf("Ruiz: column drift (x = D x') through auto refresh\n");
+  std::printf("[%s] Ruiz: column drift (x = D x') through auto refresh\n", B::name);
   {
     // D grows geometrically to 10^[-2, 2] over the ticks, so the column
     // factors drift past the refresh ratio several times. The invariance
@@ -117,14 +143,15 @@ int main() {
     VectorXd logd(n);
     for (int j = 0; j < n; ++j) logd[j] = unif(rng);
 
-    elastiqp::Solver warm;
-    warm.settings = TightSettings();
+    Solver warm;
+    warm.settings = Tight<Solver>();
     warm.setup(qp0.Q, qp0.q, qp0.A, qp0.b, qp0.G, qp0.h, penalty);
     const auto s0 = warm.solve();
-    const auto r0 = warm.relax(kappa);
+    VectorXd r0x;
+    if constexpr (B::has_relax) r0x = warm.relax(kappa).x;
     int refreshes = 0, warm_iters = 0, cold_iters = 0;
     double worst_dx = 0, worst_rdx = 0, worst_drift = 0, worst_kkt = 0;
-    bool all_conv = s0.converged == 1 && r0.converged == 1;
+    bool all_conv = s0.converged == 1;
     for (int k = 1; k <= ticks; ++k) {
       const VectorXd dk =
           Eigen::pow(10.0, (logd * (static_cast<double>(k) / ticks)).array())
@@ -134,43 +161,48 @@ int main() {
       warm.set_q(qs.q);
       warm.set_G(qs.G);
       warm.set_A(qs.A);
-      refreshes += warm.scaling_drift() > warm.settings.ruiz_refresh_ratio;
+      const bool pre = DriftedBefore(warm);
       const auto ws = warm.solve();
+      refreshes += Refreshed(warm, pre);
       worst_drift = std::max(worst_drift, warm.scaling_drift());
-      const auto wr = warm.relax(kappa);
-      elastiqp::Solver cold;
-      cold.settings = TightSettings();
+      Solver cold;
+      cold.settings = Tight<Solver>();
       cold.setup(qs.Q, qs.q, qs.A, qs.b, qs.G, qs.h, penalty);
       const auto cs = cold.solve();
-      const auto cr = cold.relax(kappa);
-      all_conv &= ws.converged == 1 && cs.converged == 1 &&
-                  wr.converged == 1 && cr.converged == 1;
+      all_conv &= ws.converged == 1 && cs.converged == 1;
+      if constexpr (B::has_relax) {
+        const auto wr = warm.relax(kappa);
+        const auto cr = cold.relax(kappa);
+        all_conv &= wr.converged == 1 && cr.converged == 1;
+        worst_rdx = std::max(worst_rdx, RelDiff(cr.x, wr.x));
+      }
       warm_iters += ws.iters;
       cold_iters += cs.iters;
       // Invariance in the base frame: D x' = x_0, duals unchanged
       worst_dx = std::max(
           {worst_dx, RelDiff(s0.x, dk.cwiseProduct(ws.x)),
-           RelDiff(s0.z_ineq, ws.z_ineq), RelDiff(s0.y, ws.y)});
-      worst_rdx = std::max(worst_rdx, RelDiff(cr.x, wr.x));
+           RelDiff(s0.z, ws.z), RelDiff(s0.y, ws.y)});
       worst_kkt = std::max(
           worst_kkt, problem_gen::ElasticKKTResidual(
                          qs.Q, qs.q, qs.A, qs.b, qs.G, qs.h, penalty, ws.x,
-                         ws.t, ws.y, ws.z_t, ws.z_ineq));
+                         ws.t, ws.y, ws.z_t, ws.z));
     }
     std::printf("  refreshes=%d/%d worst_drift_after=%.2f | iters warm=%d "
                 "cold=%d | worst_kkt=%9.2e\n",
                 refreshes, ticks, worst_drift, warm_iters, cold_iters,
                 worst_kkt);
-    Check("column refresh fires and settles",
+    Check(L("column refresh fires and settles"),
           refreshes >= 2 && refreshes < ticks &&
               worst_drift <= warm.settings.ruiz_refresh_ratio,
           worst_drift, "drift");
-    Check("D x' = x_0, duals invariant",
+    Check(L("D x' = x_0, duals invariant"),
           all_conv && worst_dx < 1e-5 && worst_kkt < 1e-5, worst_dx, "|dx|");
-    Check("relax matches fresh setup", worst_rdx < 1e-4, worst_rdx, "|dx|");
+    if constexpr (B::has_relax) {
+      Check(L("relax matches fresh setup"), worst_rdx < 1e-4, worst_rdx, "|dx|");
+    }
   }
 
-  std::printf("Ruiz: objective scale (alpha Q, alpha q, alpha w)\n");
+  std::printf("[%s] Ruiz: objective scale (alpha Q, alpha q, alpha w)\n", B::name);
   {
     // Scaling the whole objective by alpha leaves x unchanged and scales
     // every dual by alpha. alpha = 1e5 pushes the scaled Q columns past the
@@ -182,12 +214,11 @@ int main() {
     const int n = 24, m = 6, p = 120;
     const QPData qp = problem_gen::InfeasibleEq(rng, n, m, p, p / 4);
     const VectorXd penalty = VectorXd::Constant(p, 10.0);
-    elastiqp::Solver warm;
-    warm.settings = TightSettings();
+    Solver warm;
+    warm.settings = Tight<Solver>();
     warm.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
     const auto s0 = warm.solve();
-    const auto r0 = warm.relax(kappa);
-    bool ok = s0.converged == 1 && r0.converged == 1;
+    bool ok = s0.converged == 1;
     double worst = 0, worst_r = 0;
     int refreshes = 0;
     double alpha_total = 1.0;
@@ -196,39 +227,47 @@ int main() {
       warm.set_Q(alpha_total * qp.Q);
       warm.set_q(alpha_total * qp.q);
       warm.set_penalty(alpha_total * penalty);
-      refreshes += warm.scaling_drift() > warm.settings.ruiz_refresh_ratio;
+      const bool pre = DriftedBefore(warm);
       const auto ws = warm.solve();
-      // relax() at the same kappa: the relaxed point is NOT invariant to
-      // alpha (s.z = kappa), so compare against a fresh solver instead
-      const auto wr = warm.relax(kappa);
-      elastiqp::Solver cold;
-      cold.settings = TightSettings();
+      refreshes += Refreshed(warm, pre);
+      Solver cold;
+      cold.settings = Tight<Solver>();
       cold.setup(alpha_total * qp.Q, alpha_total * qp.q, qp.A, qp.b, qp.G,
                  qp.h, alpha_total * penalty);
       const auto cs = cold.solve();
-      const auto cr = cold.relax(kappa);
-      ok &= ws.converged == 1 && cs.converged == 1 && wr.converged == 1 &&
-            cr.converged == 1 && warm.scaling_drift() <=
-                                     warm.settings.ruiz_refresh_ratio;
+      ok &= ws.converged == 1 && cs.converged == 1 &&
+            warm.scaling_drift() <= warm.settings.ruiz_refresh_ratio;
+      int wr_iters = 0, cr_iters = 0;
+      if constexpr (B::has_relax) {
+        // relax() at the same kappa: the relaxed point is NOT invariant to
+        // alpha (s.z = kappa), so compare against a fresh solver instead
+        const auto wr = warm.relax(kappa);
+        const auto cr = cold.relax(kappa);
+        ok &= wr.converged == 1 && cr.converged == 1;
+        worst_r = std::max(worst_r, RelDiff(cr.x, wr.x));
+        wr_iters = wr.iters;
+        cr_iters = cr.iters;
+      }
       worst = std::max({worst, RelDiff(s0.x, ws.x),
-                        RelDiff(alpha_total * s0.z_ineq, ws.z_ineq),
+                        RelDiff(alpha_total * s0.z, ws.z),
                         RelDiff(alpha_total * s0.y, ws.y),
                         std::abs(ws.primal_obj - alpha_total * s0.primal_obj) /
                             std::max(1.0, std::abs(alpha_total * s0.primal_obj))});
-      worst_r = std::max(worst_r, RelDiff(cr.x, wr.x));
       std::printf("  alpha=%8.1e drift_after=%.2f iters=%d (cold %d) relax "
                   "iters=%d (cold %d)\n",
                   alpha_total, warm.scaling_drift(), ws.iters, cs.iters,
-                  wr.iters, cr.iters);
+                  wr_iters, cr_iters);
     }
-    Check("refresh fires on objective scale", refreshes >= 1, refreshes,
+    Check(L("refresh fires on objective scale"), refreshes >= 1, refreshes,
           "refreshes");
-    Check("x invariant, duals scale by alpha", ok && worst < 1e-5, worst,
+    Check(L("x invariant, duals scale by alpha"), ok && worst < 1e-5, worst,
           "rel");
-    Check("relax matches fresh setup", worst_r < 1e-4, worst_r, "|dx|");
+    if constexpr (B::has_relax) {
+      Check(L("relax matches fresh setup"), worst_r < 1e-4, worst_r, "|dx|");
+    }
   }
 
-  std::printf("Ruiz: 200 ticks of oscillating row + column scales\n");
+  std::printf("[%s] Ruiz: 200 ticks of oscillating row + column scales\n", B::name);
   {
     // Rows (a fifth of G and A) swing over 3 decades with period 40 and
     // columns (a third) over 2 decades with period 60, plus q noise. The
@@ -238,8 +277,8 @@ int main() {
     const int n = 30, m = 8, p = 200, ticks = 200, period = 40;
     const QPData qp0 = problem_gen::InfeasibleEq(rng, n, m, p, p / 4);
     const VectorXd penalty0 = VectorXd::Constant(p, 10.0);
-    elastiqp::Solver warm;
-    warm.settings = TightSettings();
+    Solver warm;
+    warm.settings = Tight<Solver>();
     warm.setup(qp0.Q, qp0.q, qp0.A, qp0.b, qp0.G, qp0.h, penalty0);
     std::normal_distribution<double> dist;
     VectorXd q = qp0.q;
@@ -269,8 +308,9 @@ int main() {
       warm.set_penalty(penalty);
       warm.set_A(A);
       warm.set_b(b);
-      refreshes += warm.scaling_drift() > warm.settings.ruiz_refresh_ratio;
+      const bool pre = DriftedBefore(warm);
       const auto ws = warm.solve();
+      refreshes += Refreshed(warm, pre);
       worst_drift = std::max(worst_drift, warm.scaling_drift());
       all_conv &= ws.converged == 1;
       if (k > 0 && k < period) first_period += ws.iters;
@@ -279,15 +319,15 @@ int main() {
       worst_kkt = std::max(
           worst_kkt, problem_gen::ElasticKKTResidual(
                          Q, qs, A, b, G, h, penalty, ws.x, ws.t, ws.y, ws.z_t,
-                         ws.z_ineq));
+                         ws.z));
       worst_obj = std::max(
           worst_obj,
           std::abs(ws.primal_obj - problem_gen::ElasticObjective(
                                        Q, qs, G, h, penalty, ws.x)) /
               std::max(1.0, std::abs(ws.primal_obj)));
       if (k % 10 == 9) {
-        elastiqp::Solver cold;
-        cold.settings = TightSettings();
+        Solver cold;
+        cold.settings = Tight<Solver>();
         cold.setup(Q, qs, A, b, G, h, penalty);
         const auto c = cold.solve();
         all_conv &= c.converged == 1;
@@ -299,21 +339,142 @@ int main() {
                 "period=%d last period=%d worst tick=%d | worst_kkt=%9.2e\n",
                 refreshes, ticks, worst_drift, first_period, last_period,
                 worst_tick, worst_kkt);
-    Check("refresh stays sparse and settles",
+    Check(L("refresh stays sparse and settles"),
           refreshes >= 4 && refreshes <= ticks / 3 &&
               worst_drift <= warm.settings.ruiz_refresh_ratio,
           refreshes, "refreshes");
-    Check("all ticks converge, match cold",
+    Check(L("all ticks converge, match cold"),
           all_conv && cold_checks == ticks / 10 && worst_dx < 1e-5 &&
               worst_kkt < 1e-5,
           worst_dx, "|dx|");
-    Check("no long-horizon degradation",
+    Check(L("no long-horizon degradation"),
           last_period <= 3 * first_period / 2, last_period, "iters");
-    Check("reported objective in user frame", worst_obj < 1e-6, worst_obj,
+    Check(L("reported objective in user frame"), worst_obj < 1e-6, worst_obj,
           "rel");
   }
 
-  std::printf("Ruiz: reported fields are in the user's frame\n");
+  std::printf("[%s] Ruiz: limit_scaling through the update path\n", B::name);
+  {
+    // Row scaling by s with penalty / s leaves the elastic QP unchanged, so
+    // the base solution is the reference throughout (q fixed).
+    const int n = 16, m = 4, p = 60;
+    const QPData qp = problem_gen::InfeasibleEq(rng, n, m, p, p / 4);
+    const VectorXd penalty = VectorXd::Constant(p, 10.0);
+    Solver solver;
+    solver.settings = Tight<Solver>();
+    solver.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
+    const auto s0 = solver.solve();
+
+    // One row explodes by 1e7: the per-pass factor is clamped to 0.01, so
+    // the refresh needs several passes to bring the row back to O(1)
+    MatrixXd G = qp.G;
+    VectorXd h = qp.h, pen = penalty;
+    const int i_big = 3;
+    G.row(i_big) *= 1e7;
+    h[i_big] *= 1e7;
+    pen[i_big] /= 1e7;
+    solver.set_G(G);
+    solver.set_h(h);
+    solver.set_penalty(pen);
+    const bool pre_big = DriftedBefore(solver);
+    const auto s1 = solver.solve();
+    const bool fired_big = Refreshed(solver, pre_big);
+    const double dx1 = RelDiff(s0.x, s1.x);
+    std::printf("  row x1e7: refreshed=%d drift after %.2f iters=%d\n",
+                fired_big, solver.scaling_drift(), s1.iters);
+    Check(L("row x1e7 refresh reaches O(1)"),
+          fired_big && solver.scaling_drift() < 1.5 &&
+              s0.converged == 1 && s1.converged == 1 && dx1 < 1e-5,
+          dx1, "|dx|");
+
+    // A different row decays to the noise floor (constraint and rhs both
+    // ~1e-13, penalty unchanged): limit_scaling must leave it alone, the
+    // drift must not report it, and the solution must match the problem
+    // without that row
+    const int i_noise = 7;
+    std::normal_distribution<double> dist;
+    for (int j = 0; j < n; ++j) G(i_noise, j) = 1e-13 * dist(rng);
+    h[i_noise] = 1e-13 * dist(rng);
+    solver.set_G(G);
+    solver.set_h(h);
+    const bool pre_noise = DriftedBefore(solver);
+    const auto s2 = solver.solve();
+    const bool fired_noise = Refreshed(solver, pre_noise);
+    MatrixXd Gr(p - 1, n);
+    VectorXd hr(p - 1), pr(p - 1);
+    Gr << G.topRows(i_noise), G.bottomRows(p - i_noise - 1);
+    hr << h.head(i_noise), h.tail(p - i_noise - 1);
+    pr << pen.head(i_noise), pen.tail(p - i_noise - 1);
+    const auto ref = SolveWith<Solver>(qp.Q, qp.q, qp.A, qp.b, Gr, hr, pr);
+    const double dx2 = RelDiff(ref.x, s2.x);
+    std::printf("  row -> noise: refreshed=%d iters=%d\n", fired_noise,
+                s2.iters);
+    Check(L("noise row ignored by drift, solved"),
+          !fired_noise && s2.converged == 1 && ref.converged == 1 &&
+              dx2 < 1e-5,
+          dx2, "|dx|");
+  }
+
+  std::printf("[%s] Ruiz: equality-infeasibility gate across a refresh\n", B::name);
+  {
+    // The certificate is computed on unscaled (A, b): it must fire through a
+    // drift-triggered refresh, report a frame-independent bound, and leave
+    // the warm start usable once b is consistent again.
+    const int n = 10, p = 20;
+    const QPData qp = problem_gen::Feasible(rng, n, p);
+    MatrixXd Ai(2, n);
+    Ai.row(0) = problem_gen::Randn(rng, 1, n);
+    Ai.row(1) = Ai.row(0);  // rank-deficient by construction
+    VectorXd bc(2), bi(2);
+    bc << 0.5, 0.5;
+    bi << 0.0, 1.0;
+    // The refresh is tripped through G (row scale s with penalty / s keeps
+    // the QP, and so the warm iterate, unchanged); A is re-set unscaled
+    const double s = 100.0;
+    Solver on, off;  // library defaults (eps_rel = 0 gates)
+    on.settings.ruiz = true;
+    on.setup(qp.Q, qp.q, Ai, bc, qp.G, qp.h, 10.0);
+    off.setup(qp.Q, qp.q, Ai, bi, qp.G, qp.h, 10.0);
+    const auto good = on.solve();
+    on.set_G(s * qp.G);
+    on.set_h(s * qp.h);
+    on.set_penalty(VectorXd::Constant(p, 10.0 / s));
+    on.set_A(Ai);
+    on.set_b(bi);
+    const bool pre = DriftedBefore(on);
+    const auto fail = on.solve();
+    const bool fired = Refreshed(on, pre);
+    const auto off_fail = off.solve();
+    const double lb_err =
+        std::abs(on.eq_infeasibility() - off.eq_infeasibility()) /
+        off.eq_infeasibility();
+    Check(L("gate fires through refresh"),
+          good.status == elastiqp::Status::kSolved && fired &&
+              on.scaling_drift() < 1.5 &&
+              fail.status == elastiqp::Status::kInfeasible && fail.iters == 0 &&
+              off_fail.status == elastiqp::Status::kInfeasible,
+          on.eq_infeasibility(), "eq_infeas");
+    Check(L("eq_infeasibility() frame-independent"), lb_err < 1e-9, lb_err,
+          "rel");
+    on.set_b(bc);
+    const auto again = on.solve();
+    Check(L("warm start survives gated tick"),
+          again.status == elastiqp::Status::kSolved &&
+              again.iters <= good.iters && on.eq_infeasibility() < 1e-10,
+          again.iters, "iters");
+  }
+
+}
+
+// Cell (4): every backend
+template <class Solver>
+void FieldsSuite() {
+  using B = Backend<Solver>;
+  std::mt19937 rng(11);
+  const double kappa = 1e-4;
+  char name[96];
+  const auto L = [&](const char* cell) { return Label<Solver>(name, sizeof name, cell); };
+  std::printf("[%s] Ruiz: reported fields are in the user's frame\n", B::name);
   {
     // Badly row- and column-scaled problem; every reported scalar must
     // match a recomputation from the returned (unscaled) Solution, and
@@ -330,9 +491,9 @@ int main() {
     }
     for (int j = 0; j < n; ++j) d[j] = std::pow(10.0, 0.5 * unif(rng));
     qp = ColumnScaled(qp, d);
-    elastiqp::Solver on, off;
-    on.settings = TightSettings();
-    off.settings = TightSettings();
+    Solver on, off;
+    on.settings = Tight<Solver>();
+    off.settings = Tight<Solver>();
     off.settings.ruiz = false;
     on.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
     off.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
@@ -351,41 +512,47 @@ int main() {
                 "off: iters=%d conv=%d obj=%.6f\n",
                 son.iters, son.primal_obj, son.primal_res, son.dual_res,
                 son.duality_gap, soff.iters, soff.converged, soff.primal_obj);
-    Check("objective and gap match recomputation",
+    Check(L("objective and gap match recomputation"),
           son.converged == 1 && obj_err < 1e-9 && gap_err < 1e-7, obj_err,
           "rel");
-    Check("residuals match recomputation", res_err < 1e-9, res_err, "abs");
-    Check("objective matches ruiz off",
+    Check(L("residuals match recomputation"), res_err < 1e-9, res_err, "abs");
+    Check(L("objective matches ruiz off"),
           soff.converged == 1 &&
               std::abs(son.primal_obj - soff.primal_obj) / obj_scale < 1e-6 &&
               RelDiff(soff.x, son.x) < 1e-4,
           std::abs(son.primal_obj - soff.primal_obj) / obj_scale, "rel");
 
     // relax(): the same fields at the relaxed point
-    const auto ron = on.relax(kappa);
-    const Recomputed rr =
-        Recompute(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty, ron);
-    const double robj_err = std::abs(ron.primal_obj - rr.primal_obj) /
-                            std::max(1.0, std::abs(rr.primal_obj));
-    Check("relax objective in user frame", ron.converged == 1 && robj_err < 1e-9,
-          robj_err, "rel");
+    if constexpr (B::has_relax) {
+      const auto ron = on.relax(kappa);
+      const Recomputed rr =
+          Recompute(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty, ron);
+      const double robj_err = std::abs(ron.primal_obj - rr.primal_obj) /
+                              std::max(1.0, std::abs(rr.primal_obj));
+      Check(L("relax objective in user frame"),
+            ron.converged == 1 && robj_err < 1e-9, robj_err, "rel");
+    }
 
     // Relative termination only (eps_abs = 0 is unreachable): the relative
     // norms are unscaled, so this must converge under Ruiz to the same point.
-    elastiqp::Solver rel;
-    rel.settings = TightSettings();
+    Solver rel;
+    rel.settings = Tight<Solver>();
     rel.settings.eps_abs = 0.0;
     rel.settings.eps_rel = 1e-9;
-    rel.settings.eps_duality_gap_abs = 0.0;
-    rel.settings.eps_duality_gap_rel = 1e-9;
+    RelaxGapTolerances(rel.settings);
     rel.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
     const auto srel = rel.solve();
     const double rdx = RelDiff(soff.x, srel.x);
-    Check("eps_rel-only termination under ruiz",
+    Check(L("eps_rel-only termination under ruiz"),
           srel.converged == 1 && rdx < 1e-4, rdx, "|dx|");
   }
 
-  std::printf("Ruiz: refresh with no warm iterate / pending warm start\n");
+}
+
+// Cells (5), (8): PDAL only
+void PdalSuite() {
+  std::mt19937 rng(13);
+  std::printf("[pdal] Ruiz: refresh with no warm iterate / pending warm start\n");
   {
     const int n = 16, m = 4, p = 60;
     const QPData qp = problem_gen::InfeasibleEq(rng, n, m, p, p / 4);
@@ -396,12 +563,12 @@ int main() {
     const MatrixXd G = rs.asDiagonal() * qp.G;
     const VectorXd h = qp.h.cwiseProduct(rs);
     const VectorXd pen = penalty.cwiseQuotient(rs);
-    const auto ref = elastiqp::Solve(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h,
-                                     penalty, TightSettings());
+    const auto ref = SolveWith<pdal::Solver>(qp.Q, qp.q, qp.A, qp.b, qp.G,
+                                             qp.h, penalty);
 
     // Drift before the first solve: the iterates are uninitialized
-    elastiqp::Solver fresh;
-    fresh.settings = TightSettings();
+    pdal::Solver fresh;
+    fresh.settings = Tight<pdal::Solver>();
     fresh.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
     fresh.set_G(G);
     fresh.set_h(h);
@@ -414,12 +581,12 @@ int main() {
 
     // Drift on top of an explicit warm start: the seed is remapped and must
     // still converge immediately (the seed IS the solution)
-    elastiqp::Solver seeded;
-    seeded.settings = TightSettings();
+    pdal::Solver seeded;
+    seeded.settings = Tight<pdal::Solver>();
     seeded.settings.warm_start = false;
     seeded.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
     seeded.solve();
-    seeded.set_warm_start(ref.x, ref.y, ref.z_ineq.cwiseQuotient(rs));
+    seeded.set_warm_start(ref.x, ref.y, ref.z.cwiseQuotient(rs));
     seeded.set_G(G);
     seeded.set_h(h);
     seeded.set_penalty(pen);
@@ -429,115 +596,7 @@ int main() {
           s2.converged == 1 && s2.iters <= 2 && dx2 < 1e-5, s2.iters, "iters");
   }
 
-  std::printf("Ruiz: limit_scaling through the update path\n");
-  {
-    // Row scaling by s with penalty / s leaves the elastic QP unchanged, so
-    // the base solution is the reference throughout (q fixed).
-    const int n = 16, m = 4, p = 60;
-    const QPData qp = problem_gen::InfeasibleEq(rng, n, m, p, p / 4);
-    const VectorXd penalty = VectorXd::Constant(p, 10.0);
-    elastiqp::Solver solver;
-    solver.settings = TightSettings();
-    solver.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
-    const auto s0 = solver.solve();
-
-    // One row explodes by 1e7: the per-pass factor is clamped to 0.01, so
-    // the refresh needs several passes to bring the row back to O(1)
-    MatrixXd G = qp.G;
-    VectorXd h = qp.h, pen = penalty;
-    const int i_big = 3;
-    G.row(i_big) *= 1e7;
-    h[i_big] *= 1e7;
-    pen[i_big] /= 1e7;
-    solver.set_G(G);
-    solver.set_h(h);
-    solver.set_penalty(pen);
-    const double drift_big = solver.scaling_drift();
-    const auto s1 = solver.solve();
-    const double dx1 = RelDiff(s0.x, s1.x);
-    std::printf("  row x1e7: drift %.1e -> %.2f iters=%d\n", drift_big,
-                solver.scaling_drift(), s1.iters);
-    Check("row x1e7 refresh reaches O(1)",
-          drift_big >= 1e4 && solver.scaling_drift() < 1.5 &&
-              s0.converged == 1 && s1.converged == 1 && dx1 < 1e-5,
-          dx1, "|dx|");
-
-    // A different row decays to the noise floor (constraint and rhs both
-    // ~1e-13, penalty unchanged): limit_scaling must leave it alone, the
-    // drift must not report it, and the solution must match the problem
-    // without that row
-    const int i_noise = 7;
-    std::normal_distribution<double> dist;
-    for (int j = 0; j < n; ++j) G(i_noise, j) = 1e-13 * dist(rng);
-    h[i_noise] = 1e-13 * dist(rng);
-    solver.set_G(G);
-    solver.set_h(h);
-    const double drift_noise = solver.scaling_drift();
-    const auto s2 = solver.solve();
-    MatrixXd Gr(p - 1, n);
-    VectorXd hr(p - 1), pr(p - 1);
-    Gr << G.topRows(i_noise), G.bottomRows(p - i_noise - 1);
-    hr << h.head(i_noise), h.tail(p - i_noise - 1);
-    pr << pen.head(i_noise), pen.tail(p - i_noise - 1);
-    const auto ref = elastiqp::Solve(qp.Q, qp.q, qp.A, qp.b, Gr, hr, pr,
-                                     TightSettings());
-    const double dx2 = RelDiff(ref.x, s2.x);
-    std::printf("  row -> noise: drift %.2f iters=%d\n", drift_noise, s2.iters);
-    Check("noise row ignored by drift, solved",
-          drift_noise < 1.5 && s2.converged == 1 && ref.converged == 1 &&
-              dx2 < 1e-5,
-          dx2, "|dx|");
-  }
-
-  std::printf("Ruiz: equality-infeasibility gate across a refresh\n");
-  {
-    // The certificate is computed on unscaled (A, b): it must fire through a
-    // drift-triggered refresh, report a frame-independent bound, and leave
-    // the warm start usable once b is consistent again.
-    const int n = 10, p = 20;
-    const QPData qp = problem_gen::Feasible(rng, n, p);
-    MatrixXd Ai(2, n);
-    Ai.row(0) = problem_gen::Randn(rng, 1, n);
-    Ai.row(1) = Ai.row(0);  // rank-deficient by construction
-    VectorXd bc(2), bi(2);
-    bc << 0.5, 0.5;
-    bi << 0.0, 1.0;
-    // The refresh is tripped through G (row scale s with penalty / s keeps
-    // the QP, and so the warm iterate, unchanged); A is re-set unscaled
-    const double s = 100.0;
-    elastiqp::Solver on, off;  // library defaults (eps_rel = 0 gates)
-    on.settings.ruiz = true;
-    on.setup(qp.Q, qp.q, Ai, bc, qp.G, qp.h, 10.0);
-    off.setup(qp.Q, qp.q, Ai, bi, qp.G, qp.h, 10.0);
-    const auto good = on.solve();
-    on.set_G(s * qp.G);
-    on.set_h(s * qp.h);
-    on.set_penalty(VectorXd::Constant(p, 10.0 / s));
-    on.set_A(Ai);
-    on.set_b(bi);
-    const double drift = on.scaling_drift();
-    const auto fail = on.solve();
-    const auto off_fail = off.solve();
-    const double lb_err =
-        std::abs(on.eq_infeasibility() - off.eq_infeasibility()) /
-        off.eq_infeasibility();
-    Check("gate fires through refresh",
-          good.status == elastiqp::Status::kSolved && drift > 4 &&
-              on.scaling_drift() < 1.5 &&
-              fail.status == elastiqp::Status::kInfeasible && fail.iters == 0 &&
-              off_fail.status == elastiqp::Status::kInfeasible,
-          on.eq_infeasibility(), "eq_infeas");
-    Check("eq_infeasibility() frame-independent", lb_err < 1e-9, lb_err,
-          "rel");
-    on.set_b(bc);
-    const auto again = on.solve();
-    Check("warm start survives gated tick",
-          again.status == elastiqp::Status::kSolved &&
-              again.iters <= good.iters && on.eq_infeasibility() < 1e-10,
-          again.iters, "iters");
-  }
-
-  std::printf("Ruiz: settings semantics\n");
+  std::printf("[pdal] Ruiz: settings semantics\n");
   {
     const int n = 12, m = 3, p = 40;
     const QPData qp = problem_gen::InfeasibleEq(rng, n, m, p, p / 4);
@@ -545,9 +604,9 @@ int main() {
     G.row(0) *= 1.05;  // drift 1.05: under the default ratio, stays
 
     // ruiz_refresh_ratio <= 1: any drift past ruiz_tol refreshes
-    elastiqp::Solver eager, lazy;
-    eager.settings = TightSettings();
-    lazy.settings = TightSettings();
+    pdal::Solver eager, lazy;
+    eager.settings = Tight<pdal::Solver>();
+    lazy.settings = Tight<pdal::Solver>();
     eager.settings.ruiz_refresh_ratio = 1.0;
     eager.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, 10.0);
     lazy.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, 10.0);
@@ -563,10 +622,10 @@ int main() {
 
     // settings.ruiz is latched at setup(): flipping it afterwards changes
     // nothing until the next setup()
-    elastiqp::Solver late, off, early;
-    late.settings = TightSettings();
-    off.settings = TightSettings();
-    early.settings = TightSettings();
+    pdal::Solver late, off, early;
+    late.settings = Tight<pdal::Solver>();
+    off.settings = Tight<pdal::Solver>();
+    early.settings = Tight<pdal::Solver>();
     late.settings.ruiz = false;
     off.settings.ruiz = false;
     late.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, 10.0);
@@ -586,5 +645,17 @@ int main() {
           early.scaling_drift() > 1.01, early.scaling_drift(), "drift");
   }
 
-  return g_all_ok ? 0 : 1;
+}
+
+}  // namespace
+
+int main() {
+  DriftSuite<pdal::Solver>();
+  DriftSuite<elastiqp::das::Solver>();
+  FieldsSuite<elastiqp::das::Solver>();
+  FieldsSuite<pdal::Solver>();
+  FieldsSuite<elastiqp::ipm::Solver>();
+  PdalSuite();
+  std::printf("%s\n", test_util::g_all_ok ? "ALL OK" : "FAILURES");
+  return test_util::g_all_ok ? 0 : 1;
 }

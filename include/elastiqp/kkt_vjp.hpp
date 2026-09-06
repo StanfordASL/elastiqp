@@ -6,7 +6,8 @@
 // tests/test_pdal.cc pins this implementation against finite differences
 // of the relaxed solution map, tests/test_jax_ffi.py pins the JAX one.
 //
-// Evaluate at a kappa-RELAXED point from elastiqp::Solver::relax() (all
+// Evaluate at a kappa-RELAXED point from pdal::Solver::relax() or
+// ipm::Solver::relax() (all
 // complementarity margins ~kappa, so z_t > 0 strictly and the divisions
 // below are safe); the tight certificate sits exactly on the boundary,
 // where these formulas divide by zero. Pass data in the USER frame (the
@@ -24,14 +25,14 @@
 #include <Eigen/Core>
 #include <Eigen/LU>
 
-#include "elastiqp/elastiqp.hpp"
+#include "elastiqp/common.hpp"
 
 namespace elastiqp {
 
-// Cotangents of the solution map (seed with dLoss/d{x,t,y,z_t,z_ineq}
+// Cotangents of the solution map (seed with dLoss/d{x,t,y,z_t,z}
 // evaluated at the solution). Empty vectors are treated as zero.
 struct Cotangents {
-  VectorXd x, t, y, z_t, z_ineq;
+  VectorXd x, t, y, z_t, z;
 };
 
 // Gradients w.r.t. the problem data. Q is symmetrized (matching the
@@ -44,7 +45,7 @@ struct DataGrads {
 
 // theta_bar = -(dF/dtheta)' K^{-T} wbar with F the elastic KKT residual
 // and K = dF/dw, evaluated at the relaxed solution. Condensed, mirroring
-// the forward solver: the diagonal t/z_t/z_ineq blocks are eliminated and
+// the forward solver: the diagonal t/z_t/z blocks are eliminated and
 // one (n+m) saddle system is factored per call -- O(p n^2 + (n+m)^3)
 // instead of O((n+3p+m)^3) for the dense Jacobian.
 class KktVjp {
@@ -84,7 +85,7 @@ class KktVjp {
     const VectorXd& t = sol.t;
     const VectorXd& y = sol.y;
     const VectorXd& z1 = sol.z_t;
-    const VectorXd& z2 = sol.z_ineq;
+    const VectorXd& z2 = sol.z;
 
     // E = (G x - t - h) - z2.*t./z1, strictly negative at a relaxed point
     // (first term is -s_ineq).
@@ -99,7 +100,7 @@ class KktVjp {
     if (ct.z_t.size() > 0) rt_ -= z1.cwiseProduct(ct.z_t);
     if (ct.t.size() > 0) rt_ += t.cwiseProduct(ct.t);
     r5t_ = z2.cwiseProduct(rt_).cwiseQuotient(z1);
-    if (ct.z_ineq.size() > 0) r5t_ += z2.cwiseProduct(ct.z_ineq);
+    if (ct.z.size() > 0) r5t_ += z2.cwiseProduct(ct.z);
 
     w_ = r5t_.cwiseQuotient(E_);
     if (ct.x.size() > 0) {

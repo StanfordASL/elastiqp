@@ -1,15 +1,12 @@
-// ElastiQP-IPM: a proximal interior-point method for elastic QPs
+// ElastiQP-IPM: a proximal interior-point method for the elastic QP
 //
-// TEST-ONLY REFERENCE IMPLEMENTATION. This solver is not part of the
-// installed library: it lives in tests/ and exists solely to cross-validate
-// elastiqp::Solver. It reaches the same elastic-QP solution and the same
-// kappa-relaxed central point (relax()) by a completely different method,
-// which makes it an independent check on both the solver and the
-// differentiability machinery.
-//
-// The method is based on PIQP, with the elastic condensation tricks of
-// qpax, and a few other changes (see notes below). The elastic QP form is
-// stated in elastiqp/elastiqp.hpp.
+// The elastic QP form is stated in elastiqp/common.hpp. The method is based
+// on PIQP, with the elastic condensation tricks of qpax, and a few other
+// changes (see notes below). It reaches the same solution and the same
+// kappa-relaxed central point (relax()) as the PDAL solver by a different
+// route, which is why the test suite uses it as the oracle for the other
+// two methods; on its own it is the backend of choice when a solve should
+// take a predictable number of iterations regardless of the active set.
 //
 // Notes:
 //
@@ -38,7 +35,7 @@
 // Omitted from PIQP: iterative refinement and infeasibility detection.
 //
 // Beyond vanilla PIQP (which re-initializes its iterates on every solve),
-// IpmSolver supports warm starting across repeated solves of slowly-changing
+// ipm::Solver supports warm starting across repeated solves of slowly-changing
 // problems (e.g. a control loop); see init_warm() for the mechanism.
 
 #pragma once
@@ -50,15 +47,14 @@
 #include <cmath>
 #include <limits>
 
-#include "elastiqp/elastiqp.hpp"  // Status, Solution
+#include "elastiqp/common.hpp"
 
-namespace elastiqp {
+namespace elastiqp::ipm {
 
 // Interior-point settings -- every knob this solver has. The termination
-// block is field-for-field identical to elastiqp::Settings (tests/test_pdal.cc
-// static_asserts the defaults agree); everything below is specific to this
-// method.
-struct IpmSettings {
+// block is field-for-field identical to pdal::Settings; everything below is
+// specific to this method.
+struct Settings {
   // Termination, on the unregularized elastic-KKT residuals.
   double eps_abs = 1e-5;
   double eps_rel = 0;
@@ -70,6 +66,10 @@ struct IpmSettings {
   // Reuse the previous solve's iterate from the second solve() on, after
   // flooring slacks and duals off the boundary (see init_warm()).
   bool warm_start = true;
+
+  // Check if equalities are inconsistent (the only infeasibility case).
+  // Runs when A/b data is set; only applies if eps_rel = 0
+  bool check_eq_consistency = true;
 
   // Interior-point iterations, which is also what Solution::iters reports.
   int max_iter = 250;
@@ -114,9 +114,9 @@ struct IpmSettings {
 // set_*() / solve() to exploit warm starting across a sequence of related
 // problems. All workspace is allocated in setup(); solve() is allocation-free
 // on the warm path.
-class IpmSolver {
+class Solver {
  public:
-  IpmSettings settings;
+  Settings settings;
 
   void setup(const MatrixXd& Q, const VectorXd& q, const MatrixXd& A,
              const VectorXd& b, const MatrixXd& G, const VectorXd& h,
@@ -189,6 +189,10 @@ class IpmSolver {
     wAx_.resize(m_);
     zero_p_ = VectorXd::Zero(p_);
 
+    // Equality-consistency certificate, on the still-unscaled (A_, b_)
+    check_eq_A(A_);
+    check_eq_b(b_);
+
     ruiz_ = settings.ruiz && p_ > 0;
     dx_s_ = VectorXd::Ones(n_);
     de_s_ = VectorXd::Ones(m_);
@@ -232,10 +236,13 @@ class IpmSolver {
     q_ = ruiz_ ? VectorXd(c_s_ * q.cwiseProduct(dx_s_)) : q;
   }
   void set_A(const MatrixXd& A) {
+    check_eq_A(A);
+    check_eq_b(ruiz_ ? VectorXd(b_.cwiseProduct(inv_de_)) : b_);
     A_ = ruiz_ ? MatrixXd(de_s_.asDiagonal() * A * dx_s_.asDiagonal()) : A;
     compute_AtA();
   }
   void set_b(const VectorXd& b) {
+    check_eq_b(b);
     b_ = ruiz_ ? VectorXd(b.cwiseProduct(de_s_)) : b;
   }
   void set_G(const MatrixXd& G) {
@@ -260,9 +267,9 @@ class IpmSolver {
   // warm-start strategies on top of the solver.
   void set_warm_start(const VectorXd& x, const VectorXd& t, const VectorXd& y,
                       const VectorXd& s_t, const VectorXd& s_ineq,
-                      const VectorXd& z_t, const VectorXd& z_ineq,
+                      const VectorXd& z_t, const VectorXd& z,
                       double rho = 0.0, double delta = 0.0) {
-    scale_iterate(x, t, y, s_t, s_ineq, z_t, z_ineq);
+    scale_iterate(x, t, y, s_t, s_ineq, z_t, z);
     rho_ = rho > 0 ? rho : (rho_ > 0 ? rho_ : settings.rho_init);
     delta_ = delta > 0 ? delta : (delta_ > 0 ? delta_ : settings.delta_init);
     explicit_warm_ = true;
@@ -276,8 +283,7 @@ class IpmSolver {
   // length. Dimensions must match setup(). Takes effect once, for the
   // next solve() only.
   void warm_start_from(const Solution& sol) {
-    scale_iterate(sol.x, sol.t, sol.y, sol.s_t, sol.s_ineq, sol.z_t,
-                  sol.z_ineq);
+    scale_iterate(sol.x, sol.t, sol.y, sol.s_t, sol.s_ineq, sol.z_t, sol.z);
     if (rho_ <= 0) rho_ = settings.rho_init;
     if (delta_ <= 0) delta_ = settings.delta_init;
     if (p_ > 0) init_warm();  // floor slacks/duals off the boundary
@@ -286,9 +292,43 @@ class IpmSolver {
 
   const Solution& solution() const { return sol_; }
 
+  // Lower bound on the reachable equality residual (0 if consistent or the
+  // check is disabled)
+  double eq_infeasibility() const { return eq_infeas_lb_; }
+
   const Solution& solve() {
     const bool explicit_ws = explicit_warm_;
     explicit_warm_ = false;
+
+    // Inconsistent equalities: eps_abs is unreachable, report and exit
+    if (settings.check_eq_consistency && settings.eps_rel <= 0 &&
+        eq_infeas_lb_ > settings.eps_abs) {
+      if (!have_warm_ && !explicit_ws) {
+        x_.setZero();
+        t_.setZero();
+        y_.setZero();
+        s1_.setOnes();
+        s2_.setOnes();
+        z1_.setOnes();
+        z2_.setOnes();
+      }
+      if (p_ > 0) {
+        update_residuals_nr();
+      } else {
+        // Residuals of the current iterate at the (unreachable) equalities
+        wQx_.noalias() = Q_ * x_;
+        wAty_.noalias() = A_.transpose() * y_;
+        wAx_.noalias() = A_ * x_;
+        dual_res_ = (wQx_ + q_ + wAty_).cwiseProduct(inv_cdx_)
+                        .lpNorm<Eigen::Infinity>();
+        primal_res_ = (wAx_ - b_).cwiseProduct(inv_de_).lpNorm<Eigen::Infinity>();
+        primal_obj_ = (0.5 * x_.dot(wQx_) + q_.dot(x_)) / c_s_;
+        duality_gap_ = std::abs(primal_obj_ -
+                                (-0.5 * x_.dot(wQx_) - b_.dot(y_)) / c_s_);
+      }
+      return finish(Status::kInfeasible, 0);
+    }
+
     if (p_ == 0) {
       return solve_no_inequalities();
     }
@@ -559,43 +599,34 @@ class IpmSolver {
     }
   }
 
-  // PIQP's limit_scaling guard (dense/preconditioner.tpp): a norm below
-  // 1e-4 is treated as 1, so the row/column is left unscaled -- a row at
-  // the numerical noise floor would otherwise be amplified by 1/sqrt(nrm)
-  // >= 100x per sweep while its penalty shrinks toward zero (this stalls
-  // the interior point method: tests/test_ipm.cc's noise-row test hits
-  // max_iter without the guard); a norm above 1e4 is capped so one sweep's
-  // scale factor stays in [1e-2, 100].
-  static double limit_scaling(double nrm) {
-    return nrm < 1e-4 ? 1.0 : std::min(nrm, 1e4);
+  // Equality consistency (common.hpp EqCertificate) on the unscaled (A, b)
+  void check_eq_A(const MatrixXd& A) {
+    eq_infeas_lb_ = 0.0;
+    if (m_ == 0 || !settings.check_eq_consistency) return;
+    eq_cert_.set_A(A);
+  }
+  void check_eq_b(const VectorXd& b) {
+    eq_infeas_lb_ = 0.0;
+    if (m_ == 0 || !settings.check_eq_consistency) return;
+    eq_infeas_lb_ = eq_cert_.bound(b);
   }
 
   // Ruiz sweeps on the stacked symmetric structure [Q A' G'; A 0 0; G 0 0],
   // applied in place to the stored data, with the per-sweep cost
-  // normalization gamma = 1/max(1, mean |Q| column norm) -- identical to
-  // elastiqp::Solver::equilibrate() so the two solvers scale a given
-  // problem the same way.
+  // normalization -- identical to pdal::Solver::equilibrate() so the
+  // solvers scale a given problem the same way (primitives in common.hpp).
   void equilibrate() {
     VectorXd dx(n_), de(m_), di(p_);
     for (int iter = 0; iter < settings.ruiz_max_iter; ++iter) {
-      double dev = 0.0;
       for (Eigen::Index k = 0; k < n_; ++k) {
-        double nrm = Q_.col(k).cwiseAbs().maxCoeff();
-        if (m_ > 0) nrm = std::max(nrm, A_.col(k).cwiseAbs().maxCoeff());
-        nrm = std::max(nrm, G_.col(k).cwiseAbs().maxCoeff());
-        dx[k] = 1.0 / std::sqrt(limit_scaling(nrm));
-        dev = std::max(dev, std::abs(1.0 - dx[k]));
+        dx[k] = Q_.col(k).cwiseAbs().maxCoeff();
       }
-      for (Eigen::Index i = 0; i < m_; ++i) {
-        const double nrm = A_.row(i).cwiseAbs().maxCoeff();
-        de[i] = 1.0 / std::sqrt(limit_scaling(nrm));
-        dev = std::max(dev, std::abs(1.0 - de[i]));
-      }
-      for (Eigen::Index i = 0; i < p_; ++i) {
-        const double nrm = G_.row(i).cwiseAbs().maxCoeff();
-        di[i] = 1.0 / std::sqrt(limit_scaling(nrm));
-        dev = std::max(dev, std::abs(1.0 - di[i]));
-      }
+      de.setZero();
+      di.setZero();
+      if (m_ > 0) fold_max_abs(A_, dx, de);
+      fold_max_abs(G_, dx, di);
+      const double dev =
+          std::max({ruiz_factors(dx), ruiz_factors(de), ruiz_factors(di)});
       if (dev <= settings.ruiz_tol) break;
       Q_ = dx.asDiagonal() * Q_ * dx.asDiagonal();
       q_ = q_.cwiseProduct(dx);
@@ -609,12 +640,7 @@ class IpmSolver {
       penalty_ = penalty_.cwiseQuotient(di);
       dx_s_ = dx_s_.cwiseProduct(dx);
       di_s_ = di_s_.cwiseProduct(di);
-      double mean = 0.0;
-      for (Eigen::Index k = 0; k < n_; ++k) {
-        mean += Q_.col(k).cwiseAbs().maxCoeff();
-      }
-      mean /= static_cast<double>(n_);
-      const double gamma = 1.0 / std::max(1.0, mean);
+      const double gamma = ruiz_cost_gamma(Q_);
       Q_ *= gamma;
       q_ *= gamma;
       penalty_ *= gamma;
@@ -631,10 +657,10 @@ class IpmSolver {
   }
 
   // Ingest an unscaled iterate into the setup()-time scaled frame
-  // (see IpmSettings::ruiz). Identity when Ruiz is off.
+  // (see Settings::ruiz). Identity when Ruiz is off.
   void scale_iterate(const VectorXd& x, const VectorXd& t, const VectorXd& y,
                      const VectorXd& s_t, const VectorXd& s_ineq,
-                     const VectorXd& z_t, const VectorXd& z_ineq) {
+                     const VectorXd& z_t, const VectorXd& z) {
     if (!ruiz_) {
       x_ = x;
       t_ = t;
@@ -642,7 +668,7 @@ class IpmSolver {
       s1_ = s_t;
       s2_ = s_ineq;
       z1_ = z_t;
-      z2_ = z_ineq;
+      z2_ = z;
       return;
     }
     x_ = x.cwiseQuotient(dx_s_);
@@ -651,7 +677,7 @@ class IpmSolver {
     s1_ = s_t.cwiseProduct(di_s_);
     s2_ = s_ineq.cwiseProduct(di_s_);
     z1_ = c_s_ * z_t.cwiseQuotient(di_s_);
-    z2_ = c_s_ * z_ineq.cwiseQuotient(di_s_);
+    z2_ = c_s_ * z.cwiseQuotient(di_s_);
   }
 
   // No inequality constraints: with equalities the problem is a plain
@@ -982,19 +1008,25 @@ class IpmSolver {
     sol_.x = x_.cwiseProduct(dx_s_);
     sol_.t = t_.cwiseProduct(inv_di_);
     sol_.y = y_.cwiseProduct(y_us_);
+    sol_.z = z2_.cwiseProduct(z_us_);
     sol_.s_t = s1_.cwiseProduct(inv_di_);
     sol_.s_ineq = s2_.cwiseProduct(inv_di_);
     sol_.z_t = z1_.cwiseProduct(z_us_);
-    sol_.z_ineq = z2_.cwiseProduct(z_us_);
     sol_.status = status;
     sol_.converged = status == Status::kSolved ? 1 : 0;
     sol_.iters = iters;
+    sol_.outer_iters = 0;
+    count_row_states(sol_.t, sol_.z, settings.eps_abs, sol_.n_active,
+                     sol_.n_saturated);
     sol_.primal_obj = primal_obj_;
     sol_.primal_res = primal_res_;
     sol_.dual_res = dual_res_;
     sol_.duality_gap = duality_gap_;
-    // A converged (or at least finite) iterate seeds the next warm start.
-    have_warm_ = status != Status::kNumerics;
+    // A converged (or at least finite) iterate seeds the next warm start;
+    // kInfeasible exits early and leaves the warm-start state as it was.
+    if (status != Status::kInfeasible) {
+      have_warm_ = status != Status::kNumerics;
+    }
     return sol_;
   }
 
@@ -1008,6 +1040,10 @@ class IpmSolver {
   VectorXd x_, t_, y_, s1_, s2_, z1_, z2_;
   bool have_warm_ = false;
   bool explicit_warm_ = false;  // next solve seeded via set_warm_start()
+
+  // Equality-consistency certificate (check_eq_A / check_eq_b)
+  EqCertificate eq_cert_;
+  double eq_infeas_lb_ = 0.0;
 
   // Ruiz scaling state (identity when ruiz_ is false)
   bool ruiz_ = false;
@@ -1046,37 +1082,37 @@ class IpmSolver {
 };
 
 // One-shot convenience wrappers (cold start).
-inline Solution IpmSolve(
+inline Solution Solve(
     const MatrixXd& Q, const VectorXd& q, const MatrixXd& A, const VectorXd& b,
     const MatrixXd& G, const VectorXd& h, const VectorXd& penalty,
-    const IpmSettings& settings = {}) {
-  IpmSolver solver;
+    const Settings& settings = {}) {
+  Solver solver;
   solver.settings = settings;
   solver.setup(Q, q, A, b, G, h, penalty);
   return solver.solve();
 }
 
-inline Solution IpmSolve(
+inline Solution Solve(
     const MatrixXd& Q, const VectorXd& q, const MatrixXd& A, const VectorXd& b,
     const MatrixXd& G, const VectorXd& h, double penalty,
-    const IpmSettings& settings = {}) {
-  return IpmSolve(Q, q, A, b, G, h, VectorXd::Constant(h.size(), penalty),
+    const Settings& settings = {}) {
+  return Solve(Q, q, A, b, G, h, VectorXd::Constant(h.size(), penalty),
                   settings);
 }
 
 // Inequality-only overloads.
-inline Solution IpmSolve(
+inline Solution Solve(
     const MatrixXd& Q, const VectorXd& q, const MatrixXd& G, const VectorXd& h,
-    const VectorXd& penalty, const IpmSettings& settings = {}) {
-  return IpmSolve(Q, q, MatrixXd(0, q.size()), VectorXd(0), G, h, penalty,
+    const VectorXd& penalty, const Settings& settings = {}) {
+  return Solve(Q, q, MatrixXd(0, q.size()), VectorXd(0), G, h, penalty,
                   settings);
 }
 
-inline Solution IpmSolve(
+inline Solution Solve(
     const MatrixXd& Q, const VectorXd& q, const MatrixXd& G, const VectorXd& h,
-    double penalty, const IpmSettings& settings = {}) {
-  return IpmSolve(Q, q, G, h, VectorXd::Constant(h.size(), penalty),
+    double penalty, const Settings& settings = {}) {
+  return Solve(Q, q, G, h, VectorXd::Constant(h.size(), penalty),
                   settings);
 }
 
-}  // namespace elastiqp
+}  // namespace elastiqp::ipm
