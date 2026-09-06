@@ -229,3 +229,134 @@ both), CSV `elastiqp_benchmarks/results/maros_meszaros_results_edaqp_20260905.cs
 * Read with the same caveat as the rest of the note: cold solves, iteration
   count combinatorial (QISRAEL, QSHARE2B, QADLITTL at 160-715 changes).
 
+
+## Full sweep: edaqp through the remaining relevant tests and benchmarks
+
+Everything in `tests/` and `elastiqp_benchmarks/` that tests the elastic QP
+being solved (as opposed to PDAL internals: `relax()`, the KKT VJP, the BCL
+schedule, `set_warm_start`, the IPM reference's own tests) now runs the
+prototype too. Raw outputs and CSVs:
+`elastiqp_benchmarks/results/edaqp_sweep_20260905/`.
+
+* `test_elastic_daqp_oracle` (new, ctest `elastiqp_bench.elastic_daqp_oracle`):
+  the non-PDAL cells of `test_pdal.cc`, `test_lp.cc`, `test_ruiz.cc` and
+  `test_piqp_cross_validation.cc` with the same generators, seeds and
+  thresholds, oracle = IPM reference or vanilla PIQP, tolerances 1e-8.
+  **69/69 checks pass**; 51 timed cells, edaqp geomean 2.6x faster than
+  elastiqp cold, faster by >1.5x on 43, slower by >1.5x on 1 (n=58 m=15
+  p=400 infeasible, 1.55x: cold start with ~500 working-set changes).
+  Semantics differences surfaced: reconstructed slacks are ~1e-15 rather
+  than identically 0 (active rows satisfied to roundoff instead of the
+  PDAL's exact clamp); `check_eq_consistency=false` on inconsistent
+  equalities reports kSolved on the consistent subset (dependent row
+  dropped) where the PDAL runs to kMaxIter; no `set_warm_start`.
+  Added `Solver::rescaled()` so a Ruiz refresh is observable
+  (`scaling_drift()` reads 1 after one).
+* `bench_random_qp` (cold, eps 1e-5): faster on every family at n <= 30
+  (1.4-2.4x); at n=100 p=200 faster on feasible (1.1-1.4x), slower on the
+  infeasible families (0.65-0.8x; 314-380 changes vs 41-64 Newton steps).
+* `bench_condensed_vs_expanded` (cold, eps 1e-8): faster on all 36 cells,
+  2-25x feasible, 1.3-4.4x infeasible; the margin shrinks with n (n=58
+  infeasible p >= 200: 1.26-1.5x). Penalty sweep at n=30 p=200: faster at
+  penalty 1 and 100, **slower at 1e4 and 1e6 (1400/1790 vs 1050 us, 635-643
+  changes)**, and the full KKT residual there is penalty x eps
+  (complementarity on active rows, 2e-6 at eps 1e-8 / penalty 1e4; x itself
+  matches elastiqp to 1e-10, eps 1e-10 brings it to 3e-10). Rank-deficient
+  Q: 2.5x / 1.7x faster at n=14/30, 0.9x at n=58 p=500 (2 prox rounds,
+  1164 changes); KKT 1e-8..1e-7 there because `eta_prox` defaults to 1e-6.
+* `bench_proxqp_closest` (eps 1e-6): 3.1x / 2.8x / 1.25x faster than
+  elastiqp at n=14/30/58, identical violation structure (nnz, spurious, l1,
+  linf all equal to elastiqp's); feasible overhead table 5-8x faster.
+* `bench_collision_2d` (n=4, p=8, forward only): warm 0.65 us vs 1.94,
+  cold 2.2 vs 3.4; worst |x - elastiqp| 3e-5 at penalty 1e4 / eps 1e-5.
+* `bench_robot_control` (eps 1e-6, all four sequences): same picture as
+  the paper table. Warm: diff-ik 1.2 vs 1.0 us, arm-osc 1.2 vs 1.1,
+  biman-ik 3.7 vs 3.0, hum-wbc 47.8 vs 33.0 (per-tick Cholesky + M floor).
+  Cold hum-wbc 52 vs 75 us. Tails: hum-wbc cold max 139 vs 387 us, warm
+  max 100 vs 77, p95 50 vs 43. 0 fails. hum-wbc's Q has eigenvalues down to
+  1e-6, so x differs from elastiqp's by up to 0.3 at equal objective
+  (2e-10) -- both are valid at eps 1e-6.
+* `bench_fwd_warm` (100-tick drifting random QPs, 3 structures x 3 sizes x
+  4 sigmas x 2 penalties + drift composition + accuracy tier, eps 1e-5):
+  **0 fails in 104 cells** (elastiqp also 0). Warm edaqp is faster than
+  warm elastiqp in every cell, 1.65-13x (median ~4x); at penalty 1e4 the
+  elastiqp warm chain costs 90-2200 us/tick vs 4-1300 for edaqp. Cold:
+  faster at n <= 30 and penalty 10, but at n=58 p=400 with penalty 1e4 the
+  cold start needs 900-1230 changes and costs 4-8.8 ms vs 2.9-3.3 ms for
+  elastiqp (0.35-0.7x) -- the one consistent loss. Warm-vs-cold |dx| is
+  at the 1e-5..1e-9 level throughout, same as elastiqp's.
+* `bench_eq_elastic`: hard equalities are exact (||Ax-b|| 1e-11..1e-13 vs
+  1e-7..1e-9 for the PDAL, no mu_eq schedule). edaqp-hard vs elastiqp-hard:
+  hum-wbc 0.69x cold / 1.39x warm; biman-ik 1.2x; random n=20/n=60 chains
+  0.17-0.47x (2-6x faster). Folding equalities into `[A; -A]` elastic pairs
+  costs edaqp 1.1-1.8x (vs 1.1-5.7x for the PDAL) and is insensitive to
+  the weight w.
+* Not run: `test_robot_control` (needs Pinocchio; its problems are the
+  replayed sequences above), `bench_robot_multisolver` (subset of
+  `robot_solver_comparison`, already has the edaqp route), the Python
+  bindings/JAX/torch tests and `bench_relax_warm` / `bench_diff_robot` /
+  `bench_bcl_strategies` (PDAL-specific).
+
+Summary of where edaqp loses to the PDAL: warm hum-wbc-size loops where the
+per-tick setup floor dominates (1.2-1.45x slower), and cold starts at
+n >= 58 with many conflicting rows or a large penalty (up to 2.9x slower,
+iteration count in the hundreds to ~1200). Nothing failed to solve.
+
+## Maros-Meszaros, every solver on one profile (2026-09-05)
+
+`bench_maros_meszaros` now also runs `daqp` (DAQP v0.9.1 on the hard
+two-sided problem, unit rows mapped to its simple bounds, cold one-shot
+`daqp_quadprog`) and can write the Python runner's CSV schema
+(`--py-csv`); `run_maros_meszaros.py --solvers qpax-hard,qpax-elastic
+--merge-into <csv>` appends the qpax rows and rewrites the summary. So the
+C++ solvers are timed in C++ and only qpax goes through Python. Both halves
+pinned with `taskset -c 2`, eps 1e-6, n <= 200 subset (36 problems), penalty
+= 10x the largest reference dual (the C++ harness now follows the Python
+rule exactly, no upper clamp: QPCBOEI2's duals exceed 1e7 and the old 1e8
+cap left a 2e-3 violation). Files:
+`results/maros_meszaros_all_{results,summary}_n200_eps1e-6.csv`,
+`results/maros_meszaros_all_profile_n200_eps1e-6.{png,svg}`,
+`results/maros_meszaros_all_cpp_stdout_n200_eps1e-6.txt`.
+
+| solver | solved | sgm ms (shift 1) | vs best |
+|---|---|---|---|
+| daqp | 36/36 | 0.255 | 1.00 |
+| edaqp | 36/36 | 0.601 | 2.36 |
+| piqp | 36/36 | 0.809 | 3.17 |
+| elastiqp | 36/36 | 0.875 | 3.43 |
+| proxqp | 35/36 | 1.308 | 5.13 |
+| ipm (elastic IPM reference) | 35/36 | 1.310 | 5.14 |
+| qpax-elastic | 28/36 | 5.23 | 20.5 |
+| piqp-expanded | 35/36 | 6.65 | 26.1 |
+| qpax-hard | 17/36 | 26.4 | 103 |
+
+(`ipm` = `tests/support/ipm_reference.hpp`, the original elastic-PIQP
+experiment, cold on the same elastic form, same eps and Ruiz as elastiqp;
+added in a second pinned pass, so the other rows moved by a few percent.)
+
+* DAQP on the hard problem is the fastest solver on all 36 instances
+  (tau = 1 everywhere): these are feasible, small, bounds-heavy QPs, the
+  active-set method's home turf, and its simple-bound handling halves the
+  row count the elastic routes carry (each two-sided row becomes two
+  one-sided elastic rows). edaqp sits between it and PIQP.
+* Relative to the pinned Python-timed run
+  (`maros_meszaros_py_summary_n200_eps1e-6.csv`): elastiqp 0.84 vs 1.98 ms
+  and proxqp 1.27 vs 1.63 ms are the C++-vs-bindings gap (the Python route
+  builds the one-sided form and crosses nanobind per solve); piqp 0.78 vs
+  0.62 ms is the C++ harness's two-sided interface with duplicated rows
+  dropped differently -- within the run-to-run band. qpax rows are
+  identical in method to the pinned run (28/36 and 17/36 solved, same
+  instances).
+* The elastic IPM reference lands on top of ProxQP: 35/36 (QPCBOEI2 hits
+  the 250-iteration cap at penalty 1e8), geomean 1.6x slower than
+  elastiqp and 1.4x slower than PIQP. Per problem it splits cleanly by
+  iteration count: where the PDAL needs hundreds of semismooth-Newton steps
+  (QSCAGR7 505, QISRAEL 292, QSHARE2B 207, QADLITTL 159, KSIP 33 at
+  p = 1001) the IPM's 14-37 iterations win by 1.2-4.5x; where the PDAL
+  finishes in 2-20 steps (DUAL*, CVXQP*, QRECIPE) the IPM's fixed 10-30
+  iterations lose by 2.5-7.4x. Against PIQP on the hard problem it is
+  1.1-2.6x slower on 30 of 36: same iteration counts, but each elastic
+  KKT solve carries the p slack rows and the penalty-scaled conditioning.
+* Success per the Python rule (reported success, hard violation <= 1e-4,
+  relative objective error <= 1e-4): elastiqp and edaqp now pass all 36
+  (QPCBOEI2 needed the unclamped penalty), proxqp fails QRECIPE.
