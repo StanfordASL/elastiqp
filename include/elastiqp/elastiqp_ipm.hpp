@@ -47,6 +47,10 @@
 #include <cmath>
 #include <limits>
 
+#ifdef ELASTIQP_IPM_DEBUG
+#include <cstdio>
+#endif
+
 #include "elastiqp/common.hpp"
 
 namespace elastiqp::ipm {
@@ -491,6 +495,14 @@ class Solver {
 
       // ------------------ update regularization ------------------
       update_residuals_nr();
+#ifdef ELASTIQP_IPM_DEBUG
+      std::printf("it %3d pres %.2e dres %.2e gap %.2e mu %.2e rho %.1e delta %.1e lim %.1e "
+                  "a_p %.2e a_d %.2e sigma %.2e |x| %.2e |t| %.2e |z2| %.2e |z1| %.2e nopu %d nodu %d\n",
+                  iter, primal_res_, dual_res_, duality_gap_, mu_, rho_, delta_, reg_limit_,
+                  primal_step, dual_step, sigma, x_.lpNorm<Eigen::Infinity>(),
+                  t_.lpNorm<Eigen::Infinity>(), z2_.lpNorm<Eigen::Infinity>(),
+                  z1_.lpNorm<Eigen::Infinity>(), no_primal_update_, no_dual_update_);
+#endif
 
       if (dual_res_ < 0.95 * prev_dual_res_ ||
           (dual_res_ < settings.eps_abs ||

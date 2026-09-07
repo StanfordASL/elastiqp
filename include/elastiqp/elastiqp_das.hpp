@@ -73,11 +73,25 @@
 //    the working set is built (singular pivot) and checked against the
 //    least-norm solution of the independent ones before any iteration;
 //    inconsistent data returns kInfeasible with eq_infeasibility() > 0.
-//  * DAQP's cycle guard: the dual objective must increase; after cycle_tol
-//    stalled dual-feasible points the working set is refactored from scratch
-//    in index order (a different pivot order), a second stall is kNumerics.
-//    A pivot below refactor_tol at optimality triggers the same refactor
-//    before the solution is accepted.
+//  * DAQP's cycle guard: the dual objective must increase (by progress_tol,
+//    ABSOLUTE: the dual carries an offset of order |R^-T q|^2 that makes a
+//    relative test call genuine ulp-sized gains stalls); stalls are counted
+//    only when a row has left the working set since the last check (a cycle
+//    needs a removal). After cycle_tol stalls the working set is refactored
+//    from scratch in index order (a different pivot order); a second stall is
+//    kNumerics. A pivot below refactor_tol at optimality triggers the same
+//    refactor before the solution is accepted.
+//  * Proximal escalation: when the inner method fails with kNumerics inside
+//    the proximal loop (a degenerate vertex the guard cannot pass), the shift
+//    is raised x100 -- up to prox_escalations times -- R, M and the working
+//    set are rebuilt and the loop continues from the last dual-feasible
+//    point. A larger shift changes the dual geometry and breaks the ties; the
+//    price is more proximal rounds, paid only on the failure path.
+//  * The equality certificate is withheld when its own least-norm solve is
+//    not accurate to the tolerance on the KEPT rows (M = C R^-1 amplifies the
+//    null-space components of the equality rows by 1/sqrt(eps), so a
+//    well-posed A can give a Gram matrix with pivots near sing_tol); the
+//    solve then proceeds with the dependent rows dropped.
 
 #pragma once
 
@@ -107,6 +121,7 @@ struct Settings {
   double eps_prox = 1e-6;    // proximal shift, relative to max|Q_ii| (0: refuse singular Q)
   double eta_prox = 1e-6;    // stationarity tolerance of the proximal fixed point, user units
   double prox_relaxation = 1.5;  // over-relaxation of the prox center when the working set is stable
+  int prox_escalations = 3;  // x100 shifts tried after an inner numerics failure (0: fail at once)
   int max_iter = 10000;      // total active-set iterations per solve()
   int max_outer = 1000;      // proximal-point rounds per solve()
   bool warm_start = true;
@@ -119,7 +134,7 @@ struct Settings {
   // Equality consistency certificate before iterating
   bool check_eq_consistency = true;
   // Cycle guard (DAQP: progress_tol, cycle_tol, refactor_tol)
-  double progress_tol = 1e-14;
+  double progress_tol = 1e-14;  // absolute dual increase that counts as progress
   int cycle_tol = 10;
   double refactor_tol = 1e-9;
 };
@@ -253,6 +268,9 @@ class Solver {
   RowState row_state(int i) const { return state_[static_cast<size_t>(m_ + i)]; }
   bool proximal() const { return eps_ > 0; }
   double prox_eps() const { return eps_; }
+  // The last solve() had to escalate the proximal shift after an inner
+  // numerics failure (see Settings::prox_escalations).
+  bool prox_escalated() const { return prox_escalated_; }
   // Lower bound on the reachable equality residual (0 when consistent);
   // > 0 iff the last solve() returned kInfeasible for inconsistent equalities.
   double eq_infeasibility() const { return eq_infeas_; }
@@ -320,6 +338,8 @@ class Solver {
 
     Status st = Status::kSolved;
     bool center_relaxed = false;
+    int escalations = 0;
+    prox_escalated_ = false;
     if (rebuild) rebuild_working_set();
     const bool rhs_changed = rhs_dirty_;
     for (int outer = 0; outer < settings.max_outer; ++outer) {
@@ -331,6 +351,26 @@ class Solver {
       int inner = 0;
       st = ldp(inner);
       sol_.iters += inner;
+      if (st == Status::kNumerics && eps_ > 0 && escalations < settings.prox_escalations) {
+        // The inner active-set method stalled (a degenerate vertex where
+        // the dual no longer moves, e.g. QSHIP04S with 1454 of 1458 rows
+        // active). A larger proximal shift changes the dual geometry and
+        // breaks the ties: refactor Q + eps I with eps x 100, re-solve the
+        // rows against the new R, rebuild the working set from the current
+        // states and continue from the last dual-feasible point as the new
+        // prox center. Only ever runs on a failure path.
+        escalations++;
+        prox_escalated_ = true;
+        for (int i = 0; i < static_cast<int>(W_.size()); ++i)
+          lam_full_[W_[static_cast<size_t>(i)]] = lam_[i];
+        xc_ = llt_.matrixU().solve(u_ - v_);
+        if (!factor(100.0 * eps_)) return finish(Status::kNumerics);
+        for (int i = 0; i < mp_; ++i)  // row normalization changed with R
+          tol_[i] = (settings.eps_abs + settings.eps_rel * std::abs(rhs_[i])) * scale_[i] * dr_[i];
+        rebuild_working_set();
+        center_relaxed = false;
+        continue;
+      }
       if (st != Status::kSolved) return finish(st);
       // x = R^-1 (u - v)
       x_ = llt_.matrixU().solve(u_ - v_);
@@ -362,10 +402,10 @@ class Solver {
   // ---------------------------------------------------------------- setup
   // Cholesky of Q (shifted by eps I when Q is not numerically positive
   // definite), M' = R^-T C', row normalization and the multiplier boxes.
-  bool factor() {
+  bool factor(double eps_start = 0.0) {
     double scale = 0.0;
     for (int i = 0; i < n_; ++i) scale = std::max(scale, std::abs(Qs_(i, i)));
-    eps_ = 0.0;
+    eps_ = eps_start;
     for (int tries = 0; tries < 18; ++tries) {
       MatrixXd Qe = Qs_;
       if (eps_ > 0) Qe.diagonal().array() += eps_;
@@ -546,15 +586,27 @@ class Solver {
     }
     VectorXd uE = VectorXd::Zero(n_);
     for (int i = 0; i < k; ++i) uE -= dir_[i] * Mt_.col(W_[static_cast<size_t>(i)]);
-    double worst = 0.0;
+    // Residuals in the user frame (rows were scaled by dr_i and by scale_i).
+    // The kept rows hold at u_E up to the roundoff of the LDL' solve; when
+    // that roundoff alone is above the tolerance the certificate cannot
+    // tell inconsistency from conditioning and is not issued. This happens
+    // under a small proximal shift: M = C R^-1 amplifies the null-space
+    // components of the equality rows by 1/sqrt(eps), so a well-posed A can
+    // have a Gram matrix with pivots near sing_tol (QSHELL: the kept rows'
+    // residual is 1e-5 at eps = 1e-6, 1e-9 at eps = 1e-2).
+    double worst = 0.0, worst_kept = 0.0;
     for (int i = 0; i < m_; ++i) {
-      if (state_[static_cast<size_t>(i)] != RowState::kDropped) continue;
-      // residual in the user frame: rows were scaled by dr_i and by scale_i
-      const double r = (Mt_.col(i).dot(uE) - d_[i]) / (scale_[i] * dr_[i]);
-      worst = std::max(worst, std::abs(r));
+      const double r = std::abs((Mt_.col(i).dot(uE) - d_[i]) / (scale_[i] * dr_[i]));
+      if (state_[static_cast<size_t>(i)] == RowState::kDropped) worst = std::max(worst, r);
+      else worst_kept = std::max(worst_kept, r);
+    }
+    const double tol = settings.eps_abs + settings.eps_rel * rhs_.head(m_).lpNorm<Eigen::Infinity>();
+    if (worst_kept > tol || worst <= tol + worst_kept) {
+      eq_infeas_ = 0.0;  // not certified
+      return true;
     }
     eq_infeas_ = worst;
-    return worst <= settings.eps_abs + settings.eps_rel * rhs_.head(m_).lpNorm<Eigen::Infinity>();
+    return false;
   }
 
   // ---------------------------------------------------------- working set
@@ -598,6 +650,7 @@ class Solver {
   }
 
   void remove_row(int r) {
+    removed_ = true;
     const int k = static_cast<int>(W_.size());
     for (int i = r; i + 1 < k; ++i) {
       W_[static_cast<size_t>(i)] = W_[static_cast<size_t>(i + 1)];
@@ -807,6 +860,7 @@ class Solver {
     double best_dual = -std::numeric_limits<double>::infinity();
     int stalled = 0;
     bool tried_repair = false;
+    removed_ = false;
     for (iters = 1; iters < settings.max_iter; ++iters) {
       if (singular_sign != 0) {
         const Status st = singular_step(singular_sign);
@@ -858,14 +912,30 @@ class Solver {
         for (int i = m_; i < mp_; ++i)
           if (state_[static_cast<size_t>(i)] == RowState::kSaturated) dual -= d_[i] * hi_[i];
 #ifdef ELASTIQP_DAS_DEBUG
-        std::printf("it %d k %d dual %.12g best %.12g stalled %d\n", iters,
+        std::printf("it %d k %d dual %.17g best %.17g stalled %d\n", iters,
                     static_cast<int>(W_.size()), dual, best_dual, stalled);
 #endif
+        // Progress is measured in ABSOLUTE terms (DAQP's convention). The
+        // dual carries an offset of order |R^-T q|^2 -- 1e10 on a
+        // badly-scaled LP with a 1e-6 proximal shift -- against which a
+        // relative tolerance turns genuine per-iteration gains (a few ulps,
+        // e.g. QSTANDAT, QSCSD1, QSCTAP1 of Maros-Meszaros) into "stalls"
+        // and aborts a converging solve as kNumerics. And a cycle needs a
+        // removal: iterations that only grew the working set since the last
+        // check cannot be part of one and are not counted.
         const bool progressed = !std::isfinite(best_dual) ||
-            dual - best_dual > settings.progress_tol * std::max(1.0, std::abs(best_dual));
-        if (!progressed) {
+            dual - best_dual > settings.progress_tol;
+        const bool removed = removed_;
+        removed_ = false;
+        if (!progressed && removed) {
           if (++stalled > settings.cycle_tol) {
-            if (tried_repair) return Status::kNumerics;  // DAQP_EXIT_CYCLE
+            if (tried_repair) {
+#ifdef ELASTIQP_DAS_DEBUG
+              std::printf("numerics: second stall (cycle) at it %d k %d\n", iters,
+                          static_cast<int>(W_.size()));
+#endif
+              return Status::kNumerics;  // DAQP_EXIT_CYCLE
+            }
             tried_repair = true;
             refactor_working_set();
             stalled = 0;
@@ -874,7 +944,7 @@ class Solver {
             singular_sign = (k > 0 && D_[k - 1] <= settings.sing_tol) ? 1 : 0;
             continue;
           }
-        } else {
+        } else if (progressed) {
           best_dual = dual;
           stalled = 0;
         }
@@ -909,7 +979,13 @@ class Solver {
           lam_full_[W_[static_cast<size_t>(i)]] = lam_[i];
         return Status::kSolved;
       }
-      if (static_cast<int>(W_.size()) > n_) return Status::kNumerics;
+      if (static_cast<int>(W_.size()) > n_) {
+#ifdef ELASTIQP_DAS_DEBUG
+        std::printf("numerics: working set larger than n at it %d (worst %.3g row %d)\n",
+                    iters, worst, add);
+#endif
+        return Status::kNumerics;
+      }
       const bool from_sat = state_[static_cast<size_t>(add)] == RowState::kSaturated;
       const double lam0 = from_sat ? hi_[add] : 0.0;
       set_state(add, RowState::kActive);
@@ -989,6 +1065,8 @@ class Solver {
   MatrixXd L_, Gram_;
   VectorXd D_, lam_, lam_star_, dir_, work_;
   bool Q_dirty_ = true, penalty_dirty_ = false, rhs_dirty_ = true, have_solution_ = false;
+  bool removed_ = false;  // a row left W since the last cycle-guard check
+  bool prox_escalated_ = false;
   // set_warm_start() point (user frame), consumed by the next solve()
   bool explicit_warm_ = false;
   VectorXd warm_x_, warm_y_, warm_z_;
