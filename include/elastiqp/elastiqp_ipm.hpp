@@ -718,19 +718,24 @@ class Solver {
   // A x = b) are caught by checking the KKT residuals against the usual
   // convergence criteria: kSolved or kNumerics.
   const Solution& solve_no_inequalities() {
-    if (m_ == 0) {
-      x_ = Eigen::LDLT<MatrixXd>(Q_).solve(-q_);
-    } else {
-      MatrixXd Kf = MatrixXd::Zero(n_ + m_, n_ + m_);
-      Kf.topLeftCorner(n_, n_) = Q_;
-      Kf.topRightCorner(n_, m_) = A_.transpose();
-      Kf.bottomLeftCorner(m_, n_) = A_;
-      VectorXd rhs(n_ + m_);
-      rhs.head(n_) = -q_;
-      rhs.tail(m_) = b_;
-      const VectorXd xy = Kf.colPivHouseholderQr().solve(rhs);
-      x_ = xy.head(n_);
-      y_ = xy.tail(m_);
+    // Range-space solve (common.hpp); the pivoted QR of the full KKT
+    // matrix is only the fallback for an indefinite Q or a hopeless S.
+    if (!SolveEqualityQP(Q_, q_, A_, b_, settings.rho_init, eq_cert_.rank_deficient(),
+                         x_, y_)) {
+      if (m_ == 0) {
+        x_ = Eigen::LDLT<MatrixXd>(Q_).solve(-q_);
+      } else {
+        MatrixXd Kf = MatrixXd::Zero(n_ + m_, n_ + m_);
+        Kf.topLeftCorner(n_, n_) = Q_;
+        Kf.topRightCorner(n_, m_) = A_.transpose();
+        Kf.bottomLeftCorner(m_, n_) = A_;
+        VectorXd rhs(n_ + m_);
+        rhs.head(n_) = -q_;
+        rhs.tail(m_) = b_;
+        const VectorXd xy = Kf.colPivHouseholderQr().solve(rhs);
+        x_ = xy.head(n_);
+        y_ = xy.tail(m_);
+      }
     }
 
     // KKT residuals and duality gap (update_residuals_nr minus the

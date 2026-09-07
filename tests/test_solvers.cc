@@ -20,6 +20,7 @@
 //     equilibration, exact-penalty behaviour, and Solution invariants.
 // Method-specific behaviour lives in test_das.cc, test_pdal.cc, test_ipm.cc.
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <random>
@@ -220,6 +221,77 @@ void GenericSuite() {
                                         G, h, w, capped);
     Check(L("singular unconstrained not solved"), sing.converged == 0,
           static_cast<double>(sing.status), "status");
+  }
+
+  std::printf("[%s] equality-only range-space solve (p=0)\n", B::name);
+  {
+    // common.hpp SolveEqualityQP: K = Q + rho I, S = A K^-1 A', refinement.
+    // (a) dependent but consistent rows must give the full-rank answer;
+    // (b) a singular Q pinned by the equalities (PD reduced Hessian) must
+    // be solved through the proximal shift + refinement; (c) a large
+    // instance (the OSQP-benchmark Eq QP shape, n=1500 m=750) against a
+    // blocked LU of the KKT matrix -- the pivoted-QR path this replaced
+    // took 2.5 s here.
+    const int n = 20, m = 8;
+    const QPData qp = problem_gen::RandomFeasible(rng, n, m, 0);
+    const MatrixXd G(0, n);
+    const VectorXd h(0), w(0);
+    const auto ref = SolveWith<Solver>(qp.Q, qp.q, qp.A, qp.b, G, h, w);
+    MatrixXd Ad(m + 3, n);
+    VectorXd bd(m + 3);
+    Ad.topRows(m) = qp.A;
+    bd.head(m) = qp.b;
+    Ad.row(m) = qp.A.row(0);
+    bd[m] = qp.b[0];
+    Ad.row(m + 1) = 2.0 * qp.A.row(1) - qp.A.row(2);
+    bd[m + 1] = 2.0 * qp.b[1] - qp.b[2];
+    Ad.row(m + 2) = qp.A.row(3);
+    bd[m + 2] = qp.b[3];
+    const auto dep = SolveWith<Solver>(qp.Q, qp.q, Ad, bd, G, h, w);
+    const double dx_dep = InfNorm(dep.x - ref.x);
+    Check(L("dependent consistent rows: same x"),
+          ref.converged == 1 && dep.converged == 1 && dx_dep < 1e-7, dx_dep,
+          "|dx|");
+
+    MatrixXd Qs = MatrixXd::Zero(n, n);
+    Qs.topLeftCorner(n - 2, n - 2) = qp.Q.topLeftCorner(n - 2, n - 2);
+    MatrixXd Ap(2, n);
+    Ap.setZero();
+    Ap(0, n - 2) = 1.0;
+    Ap(1, n - 1) = 1.0;
+    VectorXd bp(2);
+    bp << 0.5, -1.5;
+    const auto pin = SolveWith<Solver>(Qs, qp.q, Ap, bp, G, h, w);
+    const double kkt_pin =
+        std::max(InfNorm(Qs * pin.x + qp.q + Ap.transpose() * pin.y),
+                 InfNorm(Ap * pin.x - bp));
+    Check(L("singular Q pinned by equalities"),
+          pin.converged == 1 && kkt_pin < 1e-7 &&
+              std::abs(pin.x[n - 2] - 0.5) < 1e-7 &&
+              std::abs(pin.x[n - 1] + 1.5) < 1e-7,
+          kkt_pin, "kkt");
+
+    const int nl = 1500, ml = 750;
+    const QPData big = problem_gen::RandomFeasible(rng, nl, ml, 0);
+    const MatrixXd Gl(0, nl);
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto large = SolveWith<Solver>(big.Q, big.q, big.A, big.b, Gl, h, w);
+    const double ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - t0)
+                          .count();
+    MatrixXd Kl = MatrixXd::Zero(nl + ml, nl + ml);
+    Kl.topLeftCorner(nl, nl) = big.Q;
+    Kl.topRightCorner(nl, ml) = big.A.transpose();
+    Kl.bottomLeftCorner(ml, nl) = big.A;
+    VectorXd rl(nl + ml);
+    rl << -big.q, big.b;
+    const VectorXd xyl = Kl.partialPivLu().solve(rl);
+    const double dxl = InfNorm(large.x - xyl.head(nl)) /
+                       std::max(1.0, InfNorm(xyl.head(nl)));
+    std::printf("  n=%d m=%d p=0: %.1f ms, iters=%d\n", nl, ml, ms,
+                large.iters);
+    Check(L("n=1500 m=750 p=0 matches LU"), large.converged == 1 && dxl < 1e-8,
+          dxl, "|dx|/|x|");
   }
 
   std::printf("[%s] inconsistent equalities with p>0 do not converge\n",

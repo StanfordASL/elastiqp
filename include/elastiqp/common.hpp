@@ -180,6 +180,86 @@ class EqCertificate {
   Eigen::ColPivHouseholderQR<MatrixXd> qr_;
 };
 
+// ---- Equality-only QP -------------------------------------------------------
+// min 0.5 x'Qx + q'x  s.t.  A x = b -- the p == 0 case of every backend --
+// solved in the range space the way the DAS working set does it: K = Q +
+// rho I (LLT), Y = K^-1 A', S = A Y (+ delta I, LLT), then iterative
+// refinement against the UNregularized KKT residual until the proximal bias
+// of rho is gone (one or two steps for a PD Q; a few more for a singular Q
+// whose reduced Hessian is PD). delta is only needed when A has dependent
+// rows (S singular) and only biases y along null(A'), which x never sees;
+// it is taken from the equality certificate when there is one, else from
+// a failed LLT of S. Returns false (x, y untouched) when K has no Cholesky
+// factor (indefinite Q) or S cannot be regularized -- the caller keeps the
+// pivoted QR of the full KKT matrix as the fallback. A colPivHouseholderQr
+// of the (n+m) KKT matrix, the previous method, is unblocked O((n+m)^3) and
+// took 2.5 s at n+m = 2263 against ~60 ms here.
+inline bool SolveEqualityQP(const MatrixXd& Q, const VectorXd& q,
+                            const MatrixXd& A, const VectorXd& b, double rho,
+                            bool rank_deficient, VectorXd& x, VectorXd& y,
+                            int max_refine = 20) {
+  const Eigen::Index m = b.size();
+  MatrixXd K = Q;
+  K.diagonal().array() += rho;
+  Eigen::LLT<MatrixXd, Eigen::Lower> lltK(K);
+  if (lltK.info() != Eigen::Success) return false;
+  MatrixXd Y, S;
+  Eigen::LLT<MatrixXd, Eigen::Lower> lltS;
+  if (m > 0) {
+    Y = lltK.solve(A.transpose());
+    S.noalias() = A * Y;
+    S = 0.5 * (S + S.transpose()).eval();
+    const double smax = std::max(1.0, S.diagonal().maxCoeff());
+    double delta = rank_deficient ? 1e-8 * smax : 0.0;
+    for (int attempt = 0;; ++attempt) {
+      MatrixXd Sd = S;
+      Sd.diagonal().array() += delta;
+      lltS.compute(Sd);
+      if (lltS.info() == Eigen::Success) break;
+      if (attempt >= 6) return false;
+      delta = delta == 0.0 ? 1e-10 * smax : 100.0 * delta;
+    }
+  }
+  VectorXd xs = lltK.solve(-q), ys(m);
+  if (m > 0) {
+    ys = lltS.solve(A * xs - b);
+    xs -= Y * ys;
+  }
+  // Refinement: solve the same system for the correction of the true
+  // residual. Stop at roundoff, on stall, or on a non-finite iterate.
+  VectorXd rd(q.size()), rp(m), dx, dy;
+  double prev = std::numeric_limits<double>::infinity();
+  for (int it = 0; it < max_refine; ++it) {
+    rd.noalias() = Q * xs;
+    rd += q;
+    double scale = std::max({1.0, rd.lpNorm<Eigen::Infinity>(),
+                             q.lpNorm<Eigen::Infinity>()});
+    if (m > 0) {
+      rd.noalias() += A.transpose() * ys;
+      rp.noalias() = A * xs;
+      scale = std::max({scale, rp.lpNorm<Eigen::Infinity>(),
+                        b.lpNorm<Eigen::Infinity>()});
+      rp -= b;
+    }
+    const double res = std::max(rd.lpNorm<Eigen::Infinity>(),
+                                m > 0 ? rp.lpNorm<Eigen::Infinity>() : 0.0);
+    if (!std::isfinite(res)) return false;
+    if (res <= 1e-14 * scale || res > 0.5 * prev) break;
+    prev = res;
+    dx = lltK.solve(-rd);
+    if (m > 0) {
+      dy = lltS.solve(A * dx + rp);
+      dx -= Y * dy;
+      ys += dy;
+    }
+    xs += dx;
+  }
+  if (!xs.allFinite() || !ys.allFinite()) return false;
+  x = xs;
+  y = ys;
+  return true;
+}
+
 // ---- Row classification of a certificate ----------------------------------
 // Three-state counts from the duals (z in [0, penalty]): saturated when the
 // row is violated (t > tol), active when its dual is strictly positive and
