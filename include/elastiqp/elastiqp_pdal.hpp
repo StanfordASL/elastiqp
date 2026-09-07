@@ -666,56 +666,21 @@ class Solver {
   // No inequality constraints: plain equality-constrained (or unconstrained)
   // QP, just solve the KKT system directly + report status from residuals
   const Solution& solve_no_inequalities() {
-    // Range-space solve (common.hpp); the pivoted QR of the full KKT
-    // matrix is only the fallback for an indefinite Q or a hopeless S.
-    if (!SolveEqualityQP(Q_, q_, A_, b_, settings.rho, eq_cert_.rank_deficient(),
-                         x_, y_)) {
-      if (m_ == 0) {
-        x_ = Eigen::LDLT<MatrixXd>(Q_).solve(-q_);
-      } else {
-        MatrixXd Kf = MatrixXd::Zero(n_ + m_, n_ + m_);
-        Kf.topLeftCorner(n_, n_) = Q_;
-        Kf.topRightCorner(n_, m_) = A_.transpose();
-        Kf.bottomLeftCorner(m_, n_) = A_;
-        VectorXd rhs(n_ + m_);
-        rhs.head(n_) = -q_;
-        rhs.tail(m_) = b_;
-        const VectorXd xy = Kf.colPivHouseholderQr().solve(rhs);
-        x_ = xy.head(n_);
-        y_ = xy.tail(m_);
-      }
-    }
-
-    wQx_.noalias() = Q_ * x_;
-    verr_ = wQx_ + q_;
-    double dual_rel_norm = std::max(wQx_.lpNorm<Eigen::Infinity>(),
-                                    q_.lpNorm<Eigen::Infinity>());
-    primal_res_ = 0.0;
-    primal_res_rel_ = 0.0;
-    double by = 0.0;
-    if (m_ > 0) {
-      wAty_.noalias() = A_.transpose() * y_;
-      verr_ += wAty_;
-      dual_rel_norm = std::max(dual_rel_norm, wAty_.lpNorm<Eigen::Infinity>());
-      wAx_.noalias() = A_ * x_;
-      primal_res_ = (wAx_ - b_).lpNorm<Eigen::Infinity>();
-      primal_res_rel_ =
-          primal_res_ / std::max(1.0, std::max(wAx_.lpNorm<Eigen::Infinity>(),
-                                               b_.lpNorm<Eigen::Infinity>()));
-      by = b_.dot(y_);
-    }
-    dual_res_ = verr_.lpNorm<Eigen::Infinity>();
-    dual_res_rel_ = dual_res_ / std::max(1.0, dual_rel_norm);
-
-    const double xQx = x_.dot(wQx_);
-    primal_obj_ = 0.5 * xQx + q_.dot(x_);
-    duality_gap_ = std::abs(primal_obj_ - (-0.5 * xQx - by));
-    duality_gap_rel_ =
-        duality_gap_ / std::max(1.0, std::max({std::abs(xQx),
-                                               std::abs(q_.dot(x_)),
-                                               std::abs(by)}));
-
-    return finish(converged() ? Status::kSolved : Status::kNumerics);
+    SolveEqualityQP(Q_, q_, A_, b_, settings.rho, eq_cert_.rank_deficient(),
+                    x_, y_);
+    const EqualityKKTStats st = ComputeEqualityKKT(Q_, q_, A_, b_, x_, y_);
+    primal_res_ = st.primal_res;
+    primal_res_rel_ = st.primal_res_rel;
+    dual_res_ = st.dual_res;
+    dual_res_rel_ = st.dual_res_rel;
+    primal_obj_ = st.primal_obj;
+    duality_gap_ = st.duality_gap;
+    duality_gap_rel_ = st.duality_gap_rel;
+    const bool ok = st.converged(settings.eps_abs, settings.eps_rel,
+                                 settings.check_duality_gap,
+                                 settings.eps_duality_gap_abs,
+                                 settings.eps_duality_gap_rel);
+    return finish(ok ? Status::kSolved : Status::kNumerics);
   }
 
   // Cold start (proxsuite EQUALITY_CONSTRAINED_INITIAL_GUESS): solve

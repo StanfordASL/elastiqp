@@ -190,14 +190,13 @@ class EqCertificate {
 // rows (S singular) and only biases y along null(A'), which x never sees;
 // it is taken from the equality certificate when there is one, else from
 // a failed LLT of S. Returns false (x, y untouched) when K has no Cholesky
-// factor (indefinite Q) or S cannot be regularized -- the caller keeps the
-// pivoted QR of the full KKT matrix as the fallback. A colPivHouseholderQr
-// of the (n+m) KKT matrix, the previous method, is unblocked O((n+m)^3) and
-// took 2.5 s at n+m = 2263 against ~60 ms here.
-inline bool SolveEqualityQP(const MatrixXd& Q, const VectorXd& q,
-                            const MatrixXd& A, const VectorXd& b, double rho,
-                            bool rank_deficient, VectorXd& x, VectorXd& y,
-                            int max_refine = 20) {
+// factor (indefinite Q) or S cannot be regularized; SolveEqualityQP below
+// then falls back to a pivoted QR of the full KKT matrix -- the previous
+// method, unblocked O((n+m)^3): 2.5 s at n+m = 2263 against ~60 ms here.
+inline bool RangeSpaceEqualityQP(const MatrixXd& Q, const VectorXd& q,
+                                 const MatrixXd& A, const VectorXd& b,
+                                 double rho, bool rank_deficient, VectorXd& x,
+                                 VectorXd& y, int max_refine = 20) {
   const Eigen::Index m = b.size();
   MatrixXd K = Q;
   K.diagonal().array() += rho;
@@ -258,6 +257,83 @@ inline bool SolveEqualityQP(const MatrixXd& Q, const VectorXd& q,
   x = xs;
   y = ys;
   return true;
+}
+
+// The equality-only solve every backend uses when p == 0: the range-space
+// method above, else the pivoted QR of the full KKT matrix (LDLT of Q when
+// there are no constraints at all).
+inline void SolveEqualityQP(const MatrixXd& Q, const VectorXd& q,
+                            const MatrixXd& A, const VectorXd& b, double rho,
+                            bool rank_deficient, VectorXd& x, VectorXd& y) {
+  if (RangeSpaceEqualityQP(Q, q, A, b, rho, rank_deficient, x, y)) return;
+  const Eigen::Index n = q.size(), m = b.size();
+  if (m == 0) {
+    x = Eigen::LDLT<MatrixXd>(Q).solve(-q);
+    y.resize(0);
+    return;
+  }
+  MatrixXd Kf = MatrixXd::Zero(n + m, n + m);
+  Kf.topLeftCorner(n, n) = Q;
+  Kf.topRightCorner(n, m) = A.transpose();
+  Kf.bottomLeftCorner(m, n) = A;
+  VectorXd rhs(n + m);
+  rhs.head(n) = -q;
+  rhs.tail(m) = b;
+  const VectorXd xy = Kf.colPivHouseholderQr().solve(rhs);
+  x = xy.head(n);
+  y = xy.tail(m);
+}
+
+// KKT residuals, objective and duality gap of an equality-only point (x, y)
+// -- the p == 0 counterpart of the backends' residual updates, in the same
+// (Ruiz-scaled) frame they run in. Relative forms are normalized by
+// max(1, .) of the constituent terms, as in the main loops.
+struct EqualityKKTStats {
+  double primal_res = 0.0, primal_res_rel = 0.0;
+  double dual_res = 0.0, dual_res_rel = 0.0;
+  double primal_obj = 0.0, duality_gap = 0.0, duality_gap_rel = 0.0;
+
+  bool converged(double eps_abs, double eps_rel, bool check_gap,
+                 double eps_gap_abs, double eps_gap_rel) const {
+    return (primal_res < eps_abs || primal_res_rel < eps_rel) &&
+           (dual_res < eps_abs || dual_res_rel < eps_rel) &&
+           (!check_gap || duality_gap < eps_gap_abs ||
+            duality_gap_rel < eps_gap_rel);
+  }
+};
+
+inline EqualityKKTStats ComputeEqualityKKT(const MatrixXd& Q,
+                                           const VectorXd& q,
+                                           const MatrixXd& A,
+                                           const VectorXd& b,
+                                           const VectorXd& x,
+                                           const VectorXd& y) {
+  EqualityKKTStats st;
+  const VectorXd Qx = Q * x;
+  VectorXd dual = Qx + q;
+  double dual_rel_norm = std::max(Qx.lpNorm<Eigen::Infinity>(),
+                                  q.lpNorm<Eigen::Infinity>());
+  double by = 0.0;
+  if (b.size() > 0) {
+    const VectorXd Aty = A.transpose() * y;
+    dual += Aty;
+    dual_rel_norm = std::max(dual_rel_norm, Aty.lpNorm<Eigen::Infinity>());
+    const VectorXd Ax = A * x;
+    st.primal_res = (Ax - b).lpNorm<Eigen::Infinity>();
+    st.primal_res_rel =
+        st.primal_res / std::max(1.0, std::max(Ax.lpNorm<Eigen::Infinity>(),
+                                               b.lpNorm<Eigen::Infinity>()));
+    by = b.dot(y);
+  }
+  st.dual_res = dual.lpNorm<Eigen::Infinity>();
+  st.dual_res_rel = st.dual_res / std::max(1.0, dual_rel_norm);
+  const double xQx = x.dot(Qx), qx = q.dot(x);
+  st.primal_obj = 0.5 * xQx + qx;
+  st.duality_gap = std::abs(st.primal_obj - (-0.5 * xQx - by));
+  st.duality_gap_rel =
+      st.duality_gap /
+      std::max(1.0, std::max({std::abs(xQx), std::abs(qx), std::abs(by)}));
+  return st;
 }
 
 // ---- Row classification of a certificate ----------------------------------
