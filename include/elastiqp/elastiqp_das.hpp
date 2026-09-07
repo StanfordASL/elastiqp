@@ -111,6 +111,14 @@ struct Settings {
   int max_outer = 1000;      // proximal-point rounds per solve()
   bool warm_start = true;
   bool reuse_factorization = true;  // keep R, M columns and the working-set LDL' across updates
+  // Skip the leading zeros of every LDP row (DAQP's simple-bound trick,
+  // generalized). A constraint row whose first nonzero sits at column j has
+  // an LDP column M_i' = L^-1 C_i' that is zero below j (L is lower
+  // triangular), so every dot product and axpy on it starts at j. A box
+  // bound on x_j costs (n - j) flops per Gram entry / residual instead of n;
+  // a dense row is unaffected. Ruiz scaling and the proximal shift keep the
+  // pattern. Off: plain gemv / gemm on the dense M.
+  bool sparse_rows = true;
   // Ruiz equilibration (ElastiQP's pass) and its drift-gated refresh
   bool ruiz = true;
   int ruiz_max_iter = 10;
@@ -153,7 +161,9 @@ class Solver {
     eq_infeas_ = 0.0;
 
     Mt_.resize(n_, mp_);
+    solve_buf_.resize(n_, mp_);
     scale_.resize(mp_);
+    lead_.assign(static_cast<size_t>(mp_), 0);
     hi_.resize(mp_);
     d_.resize(mp_);
     v_.resize(n_);
@@ -386,15 +396,63 @@ class Solver {
       if (tries == 17) return false;
     }
     // M' = L^-1 C'  (column i is row i of M)
-    Mt_ = llt_.matrixL().solve(Cts_);
+    std::vector<int> all(static_cast<size_t>(mp_));
+    for (int i = 0; i < mp_; ++i) all[static_cast<size_t>(i)] = i;
+    solve_columns(all);
     for (int i = 0; i < mp_; ++i) normalize_row(i);
     rows_updated_ = mp_;
     refactored_ = true;
     rhs_dirty_ = true;
     return true;
   }
+  // First nonzero of the (scaled) constraint row: M_i' = L^-1 C_i' is zero
+  // above it, so the solve, the dot products and the axpys start there.
+  void compute_lead(int i) {
+    int lead = 0;
+    if (settings.sparse_rows) {
+      while (lead < n_ && Cts_(lead, i) == 0.0) ++lead;
+      if (lead == n_) lead = 0;  // all-zero row: keep it dense (and harmless)
+    }
+    lead_[static_cast<size_t>(i)] = lead;
+  }
+  // Mt_(:, cols) = L^-1 Cts_(:, cols). Columns are batched by lead: a batch
+  // whose smallest lead is l0 only needs the trailing (n - l0) block of L
+  // (the rows above l0 of every column in it are zero). Batches close when
+  // the lead has moved by more than n/8, so a bound on x_j costs about
+  // (n - j)^2 / 2 instead of n^2 / 2 and the multi-rhs solve stays blocked.
+  void solve_columns(std::vector<int> cols) {
+    if (cols.empty()) return;
+    for (int i : cols) compute_lead(i);
+    if (!settings.sparse_rows) {
+      auto rhs = solve_buf_.leftCols(static_cast<Eigen::Index>(cols.size()));
+      for (size_t j = 0; j < cols.size(); ++j) rhs.col(static_cast<Eigen::Index>(j)) = Cts_.col(cols[j]);
+      llt_.matrixL().solveInPlace(rhs);
+      for (size_t j = 0; j < cols.size(); ++j) Mt_.col(cols[j]) = rhs.col(static_cast<Eigen::Index>(j));
+      return;
+    }
+    std::sort(cols.begin(), cols.end(), [&](int a, int b) {
+      return lead_[static_cast<size_t>(a)] < lead_[static_cast<size_t>(b)];
+    });
+    const int span = std::max(4, n_ / 8);
+    for (size_t b = 0; b < cols.size();) {
+      const int l0 = lead_[static_cast<size_t>(cols[b])];
+      size_t e = b + 1;
+      while (e < cols.size() && lead_[static_cast<size_t>(cols[e])] - l0 <= span) ++e;
+      const int len = n_ - l0;
+      auto rhs = solve_buf_.topLeftCorner(len, static_cast<Eigen::Index>(e - b));
+      for (size_t j = b; j < e; ++j) rhs.col(static_cast<Eigen::Index>(j - b)) = Cts_.col(cols[j]).tail(len);
+      llt_.matrixLLT().bottomRightCorner(len, len).template triangularView<Eigen::Upper>()
+          .transpose().solveInPlace(rhs);
+      for (size_t j = b; j < e; ++j) {
+        Mt_.col(cols[j]).head(l0).setZero();
+        Mt_.col(cols[j]).tail(len) = rhs.col(static_cast<Eigen::Index>(j - b));
+      }
+      b = e;
+    }
+  }
   void normalize_row(int i) {
-    const double nrm = Mt_.col(i).norm();
+    const int lead = lead_[static_cast<size_t>(i)];
+    const double nrm = Mt_.col(i).tail(n_ - lead).norm();
     scale_[i] = nrm > 1e-300 ? 1.0 / nrm : 1.0;
     Mt_.col(i) *= scale_[i];
     if (i < m_) {
@@ -403,6 +461,32 @@ class Solver {
       const double w = ws_[i - m_];
       hi_[i] = std::isfinite(w) ? w * nrm : std::numeric_limits<double>::infinity();
     }
+  }
+
+  // Row i of M (column of Mt_) from its lead index on; the leading part is 0.
+  auto mcol(int i) { return Mt_.col(i).tail(n_ - lead_[static_cast<size_t>(i)]); }
+  auto mcol(int i) const { return Mt_.col(i).tail(n_ - lead_[static_cast<size_t>(i)]); }
+  // M_i . v  and  v += a M_i, skipping the leading zeros.
+  double mdot(int i, const VectorXd& v) const {
+    const int l = lead_[static_cast<size_t>(i)];
+    return Mt_.col(i).tail(n_ - l).dot(v.tail(n_ - l));
+  }
+  void maxpy(double a, int i, VectorXd& v) const {
+    const int l = lead_[static_cast<size_t>(i)];
+    v.tail(n_ - l) += a * Mt_.col(i).tail(n_ - l);
+  }
+  // Gram entry M_i . M_j: both columns are zero above max(lead_i, lead_j).
+  double mgram(int i, int j) const {
+    const int l = std::max(lead_[static_cast<size_t>(i)], lead_[static_cast<size_t>(j)]);
+    return Mt_.col(i).tail(n_ - l).dot(Mt_.col(j).tail(n_ - l));
+  }
+  // out = M v  (all rows). Dense gemv when no row has leading zeros.
+  void mt_times(const VectorXd& v, VectorXd& out) const {
+    if (!settings.sparse_rows) {
+      out.noalias() = Mt_.transpose() * v;
+      return;
+    }
+    for (int i = 0; i < mp_; ++i) out[i] = mdot(i, v);
   }
 
   // set_A / set_G: store the rows that differ and mark them dirty.
@@ -430,18 +514,15 @@ class Solver {
       drift_ = ruiz_drift(fr, ruiz_drift(fx));
       if (drift_ > settings.ruiz_refresh_ratio) return false;
     }
-    // One batched triangular solve for the changed rows (a per-column solve
+    // Batched triangular solves for the changed rows (a per-column solve
     // is several times slower than Eigen's blocked multi-rhs solve).
     std::vector<int> changed;
     for (int i = 0; i < mp_; ++i)
       if (col_dirty_[static_cast<size_t>(i)]) changed.push_back(i);
-    MatrixXd rhs(n_, static_cast<Eigen::Index>(changed.size()));
-    for (size_t j = 0; j < changed.size(); ++j) rhs.col(static_cast<Eigen::Index>(j)) = Cts_.col(changed[j]);
-    llt_.matrixL().solveInPlace(rhs);
+    solve_columns(changed);
     bool sat_changed = false;
     for (size_t j = 0; j < changed.size(); ++j) {
       const int i = changed[j];
-      Mt_.col(i) = rhs.col(static_cast<Eigen::Index>(j));
       normalize_row(i);
       rows_updated_++;
       const RowState st = state_[static_cast<size_t>(i)];
@@ -451,7 +532,7 @@ class Solver {
     if (sat_changed && !rebuild) {
       uS_.setZero();
       for (int i = m_; i < mp_; ++i)
-        if (state_[static_cast<size_t>(i)] == RowState::kSaturated) uS_ -= hi_[i] * Mt_.col(i);
+        if (state_[static_cast<size_t>(i)] == RowState::kSaturated) maxpy(-hi_[i], i, uS_);
     }
     return true;
   }
@@ -461,7 +542,8 @@ class Solver {
     VectorXd qe = qs_;
     if (eps_ > 0) qe -= eps_ * xc_;
     v_ = llt_.matrixL().solve(qe);
-    d_ = scale_.cwiseProduct(rhss_) + Mt_.transpose() * v_;
+    mt_times(v_, d_);
+    d_ += scale_.cwiseProduct(rhss_);
     rhs_dirty_ = false;
   }
 
@@ -545,12 +627,12 @@ class Solver {
       dir_[i] = r;
     }
     VectorXd uE = VectorXd::Zero(n_);
-    for (int i = 0; i < k; ++i) uE -= dir_[i] * Mt_.col(W_[static_cast<size_t>(i)]);
+    for (int i = 0; i < k; ++i) maxpy(-dir_[i], W_[static_cast<size_t>(i)], uE);
     double worst = 0.0;
     for (int i = 0; i < m_; ++i) {
       if (state_[static_cast<size_t>(i)] != RowState::kDropped) continue;
       // residual in the user frame: rows were scaled by dr_i and by scale_i
-      const double r = (Mt_.col(i).dot(uE) - d_[i]) / (scale_[i] * dr_[i]);
+      const double r = (mdot(i, uE) - d_[i]) / (scale_[i] * dr_[i]);
       worst = std::max(worst, std::abs(r));
     }
     eq_infeas_ = worst;
@@ -567,11 +649,11 @@ class Solver {
   bool add_row(int row, double lam) {
     const int k = static_cast<int>(W_.size());
     for (int j = 0; j < k; ++j) {
-      const double g = Mt_.col(W_[static_cast<size_t>(j)]).dot(Mt_.col(row));
+      const double g = mgram(W_[static_cast<size_t>(j)], row);
       Gram_(k, j) = g;
       Gram_(j, k) = g;
     }
-    Gram_(k, k) = Mt_.col(row).squaredNorm();
+    Gram_(k, k) = mcol(row).squaredNorm();
     W_.push_back(row);
     lam_[k] = lam;
     return refactor_from(k);
@@ -614,9 +696,9 @@ class Solver {
   void set_state(int row, RowState s) {
     RowState& cur = state_[static_cast<size_t>(row)];
     if (cur == RowState::kSaturated && s != RowState::kSaturated)
-      uS_ += hi_[row] * Mt_.col(row);
+      maxpy(hi_[row], row, uS_);
     if (s == RowState::kSaturated && cur != RowState::kSaturated)
-      uS_ -= hi_[row] * Mt_.col(row);
+      maxpy(-hi_[row], row, uS_);
     cur = s;
   }
 
@@ -670,7 +752,7 @@ class Solver {
     for (int i = m_; i < mp_; ++i) {
       RowState& s = state_[static_cast<size_t>(i)];
       if (s == RowState::kSaturated) {
-        uS_ -= hi_[i] * Mt_.col(i);
+        maxpy(-hi_[i], i, uS_);
       } else if (s == RowState::kActive) {
         const double lam = std::min(std::max(lam_full_[i], 0.0), hi_[i]);
         if (!add_row(i, lam) || static_cast<int>(W_.size()) > n_) {
@@ -678,7 +760,7 @@ class Solver {
           s = RowState::kInactive;
           if (std::isfinite(hi_[i]) && lam > 0.5 * hi_[i]) {
             s = RowState::kSaturated;
-            uS_ -= hi_[i] * Mt_.col(i);
+            maxpy(-hi_[i], i, uS_);
           }
         }
       }
@@ -715,7 +797,7 @@ class Solver {
     }
     uS_.setZero();
     for (int i = m_; i < mp_; ++i)
-      if (state_[static_cast<size_t>(i)] == RowState::kSaturated) uS_ -= hi_[i] * Mt_.col(i);
+      if (state_[static_cast<size_t>(i)] == RowState::kSaturated) maxpy(-hi_[i], i, uS_);
   }
 
   // ------------------------------------------------------------ inner LDP
@@ -724,7 +806,7 @@ class Solver {
     const int k = static_cast<int>(W_.size());
     for (int i = 0; i < k; ++i) {
       const int row = W_[static_cast<size_t>(i)];
-      double r = Mt_.col(row).dot(uS_) - d_[row];
+      double r = mdot(row, uS_) - d_[row];
       for (int j = 0; j < i; ++j) r -= L_(i, j) * work_[j];
       work_[i] = r;
     }
@@ -820,8 +902,9 @@ class Solver {
       // Dual feasible: u and the KKT check on the rows outside W.
       u_ = uS_;
       for (int i = 0; i < static_cast<int>(W_.size()); ++i)
-        u_ -= lam_[i] * Mt_.col(W_[static_cast<size_t>(i)]);
-      mu_ = Mt_.transpose() * u_ - d_;
+        maxpy(-lam_[i], W_[static_cast<size_t>(i)], u_);
+      mt_times(u_, mu_);
+      mu_ -= d_;
       // Iterative refinement of the working-set solve: the residual of
       // (M_W M_W') lam = M_W u_S - d_W at the current lam is mu_W, which an
       // ill-conditioned Gram matrix (near-dependent active rows) leaves
@@ -846,9 +929,10 @@ class Solver {
         }
         for (int i = 0; i < k; ++i) {
           lam_[i] += dir_[i];
-          u_ -= dir_[i] * Mt_.col(W_[static_cast<size_t>(i)]);
+          maxpy(-dir_[i], W_[static_cast<size_t>(i)], u_);
         }
-        mu_ = Mt_.transpose() * u_ - d_;
+        mt_times(u_, mu_);
+        mu_ -= d_;
       }
       // Cycle guard: the dual objective -0.5|u|^2 - d'lam must increase.
       {
@@ -982,7 +1066,9 @@ class Solver {
   Eigen::LLT<MatrixXd, Eigen::Upper> llt_;
   double eps_ = 0.0;
   MatrixXd Mt_;              // n x (m+p), normalized rows of M as columns
+  MatrixXd solve_buf_;       // n x (m+p) scratch for solve_columns()
   VectorXd scale_, hi_, d_, v_, u_, uS_, mu_, x_, xc_, lam_full_;
+  std::vector<int> lead_;    // first nonzero of each LDP row (0 unless sparse_rows)
   std::vector<RowState> state_;
   // Working set and LDL' of its Gram matrix
   std::vector<int> W_;
