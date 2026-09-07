@@ -1,7 +1,8 @@
 # OSQP benchmark classes: ElastiQP vs PIQP / ProxQP (2026-09-07)
 
 Runs: `_dense_eps1e-6` (before the Eq QP fix) and `_dense_eps1e-6_eqfix`
-(after), same pack, same protocol, 341 s and 346 s wall.
+(after), same 123-problem pack, 341 s and 346 s wall; `_osqp_eps1e-6` is
+the paper's ladders (860 problems, 6198 s), see the end.
 
 Motivation: avoid tuning to Maros-Meszaros alone. The OSQP paper's
 benchmark suite (osqp_benchmarks, cloned at the repo root) generates seven
@@ -132,6 +133,48 @@ Where ElastiQP is ahead: PDAL is the fastest route on Portfolio, Lasso
 (tied with PIQP), SVM (0.35-0.7x PIQP), Huber (0.5-0.8x) and Control
 (0.3-0.55x); DAS is fastest on small Random QP, small Eq QP and Control
 up to n=1579 (0.46x PIQP, faster than PDAL below 384 variables).
+
+## Paper ladders: `--preset osqp` (`_osqp_eps1e-6` files)
+
+The OSQP paper's own dimension ladders (20 log-spaced dimensions x 10
+seeds per class), truncated to what dense solvers can hold (`--max-vars
+3100 --max-rows 4000`): 860 problems, 10 to 3010 variables, 6198 s wall on
+4 P-cores with a 600 s per-solve limit. Huber keeps only its smallest
+dimension (n=10 is already 3010 variables); Random QP stops at n=304
+(3040 rows); everything else keeps 8 to 20 dimensions.
+
+All five routes solve 860/860; max hard violation 9.8e-7 (ProxQP), max
+relative objective error 8.6e-7. Shifted geometric mean (shift 1 ms):
+
+| group (problems) | PIQP | ProxQP | ElastiQP-DAS | ElastiQP-PDAL | ElastiQP-IPM |
+|---|---|---|---|---|---|
+| all (860) | 84 ms (1.29x) | 112 ms (1.71x) | 112 ms (1.70x) | **65 ms (1.00x)** | 121 ms (1.85x) |
+| Random QP (150) | 3.7 (1.13x) | 8.2 (2.46x) | **3.3 (1.00x)** | 4.1 (1.23x) | 4.5 (1.34x) |
+| Eq QP (200) | **3.1 (1.00x)** | 3.6 (1.16x) | 3.2 (1.04x) | 3.5 (1.14x) | 3.5 (1.13x) |
+| Portfolio (120) | 1716 (1.25x) | 2185 (1.60x) | 4486 (3.28x) | **1369 (1.00x)** | 3688 (2.69x) |
+| Lasso (100) | **1292 (1.00x)** | 6196 (4.80x) | 2482 (1.92x) | 1472 (1.14x) | 1932 (1.50x) |
+| SVM (80) | 4990 (1.72x) | 6605 (2.27x) | 44811 (15.4x) | **2905 (1.00x)** | 4988 (1.72x) |
+| Huber (10) | 21804 (1.28x) | 21691 (1.27x) | 130885 (7.68x) | **17036 (1.00x)** | 21508 (1.26x) |
+| Control (200) | 96 (2.55x) | 62 (1.65x) | 50 (1.34x) | **38 (1.00x)** | 192 (5.11x) |
+
+Same picture as the 3-seed dense preset, with the trends extended:
+
+- PDAL is fastest on every class but Random QP, Eq QP and Lasso, where it
+  is within 1.14-1.23x of the winner. Its ratio to PIQP falls with size
+  on Random QP (1.7x at n=10, 0.63x at n=304), SVM (0.54-0.68x), Huber
+  (0.77x), Portfolio (0.73-0.89x), Control (0.27-0.58x).
+- DAS: fastest on Random QP up to n=146 and on Control up to n=109
+  (0.42-0.71x PIQP), but its cold cost on large optimal active sets is the
+  only real drop in the suite: SVM 5.4x PIQP at n=1010 rising to 16.4x at
+  n=2020 (258 s), Huber 6x, Portfolio 1.8x -> 4.1x from k=5 to k=28. All
+  32 `drops` rows are SVM x DAS.
+- IPM tracks PIQP on SVM, Huber and Lasso (1.0-1.5x) and pays ~2x on the
+  two-sided-box classes Control (1.8-2.4x) and Portfolio (1.9-2.4x), as
+  before.
+- Eq QP after the range-space fix: PDAL/IPM 0.8-1.1x PIQP up to n=211,
+  drifting to 1.48x at n=2009 (DAS 1.26x); the gap is the explicit
+  Y = K^-1 A' and S = A Y products, which PIQP's KKT LDLT avoids. Nothing
+  further planned there.
 
 ## Reproduce
 
