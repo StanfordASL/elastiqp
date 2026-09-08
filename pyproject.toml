@@ -14,8 +14,7 @@ dependencies = ["numpy"]
 
 [project.optional-dependencies]
 jax = ["jax>=0.9.1"]  # minimum version dictated by FFI compatibility
-torch = ["torch>=2.4"]  # torch.library.custom_op
-# Benchmark/plotting deps live in benchmarks/requirements.txt (separate project).
+torch = ["torch>=2.4"]  # for torch.library.custom_op
 
 [project.urls]
 Homepage = "https://github.com/StanfordASL/elastiqp"
