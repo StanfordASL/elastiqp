@@ -259,13 +259,37 @@ Huber n=2107 19.3 -> 10.6 s, Portfolio n=1616 14.0 -> 6.7 s. The 32
 fourth overall.
 
 What is left (2-10x DAQP on Portfolio, Huber, Lasso, SVM at equal
-iteration counts) is not removals any more: Portfolio barely moved and
-has few of them. Per add-iteration DAS recomputes u = uS - sum lam_i M_i
-in full (O(k n)), forms mu = M' u - d over every row (O(n (m+p))) and
-runs the O(k^2) LDL' solves as scalar triple loops; DAQP does comparable
-flops with tighter loops and incremental updates. Closing that is loop
-work (Eigen triangular solves, incremental u), not algorithmic, and is
-not needed at robot scale where k <= 40.
+iteration counts) was profiled with per-phase timers on Portfolio n=1616
+(1665 iterations, 44 removals; -O3 -march=native, 4.6 s total):
+
+| phase | s | work per iteration |
+|---|---|---|
+| KKT scan `mu = M'u - d` | 1.82 | GEMV over all m+p = 3217 rows (41 MB streamed) |
+| `compute_csp` | 0.90 | k dots `M_i . uS` (21 MB streamed) + LDL' solve |
+| `add_row` | 0.81 | Gram column (k dots) + one row of L |
+| `u = uS - M_W lam` | 0.59 | streams the working-set columns again |
+| removals | 0.06 | now negligible |
+
+So the remaining cost is streaming the constraint matrix three times per
+iteration, memory bound at ~38 GB/s, not arithmetic. The scalar LDL'
+triangular loops were replaced by Eigen `triangularView` solves anyway
+(one `ldl_solve` helper used by `compute_csp`, the refinement, the
+singular step and the equality certificate; `refactor_from` reads the
+symmetric Gram column): identical iterations on all 123 dense-pack
+problems, DAS 8% faster overall (Huber 0.82x, Portfolio 0.85x, SVM
+0.85x), robot control identical iterations and 0.98 time ratio.
+
+Why DAQP is still 3-10x ahead on these classes is structural, not loop
+quality: the bench hands DAQP the HARD problem, where 0 <= x <= 1
+(Portfolio), the slack bounds (SVM, Huber) are simple bounds that DAQP
+keeps out of M entirely, and each two-sided row is one row. On Portfolio
+DAQP's M has 18 general rows against our 3217 elastic rows, so its KKT
+scan is ~180x cheaper; on SVM 1616 rows against 3200. ElastiQP's DAS sees
+every bound as a general elastic row (and each two-sided constraint as
+two) by design of the elastic interface. Closing that gap is the shelved
+`experimental-das-box-bounds` branch (sparse/identity rows kept out of M;
+hum-wbc -8..-11% but biman-ik +4..8%), i.e. a formulation change with a
+mixed robot-scale record, not a tuning of the current solver. Left as is.
 
 ## Reproduce
 

@@ -574,16 +574,8 @@ class Solver {
   // consistent iff it holds there.
   bool equalities_consistent() {
     const int k = n_eq_;
-    for (int i = 0; i < k; ++i) {
-      double r = -d_[W_[static_cast<size_t>(i)]];
-      for (int j = 0; j < i; ++j) r -= L_(i, j) * work_[j];
-      work_[i] = r;
-    }
-    for (int i = k - 1; i >= 0; --i) {
-      double r = work_[i] / D_[i];
-      for (int j = i + 1; j < k; ++j) r -= L_(j, i) * dir_[j];
-      dir_[i] = r;
-    }
+    for (int i = 0; i < k; ++i) work_[i] = -d_[W_[static_cast<size_t>(i)]];
+    ldl_solve(k, work_, dir_);
     VectorXd uE = VectorXd::Zero(n_);
     for (int i = 0; i < k; ++i) uE -= dir_[i] * Mt_.col(W_[static_cast<size_t>(i)]);
     // Residuals in the user frame (rows were scaled by dr_i and by scale_i).
@@ -635,14 +627,18 @@ class Solver {
     const int k = static_cast<int>(W_.size());
     bool ok = true;
     for (int i = r; i < k; ++i) {
-      for (int j = 0; j < i; ++j) {
-        double z = Gram_(i, j);
-        for (int s = 0; s < j; ++s) z -= L_(j, s) * work_[s];
-        work_[j] = z;
-        L_(i, j) = z / D_[j];
-      }
+      // Row i of L: solve L_{:i,:i} w = Gram_{i,:i}' (Gram is symmetric,
+      // so read the contiguous column), L_{i,:i} = w ./ D.
       double dd = Gram_(i, i);
-      for (int j = 0; j < i; ++j) dd -= L_(i, j) * work_[j];
+      if (i > 0) {
+        work_.head(i) = Gram_.col(i).head(i);
+        L_.topLeftCorner(i, i)
+            .template triangularView<Eigen::UnitLower>()
+            .solveInPlace(work_.head(i));
+        L_.row(i).head(i) =
+            work_.head(i).cwiseQuotient(D_.head(i)).transpose();
+        dd -= L_.row(i).head(i).dot(work_.head(i));
+      }
       D_[i] = dd;
       if (dd <= settings.sing_tol) ok = false;
     }
@@ -815,15 +811,21 @@ class Solver {
     const int k = static_cast<int>(W_.size());
     for (int i = 0; i < k; ++i) {
       const int row = W_[static_cast<size_t>(i)];
-      double r = Mt_.col(row).dot(uS_) - d_[row];
-      for (int j = 0; j < i; ++j) r -= L_(i, j) * work_[j];
-      work_[i] = r;
+      work_[i] = Mt_.col(row).dot(uS_) - d_[row];
     }
-    for (int i = k - 1; i >= 0; --i) {
-      double r = work_[i] / D_[i];
-      for (int j = i + 1; j < k; ++j) r -= L_(j, i) * lam_star_[j];
-      lam_star_[i] = r;
-    }
+    ldl_solve(k, work_, lam_star_);
+  }
+
+  // Solve (L D L') x = rhs on the leading k rows of the working-set factor
+  // (Eigen's blocked triangular solves; L is column-major so both sweeps
+  // are contiguous). rhs is overwritten.
+  void ldl_solve(int k, VectorXd& rhs, VectorXd& x) {
+    if (k == 0) return;
+    const auto Lk = L_.topLeftCorner(k, k);
+    Lk.template triangularView<Eigen::UnitLower>().solveInPlace(rhs.head(k));
+    x.head(k) = rhs.head(k).cwiseQuotient(D_.head(k));
+    Lk.transpose().template triangularView<Eigen::UnitUpper>().solveInPlace(
+        x.head(k));
   }
 
   // Step from lam toward lam*, stopping at the first bound. Returns the
@@ -862,10 +864,12 @@ class Solver {
   Status singular_step(int sign) {
     const int k = static_cast<int>(W_.size()) - 1;
     // p_{:k} = -L_{:k,:k}^-T l,  p_k = 1
-    for (int i = k - 1; i >= 0; --i) {
-      double r = -L_(k, i);
-      for (int j = i + 1; j < k; ++j) r -= L_(j, i) * dir_[j];
-      dir_[i] = r;
+    if (k > 0) {
+      dir_.head(k) = -L_.row(k).head(k).transpose();
+      L_.topLeftCorner(k, k)
+          .transpose()
+          .template triangularView<Eigen::UnitUpper>()
+          .solveInPlace(dir_.head(k));
     }
     dir_[k] = 1.0;
     double alpha = std::numeric_limits<double>::infinity();
@@ -926,16 +930,8 @@ class Solver {
           worst_w = std::max(worst_w, std::abs(mu_[row]) / tol_[row]);
         }
         if (worst_w <= 0.1) break;
-        for (int i = 0; i < k; ++i) {
-          double r = mu_[W_[static_cast<size_t>(i)]];
-          for (int j = 0; j < i; ++j) r -= L_(i, j) * work_[j];
-          work_[i] = r;
-        }
-        for (int i = k - 1; i >= 0; --i) {
-          double r = work_[i] / D_[i];
-          for (int j = i + 1; j < k; ++j) r -= L_(j, i) * dir_[j];
-          dir_[i] = r;
-        }
+        for (int i = 0; i < k; ++i) work_[i] = mu_[W_[static_cast<size_t>(i)]];
+        ldl_solve(k, work_, dir_);
         for (int i = 0; i < k; ++i) {
           lam_[i] += dir_[i];
           u_ -= dir_[i] * Mt_.col(W_[static_cast<size_t>(i)]);
