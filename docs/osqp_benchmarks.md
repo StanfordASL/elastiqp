@@ -7,7 +7,8 @@ both `_eqfix` and `_osqp` afterwards, and `_rank1` re-runs DAS with the
 rank-one removal (sections at the end).
 
 Motivation: avoid tuning to Maros-Meszaros alone. The OSQP paper's
-benchmark suite (osqp_benchmarks, cloned at the repo root) generates seven
+benchmark suite (the `third_party/osqp_benchmarks` submodule of
+elastiqp_benchmarks) generates seven
 random problem classes -- Random QP, Eq QP, Portfolio, Lasso, SVM, Huber,
 Control -- as sparse OSQP-form QPs, l <= Ax <= u. This note runs the three
 ElastiQP backends, PIQP and ProxQP on dense conversions of those exact
@@ -16,7 +17,7 @@ not used (covered by docs/maros_full_set.md).
 
 ## Setup
 
-- `elastiqp_benchmarks/tools/convert_osqp_benchmarks.py ../osqp_benchmarks
+- `elastiqp_benchmarks/tools/convert_osqp_benchmarks.py
   <pack>`: instantiates the osqp_benchmarks problem classes (cvxpy stubbed),
   packs them densely into the MMQP format `bench_maros_meszaros` reads, and
   writes `<pack>.index.csv` (class, dim, seed, n_vars, rows, eq/ineq rows,
@@ -334,7 +335,7 @@ removal) -> 82 (triangular solves); SVM 44811 -> 8336 -> 7094.
 ## Reproduce
 
     cd elastiqp_benchmarks
-    ../.venv/bin/python tools/convert_osqp_benchmarks.py ../osqp_benchmarks \
+    ../.venv/bin/python tools/convert_osqp_benchmarks.py \
         ../untracked/osqp_bench/osqp_dense.bin           # 123 problems, 1.5 GB
     ../.venv/bin/python python/run_osqp_benchmarks.py \
         --pack ../untracked/osqp_bench/osqp_dense.bin \
