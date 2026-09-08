@@ -151,6 +151,8 @@ solver.settings.eps_abs = 1e-8
 ### JAX
 
 ```python
+import jax
+jax.config.update("jax_enable_x64", True)
 import elastiqp.jax
 
 # Same API as Python, just with elastiqp.jax (method= picks the backend)

@@ -440,6 +440,12 @@ def solve(
     """
     if method not in METHODS:
         raise ValueError(f"method must be one of {METHODS}, got {method!r}")
+    if not jax.config.jax_enable_x64:
+        raise RuntimeError(
+            "elastiqp.jax.solve requires double precision. Enable it via "
+            "jax.config.update('jax_enable_x64', True) "
+            "or set JAX_ENABLE_X64=1 in your environment."
+        )
     if eps_abs is None:
         eps_abs = _DEFAULT_EPS_ABS[method]
     if max_iter is None:
