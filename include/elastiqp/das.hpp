@@ -122,7 +122,7 @@ struct Settings {
   double zero_tol = 1e-11;   // Cholesky pivot ratio below which Q is treated as singular
   double eps_prox = 1e-6;    // proximal shift, relative to max|Q_ii| (0: refuse singular Q)
   double eta_prox = 0.0;     // stationarity tolerance of the proximal fixed point, user
-                             // units; <= 0 (default) follows eps_abs
+                             // units; <= 0 (default) follows eps_abs (see prox_tol())
   double prox_relaxation = 1.5;  // over-relaxation of the prox center when the working set is stable
   int prox_escalations = 3;  // x100 shifts tried after an inner numerics failure (0: fail at once)
   int max_iter = 10000;      // total active-set iterations per solve()
@@ -140,6 +140,10 @@ struct Settings {
   double progress_tol = 1e-14;  // absolute dual increase that counts as progress
   int cycle_tol = 10;
   double refactor_tol = 1e-9;
+
+  // Stationarity tolerance the proximal loop stops at: eta_prox when set,
+  // eps_abs otherwise. The only place eta_prox should be read.
+  double prox_tol() const { return eta_prox > 0 ? eta_prox : eps_abs; }
 };
 
 class Solver {
@@ -381,8 +385,7 @@ class Solver {
       // Stationarity residual of the unshifted problem, user units:
       // eps (xs - xc) / (c dx)
       const double diff = (x_ - xc_).cwiseQuotient(dx_).lpNorm<Eigen::Infinity>() / c_;
-      const double eta = settings.eta_prox > 0 ? settings.eta_prox : settings.eps_abs;
-      if (eps_ * diff <= eta) {
+      if (eps_ * diff <= settings.prox_tol()) {
         if (center_relaxed) {  // confirm from the unrelaxed center
           center_relaxed = false;
           xc_ = x_;
