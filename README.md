@@ -33,9 +33,9 @@ ElastiQP is a C++/Eigen header-only library with Python bindings and a JAX forei
 
 ElastiQP ships three backends that solve the same elastic QP with the same condensed formulation of the slacks, and return the same `Solution`:
 
-- `das` (default): an elastic dual active-set method based on [DAQP](https://github.com/darnstrom/daqp). The multiplier box $[0, w_i]$ gives the working set a third, saturated state; exact termination, no penalty schedule, and the fastest choice for small dense robot QPs, warm or cold.
-- `pdal`: an elastic Primal-Dual Augmented Lagrangian method based on [ProxQP](https://github.com/Simple-Robotics/proxsuite), with a modified BCL outer loop for the elastic residuals.
-- `ipm`: an elastic proximal interior-point method based on [PIQP](https://github.com/PREDICT-EPFL/piqp), with the qpax elastic condensation.
+- `das` (default, Dual Active Set): an elastic active-set method based on [DAQP](https://github.com/darnstrom/daqp). The multiplier box $[0, w_i]$ gives the working set a third, saturated state; exact termination, no penalty schedule, and the fastest choice for small dense robot QPs, warm or cold.
+- `pdal` (Primal-Dual Augmented Lagrangian): an elastic PDAL method based on [ProxQP](https://github.com/Simple-Robotics/proxsuite), with a modified BCL outer loop for the elastic residuals.
+- `ipm` (Interior-Point Method): an elastic proximal IPM based on [PIQP](https://github.com/PREDICT-EPFL/piqp), with the qpax elastic condensation.
 
 In C++ they are `elastiqp::das::Solver`, `elastiqp::pdal::Solver` and `elastiqp::ipm::Solver` (one self-contained header each; `elastiqp::Solver` is the active-set default). In Python, `elastiqp.Solver(method)` / `elastiqp.solve(..., method=)` with `method` in `"das"`, `"pdal"`, `"ipm"`.
 
@@ -63,7 +63,7 @@ cmake -B build-native . -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-march=nat
 cmake --build build-native --config Release
 ```
 
-The tests are self-contained (Eigen only) and run with `ctest --test-dir build`. Benchmarks, cross-solver comparisons, and tests against external solvers live in the separate [`benchmarks/`](benchmarks/README.md) project (`elastiqp_benchmarks`), which pulls in PIQP / ProxQP / Pinocchio so that this repo does not have to.
+The tests are self-contained (Eigen only) and run with `ctest --test-dir build`. Benchmarks, cross-solver comparisons, and tests against external solvers live in the separate [elastiqp_benchmarks](https://github.com/StanfordASL/elastiqp_benchmarks) project, which pulls in PIQP / ProxQP / Pinocchio so that this repo does not have to.
 
 If you've installed with CMake, you can also `find_package(elastiqp)`
 
@@ -98,7 +98,7 @@ Note: if using UV, you can directly replace the above `pip` commands with `uv pi
 
 ```cpp
 #include "elastiqp/elastiqp.hpp"  // umbrella: all three backends
-// or one backend only: "elastiqp/elastiqp_das.hpp", "elastiqp_pdal.hpp", "elastiqp_ipm.hpp"
+// or one backend only: "elastiqp/das.hpp", "pdal.hpp", "ipm.hpp"
 
 // If you just need to solve a single problem (elastiqp::Solve = the
 // active-set default; elastiqp::pdal::Solve / elastiqp::ipm::Solve likewise):
@@ -230,8 +230,8 @@ See [StanfordASL/elastiqp_benchmarks](https://github.com/StanfordASL/elastiqp_be
 ElastiQP builds on the following excellent projects:
 
 - [qpax](https://github.com/qpax-solver/qpax): ElastiQP is inspired by the condensation strategy from their elastic primal-dual interior point method, and builds on their kappa-smoothed derivatives. Apache-2.0
-- [DAQP](https://github.com/darnstrom/daqp): the default `das` backend is an elastic formulation of their dual active-set method with recursive LDL' updates (`include/elastiqp/elastiqp_das.hpp`). MIT.
-- [ProxQP](https://github.com/Simple-Robotics/proxsuite): the `pdal` backend is an elastic formulation of their primal-dual augmented Lagrangian method (`include/elastiqp/elastiqp_pdal.hpp`). BSD 2-Clause.
-- [PIQP](https://github.com/PREDICT-EPFL/piqp): the `ipm` backend (`include/elastiqp/elastiqp_ipm.hpp`), which the test suite also uses as the oracle for the other two, is based on it, and the benchmarks project cross-validates all three against vanilla PIQP. BSD 2-Clause.
+- [DAQP](https://github.com/darnstrom/daqp): the default `das` backend is an elastic formulation of their dual active-set method with recursive LDL' updates (`include/elastiqp/das.hpp`). MIT.
+- [ProxQP](https://github.com/Simple-Robotics/proxsuite): the `pdal` backend is an elastic formulation of their primal-dual augmented Lagrangian method (`include/elastiqp/pdal.hpp`). BSD 2-Clause.
+- [PIQP](https://github.com/PREDICT-EPFL/piqp): the `ipm` backend (`include/elastiqp/ipm.hpp`), which the test suite also uses as the oracle for the other two, is based on it, and the benchmarks project cross-validates all three against vanilla PIQP. BSD 2-Clause.
 
 ElastiQP is licensed under Apache 2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE) for third-party notices.

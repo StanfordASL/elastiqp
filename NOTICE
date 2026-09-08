@@ -6,18 +6,18 @@ It builds on four projects:
     technique. Portions of this work are derived from qpax.
   * ProxQP / proxsuite (https://github.com/Simple-Robotics/proxsuite),
     BSD 2-Clause License -- the primal-dual augmented Lagrangian algorithm
-    that the PDAL backend (elastiqp/elastiqp_pdal.hpp) reimplements for the
+    that the PDAL backend (elastiqp/pdal.hpp) reimplements for the
     elastic form. proxsuite's copyright notice and license are reproduced
     at the end of this file, and apply to the portions derived from it.
   * PIQP (https://github.com/PREDICT-EPFL/piqp), BSD 2-Clause License --
     the proximal interior-point algorithm that the IPM backend
-    (elastiqp/elastiqp_ipm.hpp) reimplements for the elastic form. PIQP's
+    (elastiqp/ipm.hpp) reimplements for the elastic form. PIQP's
     copyright notice and license are reproduced at the end of this file,
     and apply to the portions derived from it.
   * DAQP (https://github.com/darnstrom/daqp), MIT License -- the dual
     active-set algorithm (recursive LDL' working-set updates, proximal-point
     outer loop, cycle guard) that the active-set backend
-    (elastiqp/elastiqp_as.hpp) reimplements for the elastic form. DAQP's
+    (elastiqp/das.hpp) reimplements for the elastic form. DAQP's
     copyright notice and license are reproduced at the end of this file,
     and apply to the portions derived from it.
 

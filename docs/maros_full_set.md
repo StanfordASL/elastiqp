@@ -94,7 +94,7 @@ again and the solve aborts as `kNumerics`. DAQP's test is absolute
 (`fval - best_fval < 1e-14` on a quantity of the same magnitude), i.e.
 effectively "bit-identical", which is why DAQP passes these problems.
 
-Fix (elastiqp_das.hpp): absolute progress test (DAQP parity), and a stall
+Fix (das.hpp): absolute progress test (DAQP parity), and a stall
 is counted only when a row left the working set since the previous check
 (a cycle needs a removal). Solves QSTANDAT, QBORE3D, QSCSD1, QSCTAP1,
 QSCSD6, AUG3DQP, QSCTAP2 with the default shift; `cycle_tol = 100` alone

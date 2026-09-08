@@ -9,7 +9,7 @@
 // row), so the problem is feasible iff A x = b is consistent. Eliminating
 // the slacks analytically leaves the strict QP's KKT system with every
 // inequality multiplier boxed to [0, penalty_i], which each method
-// (elastiqp_das.hpp, elastiqp_pdal.hpp, elastiqp_ipm.hpp) exploits in its
+// (das.hpp, pdal.hpp, ipm.hpp) exploits in its
 // own way. This header holds what the three share: the status codes, the
 // Solution certificate, the Ruiz equilibration primitives, and the
 // equality-consistency certificate.

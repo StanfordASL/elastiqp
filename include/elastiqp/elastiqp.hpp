@@ -3,9 +3,9 @@
 // Umbrella header. The three backends solve the same elastic QP (stated in
 // elastiqp/common.hpp) and return the same Solution certificate:
 //
-//   elastiqp::das::Solver    dual active set (DAQP-style)      elastiqp_das.hpp
-//   elastiqp::pdal::Solver  primal-dual augmented Lagrangian  elastiqp_pdal.hpp
-//   elastiqp::ipm::Solver   proximal interior point (PIQP)    elastiqp_ipm.hpp
+//   elastiqp::das::Solver   DAS:  dual active set (DAQP-style)           das.hpp
+//   elastiqp::pdal::Solver  PDAL: primal-dual augmented Lagrangian       pdal.hpp
+//   elastiqp::ipm::Solver   IPM:  proximal interior-point method (PIQP)  ipm.hpp
 //
 // elastiqp::Solver / Settings / Solve() name the default backend, the
 // active-set method. Each header is self-contained and can be included on
@@ -15,9 +15,9 @@
 #pragma once
 
 #include "elastiqp/common.hpp"
-#include "elastiqp/elastiqp_das.hpp"
-#include "elastiqp/elastiqp_ipm.hpp"
-#include "elastiqp/elastiqp_pdal.hpp"
+#include "elastiqp/das.hpp"
+#include "elastiqp/ipm.hpp"
+#include "elastiqp/pdal.hpp"
 #include "elastiqp/kkt_vjp.hpp"
 
 namespace elastiqp {
