@@ -3,7 +3,8 @@
 Runs: `_dense_eps1e-6` (before the Eq QP fix) and `_dense_eps1e-6_eqfix`
 (after), same 123-problem pack, 341 s and 346 s wall; `_osqp_eps1e-6` is
 the paper's ladders (860 problems, 6198 s), see the end. DAQP was added to
-both `_eqfix` and `_osqp` afterwards (its own section at the end).
+both `_eqfix` and `_osqp` afterwards, and `_rank1` re-runs DAS with the
+rank-one removal (sections at the end).
 
 Motivation: avoid tuning to Maros-Meszaros alone. The OSQP paper's
 benchmark suite (osqp_benchmarks, cloned at the repo root) generates seven
@@ -217,6 +218,54 @@ wins warm.
 
 DAQP loses only Eq QP (1.48x PIQP), where its proximal-point outer loop
 runs 1-2 extra factorizations that the direct KKT solvers skip.
+
+## DAS rank-one removal (2026-09-07, `_rank1` files)
+
+`das::Solver::remove_row` used to shift the Gram matrix and recompute rows
+r.. of the working-set LDL' from scratch (`refactor_from(r)`, O(k^3) in
+scalar loops). Deleting row r leaves the trailing block's factor as
+L33 D3 L33' + d_r l32 l32', a positive rank-one update, so it is now done
+with the Gill-Golub-Murray-Saunders C1 sweep (DAQP's `remove_constraint`)
+in O((k-r)^2); the Gram matrix is still kept and `refactor_from` remains
+the fallback when a pivot lands at or below `sing_tol`, which keeps the
+"only the last pivot can be singular" invariant the LDP relies on. The
+elastic mechanics (multiplier caps, saturation into `uS_`, hard and
+equality rows) sit outside the factorization and are untouched.
+
+Validation: every DAS iteration count is identical before and after on
+all 983 problems of both packs (the working-set path does not change),
+all solved, max violation 1.0e-7; C++ suite and Python tests pass; robot
+control (`bench_robot_control`, same core, two repeats): identical
+iterations and fail counts, DAS mean-time geomean ratio 0.98 (range
+0.95-1.00), i.e. neutral to slightly better.
+
+DAS shifted geomean before -> after (paper ladders, 860 problems; DAQP
+for reference):
+
+| group | DAS before | DAS after | speedup | DAQP | DAS/DAQP |
+|---|---|---|---|---|---|
+| all | 112 ms | 89 ms | 1.25x | 48 | 1.85x |
+| Random QP | 3.3 | 2.8 | 1.17x | 2.5 | 1.13x |
+| Eq QP | 3.2 | 3.3 | 1.0x | 4.6 | 0.72x |
+| Portfolio | 4486 | 3359 | 1.34x | 345 | 9.7x |
+| Lasso | 2482 | 2417 | 1.03x | 811 | 3.0x |
+| SVM | 44811 | 8336 | 5.4x | 2928 | 2.85x |
+| Huber | 130885 | 48666 | 2.7x | 16526 | 2.9x |
+| Control | 50 | 52 | 1.0x | 34 | 1.53x |
+
+Solo (one core) at the largest dense-pack sizes: SVM n=1616 52.6 -> 9.1 s,
+Huber n=2107 19.3 -> 10.6 s, Portfolio n=1616 14.0 -> 6.7 s. The 32
+`drops` rows (SVM x DAS >= 10x PIQP) are gone; DAS moves from last to
+fourth overall.
+
+What is left (2-10x DAQP on Portfolio, Huber, Lasso, SVM at equal
+iteration counts) is not removals any more: Portfolio barely moved and
+has few of them. Per add-iteration DAS recomputes u = uS - sum lam_i M_i
+in full (O(k n)), forms mu = M' u - d over every row (O(n (m+p))) and
+runs the O(k^2) LDL' solves as scalar triple loops; DAQP does comparable
+flops with tighter loops and incremental updates. Closing that is loop
+work (Eigen triangular solves, incremental u), not algorithmic, and is
+not needed at robot scale where k <= 40.
 
 ## Reproduce
 

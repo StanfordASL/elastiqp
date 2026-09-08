@@ -649,19 +649,57 @@ class Solver {
     return ok;
   }
 
+  // Delete row r of W and its row/column of the LDL'. Dropping row r of
+  // the Gram matrix leaves the trailing block's factor as
+  // L33 D3 L33' + d_r l32 l32', a POSITIVE rank-one update of the (k-r-1)
+  // trailing rows (Gill-Golub-Murray-Saunders 1974 method C1, DAQP's
+  // remove_constraint): O((k-r)^2) against the O(k^3) of recomputing rows
+  // r.. from the Gram matrix, which dominated cold solves with hundreds of
+  // active rows (OSQP-suite SVM n=2020: 258 s vs DAQP's 10 s at the same
+  // iteration count). The Gram matrix is still kept shifted so the full
+  // refactorization remains the fallback when the update leaves a pivot
+  // at or below sing_tol (dependent rows; the last-pivot-only invariant
+  // the LDP relies on is then re-established by refactor_from).
   void remove_row(int r) {
     removed_ = true;
     const int k = static_cast<int>(W_.size());
+    const int t = k - 1 - r;  // trailing rows after the deletion
+    double alpha = D_[r];
+    for (int i = 0; i < t; ++i) work_[i] = L_(r + 1 + i, r);  // l32
     for (int i = r; i + 1 < k; ++i) {
       W_[static_cast<size_t>(i)] = W_[static_cast<size_t>(i + 1)];
       lam_[i] = lam_[i + 1];
+      D_[i] = D_[i + 1];
+    }
+    // Rows r+1.. of L move up, columns r+1.. move left (row-major order
+    // of the writes never overwrites a source entry before it is read).
+    for (int i = r; i + 1 < k; ++i) {
+      for (int j = 0; j < r; ++j) L_(i, j) = L_(i + 1, j);
+      for (int j = r; j < i; ++j) L_(i, j) = L_(i + 1, j + 1);
     }
     for (int i = r; i + 1 < k; ++i)
       for (int j = 0; j < k; ++j) Gram_(i, j) = Gram_(i + 1, j);
     for (int j = r; j + 1 < k; ++j)
       for (int i = 0; i + 1 < k; ++i) Gram_(i, j) = Gram_(i, j + 1);
     W_.pop_back();
-    refactor_from(r);
+    bool ok = alpha > 0.0;
+    for (int j = 0; ok && j < t; ++j) {
+      const int jj = r + j;
+      const double p = work_[j];
+      const double dnew = D_[jj] + alpha * p * p;
+      if (!(dnew > settings.sing_tol)) {
+        ok = false;
+        break;
+      }
+      const double beta = alpha * p / dnew;
+      alpha *= D_[jj] / dnew;
+      D_[jj] = dnew;
+      for (int i = j + 1; i < t; ++i) {
+        work_[i] -= p * L_(r + i, jj);
+        L_(r + i, jj) += beta * work_[i];
+      }
+    }
+    if (!ok) refactor_from(r);
   }
 
   void set_state(int row, RowState s) {
