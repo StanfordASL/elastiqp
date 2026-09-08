@@ -1,7 +1,7 @@
 # DAQP vs ElastiQP on the robot control loops (2026-09-05)
 
 DAQP (dual active-set, Arnström et al.) is the default QP backend of several
-IK libraries, so it was added to `elastiqp_benchmarks/experiments/
+IK libraries, so it was added to `elastiqp_benchmarks/external/
 robot_solver_comparison.cc` as a route family. This note records what was
 measured and what it means for the paper. Raw data:
 `elastiqp_benchmarks/results/robot_solver_comparison_daqp_20260905.csv`.
@@ -292,8 +292,7 @@ prototype too. Raw outputs and CSVs:
   costs edaqp 1.1-1.8x (vs 1.1-5.7x for the PDAL) and is insensitive to
   the weight w.
 * Not run: `test_robot_control` (needs Pinocchio; its problems are the
-  replayed sequences above), `bench_robot_multisolver` (subset of
-  `robot_solver_comparison`, already has the edaqp route), the Python
+  replayed sequences above), the Python
   bindings/JAX/torch tests and `bench_relax_warm` / `bench_diff_robot` /
   `bench_bcl_strategies` (PDAL-specific).
 

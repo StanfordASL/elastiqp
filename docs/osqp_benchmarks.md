@@ -29,7 +29,7 @@ not used (covered by docs/maros_full_set.md).
   whole problems from a queue (all routes of a problem time on the same
   core), PIQP 1e-9 reference cached per problem (`--ref-cache`), resumable.
   Writes `results/osqp_benchmarks_{results,summary,drops,log}<sfx>.*`;
-  `plot_results.py` adds `osqp_benchmarks_{profile,scaling}<sfx>.{png,svg}`.
+  `perf_profile.py` renders `osqp_benchmarks_profile<sfx>.{png,svg}`.
 - Same protocol as the Maros-Meszaros tables: eps_abs 1e-6, eps_rel 0,
   penalty 10x the largest reference dual, cold starts, Ruiz on for the
   ElastiQP routes; `ok` = reported success AND hard violation <= 1e-4 AND
@@ -340,7 +340,7 @@ removal) -> 82 (triangular solves); SVM 44811 -> 8336 -> 7094.
     ../.venv/bin/python python/run_osqp_benchmarks.py \
         --pack ../untracked/osqp_bench/osqp_dense.bin \
         --work-dir ../untracked/osqp_bench/work_dense --cores 0,1,2,3
-    (cd python && ../../.venv/bin/python -c "import plot_results as p; p.plot_osqp_benchmarks()")
+    ../.venv/bin/python python/perf_profile.py results/osqp_benchmarks_results_osqp_eps1e-6_final.csv --svg
 
 `--preset osqp --max-vars 3000` on the converter gives the paper's ladders
 truncated to dense-tractable sizes (10 seeds); `--summary-only` on the
