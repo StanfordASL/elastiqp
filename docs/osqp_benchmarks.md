@@ -2,7 +2,8 @@
 
 Runs: `_dense_eps1e-6` (before the Eq QP fix) and `_dense_eps1e-6_eqfix`
 (after), same 123-problem pack, 341 s and 346 s wall; `_osqp_eps1e-6` is
-the paper's ladders (860 problems, 6198 s), see the end.
+the paper's ladders (860 problems, 6198 s), see the end. DAQP was added to
+both `_eqfix` and `_osqp` afterwards (its own section at the end).
 
 Motivation: avoid tuning to Maros-Meszaros alone. The OSQP paper's
 benchmark suite (osqp_benchmarks, cloned at the repo root) generates seven
@@ -175,6 +176,47 @@ Same picture as the 3-seed dense preset, with the trends extended:
   drifting to 1.48x at n=2009 (DAS 1.26x); the gap is the explicit
   Y = K^-1 A' and S = A Y products, which PIQP's KKT LDLT avoids. Nothing
   further planned there.
+
+## DAQP (added 2026-09-07, both packs)
+
+`bench_maros_meszaros --solvers daqp` (DAQP v0.9.1 on the hard two-sided
+problem, l == u rows pinned active, same 1e-6 tolerance and ok gate) run
+on both packs against the cached references; 30 s for the 123-problem
+pack, 271 s for the 860-problem one. Solves everything; the most accurate
+route in the suite (max violation 1.1e-8, max objective error 6.5e-10).
+Shifted geometric mean, paper ladders (860 problems):
+
+| group | DAQP | PDAL | PIQP | DAS |
+|---|---|---|---|---|
+| all | **48 ms** | 65 (1.35x) | 84 (1.74x) | 112 (2.31x) |
+| Random QP | **2.5** | 4.1 (1.62x) | 3.7 (1.49x) | 3.3 (1.32x) |
+| Eq QP | 4.6 (1.48x) | 3.5 (1.14x) | **3.1** | 3.2 (1.04x) |
+| Portfolio | **345** | 1369 (3.97x) | 1716 (4.98x) | 4486 (13.0x) |
+| Lasso | **811** | 1472 (1.81x) | 1292 (1.59x) | 2482 (3.06x) |
+| SVM | 2928 (1.01x) | **2905** | 4990 (1.72x) | 44811 (15.4x) |
+| Huber | **16526** | 17036 (1.03x) | 21804 (1.32x) | 130885 (7.9x) |
+| Control | **34** | 38 (1.10x) | 96 (2.80x) | 50 (1.47x) |
+
+(The 123-problem pack gives the same ordering: DAQP 29 ms, PDAL 46,
+PIQP 61, DAS 80.)
+
+The DAS comparison is the informative one. At the largest size of every
+class the two take the same number of iterations -- they walk the same
+dual active-set path (SVM n=2020: DAQP 2059, DAS 2477; Portfolio k=28:
+2952 vs 2917; Huber: 2046 vs 2063; Lasso: 38 vs 38) -- so the entire gap
+is per-iteration cost: DAQP 10.4 s vs DAS 258 s on SVM (25x), 10.2 vs
+117 s on Portfolio (11x), 16.5 vs 132 s on Huber (8x). DAQP updates its
+LDL' of the working-set Gram matrix by rank-one operations on add and
+remove; DAS refactors the trailing block on removal (O(k^3), see the
+Maros-Meszaros large-n note) and forms M = C R^-1 for all rows up front.
+The iteration counts also say the active-set path itself is fine; it is
+the linear algebra per step, which is a bounded engineering gap rather
+than an algorithmic one. On robot-scale working sets (k <= ~40) it does
+not show: DAS is 1.2-1.9x DAQP cold there (docs/daqp_comparison.md) and
+wins warm.
+
+DAQP loses only Eq QP (1.48x PIQP), where its proximal-point outer loop
+runs 1-2 extra factorizations that the direct KKT solvers skip.
 
 ## Reproduce
 
