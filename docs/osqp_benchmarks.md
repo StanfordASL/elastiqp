@@ -291,6 +291,46 @@ two) by design of the elastic interface. Closing that gap is the shelved
 hum-wbc -8..-11% but biman-ik +4..8%), i.e. a formulation change with a
 mixed robot-scale record, not a tuning of the current solver. Left as is.
 
+## Final tables (2026-09-07, `_final` files: every route as it stands)
+
+DAS re-run with the rank-one removal and the Eigen triangular solves,
+merged with the other five routes' existing rows (references shared, so
+the penalties are identical). All six routes solve every problem on both
+packs; no `drops` rows remain. Shifted geometric mean, ms (x best):
+
+Paper ladders, 860 problems:
+
+| group (problems) | DAQP | ElastiQP-PDAL | PIQP | ElastiQP-DAS | ProxQP | ElastiQP-IPM |
+|---|---|---|---|---|---|---|
+| all (860) | **48 (1.00x)** | 65 (1.35x) | 84 (1.74x) | 82 (1.70x) | 112 (2.32x) | 121 (2.51x) |
+| Random QP (150) | **2.5** | 4.1 (1.62x) | 3.7 (1.49x) | 2.7 (1.09x) | 8.2 (3.24x) | 4.5 (1.77x) |
+| Eq QP (200) | 4.6 (1.48x) | 3.5 (1.14x) | **3.1** | 3.3 (1.06x) | 3.6 (1.16x) | 3.5 (1.13x) |
+| Portfolio (120) | **345** | 1369 (3.97x) | 1716 (4.98x) | 2921 (8.48x) | 2185 (6.34x) | 3688 (10.7x) |
+| Lasso (100) | **811** | 1472 (1.81x) | 1292 (1.59x) | 1849 (2.28x) | 6196 (7.64x) | 1932 (2.38x) |
+| SVM (80) | 2928 (1.01x) | **2905** | 4990 (1.72x) | 7094 (2.44x) | 6605 (2.27x) | 4988 (1.72x) |
+| Huber (10) | **16526** | 17036 (1.03x) | 21804 (1.32x) | 35842 (2.17x) | 21691 (1.31x) | 21508 (1.30x) |
+| Control (200) | **34** | 38 (1.10x) | 96 (2.80x) | 51 (1.48x) | 62 (1.81x) | 192 (5.60x) |
+
+Dense preset, 123 problems:
+
+| group (problems) | DAQP | ElastiQP-PDAL | PIQP | ElastiQP-DAS | ProxQP | ElastiQP-IPM |
+|---|---|---|---|---|---|---|
+| all (123) | **29 (1.00x)** | 46 (1.59x) | 61 (2.12x) | 59 (2.05x) | 82 (2.85x) | 83 (2.89x) |
+| Random QP (18) | **3.4** | 4.7 (1.40x) | 4.4 (1.32x) | 3.6 (1.07x) | 9.5 (2.82x) | 5.2 (1.54x) |
+| Eq QP (18) | 4.5 (1.42x) | 3.7 (1.14x) | **3.2** | 3.3 (1.04x) | 3.6 (1.14x) | 3.6 (1.14x) |
+| Portfolio (18) | **31** | 145 (4.69x) | 172 (5.55x) | 221 (7.14x) | 228 (7.39x) | 369 (12.0x) |
+| Lasso (18) | **33** | 65 (1.98x) | 61 (1.86x) | 67 (2.06x) | 169 (5.17x) | 84 (2.56x) |
+| SVM (18) | **89** | 143 (1.61x) | 299 (3.35x) | 269 (3.01x) | 414 (4.64x) | 315 (3.53x) |
+| Huber (15) | **551** | 762 (1.38x) | 1165 (2.11x) | 1570 (2.85x) | 1253 (2.27x) | 1287 (2.34x) |
+| Control (18) | **26** | 27 (1.07x) | 67 (2.61x) | 37 (1.44x) | 43 (1.70x) | 129 (5.06x) |
+
+Max hard violation / relative objective error (860): DAQP 1.1e-8 /
+6.5e-10, DAS 9.9e-8 / 2.5e-8, IPM 0 / 2.4e-7, PDAL 9.5e-7 / 8.6e-7,
+PIQP 1.6e-7 / 8.6e-7, ProxQP 9.8e-7 / 5.4e-7. Figures:
+`results/osqp_benchmarks_{profile,scaling}_{osqp,dense}_eps1e-6_final.{png,svg}`.
+DAS overall on the paper ladders across the day: 112 ms -> 89 (rank-one
+removal) -> 82 (triangular solves); SVM 44811 -> 8336 -> 7094.
+
 ## Reproduce
 
     cd elastiqp_benchmarks
