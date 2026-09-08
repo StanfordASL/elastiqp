@@ -60,9 +60,8 @@ struct Backend<elastiqp::das::Solver> {
   static constexpr double invariant_tol = 1e-12;  // z_t + z == w
   static Settings Tight() {
     Settings s;
-    s.eps_abs = 1e-8;
+    s.eps_abs = 1e-8;  // eta_prox follows it
     s.eps_rel = 1e-9;
-    s.eta_prox = 1e-8;
     return s;
   }
   static void CapIters(Settings& s, int k) { s.max_iter = k; }

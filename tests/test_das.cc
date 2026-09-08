@@ -277,8 +277,7 @@ void RuizRefresh(std::mt19937& rng) {
   const QPData qp = problem_gen::InfeasibleEq(rng, n, m, p, p / 4);
   const VectorXd penalty = VectorXd::Constant(p, 10.0);
   das::Settings tight;
-  tight.eps_abs = 1e-8;
-  tight.eta_prox = 1e-8;
+  tight.eps_abs = 1e-8;  // eta_prox follows it
   das::Solver solver;
   solver.settings = tight;
   solver.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);

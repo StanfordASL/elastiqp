@@ -43,8 +43,9 @@
 // shifted to Q + eps I and the problem is solved as a proximal-point
 // iteration, x_{k+1} = argmin{ elastic QP with Q + eps I, q - eps x_k }, warm
 // started on the working set (only the LDP right-hand side changes between
-// rounds, so the LDL' is reused), until eps |x_{k+1} - x_k|_inf <= eta_prox,
-// which bounds the stationarity error of the unshifted problem by eta_prox.
+// rounds, so the LDL' is reused), until eps |x_{k+1} - x_k|_inf <= eps_abs
+// (or eta_prox when set), which bounds the stationarity error of the
+// unshifted problem by that tolerance.
 // Positive definite Q takes a single round. An LP (Q = 0) is handled by the
 // same loop.
 //
@@ -59,8 +60,9 @@
 // enters the working set when its violation G_i x - h_i (or, for a saturated
 // row, its slack) exceeds eps_abs + eps_rel |h_i|, and the proximal loop
 // stops when the stationarity residual of the unshifted problem is below
-// eta_prox. Complementarity is then bounded by penalty_i * eps, which is what
-// a user-unit constraint tolerance implies for an l1-elastic row.
+// eps_abs too (eta_prox overrides it). Complementarity is then bounded by
+// penalty_i * eps, which is what a user-unit constraint tolerance implies
+// for an l1-elastic row.
 //
 // Robustness additions over the bare method (all on by default):
 //  * Ruiz equilibration of the stacked (Q, A, G) system, ElastiQP's pass
@@ -119,7 +121,8 @@ struct Settings {
   double sing_tol = 3.7e-11; // LDL' pivot below which the working set is dependent
   double zero_tol = 1e-11;   // Cholesky pivot ratio below which Q is treated as singular
   double eps_prox = 1e-6;    // proximal shift, relative to max|Q_ii| (0: refuse singular Q)
-  double eta_prox = 1e-6;    // stationarity tolerance of the proximal fixed point, user units
+  double eta_prox = 0.0;     // stationarity tolerance of the proximal fixed point, user
+                             // units; <= 0 (default) follows eps_abs
   double prox_relaxation = 1.5;  // over-relaxation of the prox center when the working set is stable
   int prox_escalations = 3;  // x100 shifts tried after an inner numerics failure (0: fail at once)
   int max_iter = 10000;      // total active-set iterations per solve()
@@ -378,7 +381,8 @@ class Solver {
       // Stationarity residual of the unshifted problem, user units:
       // eps (xs - xc) / (c dx)
       const double diff = (x_ - xc_).cwiseQuotient(dx_).lpNorm<Eigen::Infinity>() / c_;
-      if (eps_ * diff <= settings.eta_prox) {
+      const double eta = settings.eta_prox > 0 ? settings.eta_prox : settings.eps_abs;
+      if (eps_ * diff <= eta) {
         if (center_relaxed) {  // confirm from the unrelaxed center
           center_relaxed = false;
           xc_ = x_;

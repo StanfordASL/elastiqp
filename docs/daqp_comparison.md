@@ -163,8 +163,9 @@ robot data).
 * Tolerances: `eps_abs` / `eps_rel` are stated on the user-frame row
   violation G_i x - h_i (and on a saturated row's slack), converted per row
   into the normalized LDP units (tol_i = eps scale_i dr_i); the row with the
-  largest user-unit violation enters the working set. `eta_prox` is the
-  user-frame stationarity residual of the unshifted problem. On the creep
+  largest user-unit violation enters the working set. The proximal loop
+  stops when the user-frame stationarity residual of the unshifted problem
+  is below `eps_abs` as well (`eta_prox` overrides that tolerance when set). On the creep
   cells the inactive-row violations drop from 3e-5 to 0 at the same
   iteration counts, x matches ElastiQP to 1e-8, and the full KKT residual
   (complementarity included) goes from 0.3 to 1.5e-4. Complementarity is
@@ -263,7 +264,8 @@ prototype too. Raw outputs and CSVs:
   (complementarity on active rows, 2e-6 at eps 1e-8 / penalty 1e4; x itself
   matches elastiqp to 1e-10, eps 1e-10 brings it to 3e-10). Rank-deficient
   Q: 2.5x / 1.7x faster at n=14/30, 0.9x at n=58 p=500 (2 prox rounds,
-  1164 changes); KKT 1e-8..1e-7 there because `eta_prox` defaults to 1e-6.
+  1164 changes); KKT 1e-8..1e-7 there, measured when `eta_prox` was a fixed
+  1e-6 default (it now follows `eps_abs`).
 * `bench_proxqp_closest` (eps 1e-6): 3.1x / 2.8x / 1.25x faster than
   elastiqp at n=14/30/58, identical violation structure (nnz, spurious, l1,
   linf all equal to elastiqp's); feasible overhead table 5-8x faster.
