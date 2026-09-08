@@ -72,7 +72,7 @@ _NOT_DIFFERENTIABLE_MSG = (
     "the exact KKT derivative is undefined. Set target_kappa > 0 "
     "(e.g. 1e-3) for log-barrier smoothed gradients"
 )
-_AS_NOT_DIFFERENTIABLE_MSG = (
+_DAS_NOT_DIFFERENTIABLE_MSG = (
     "elastiqp.torch.solve is not differentiable with method='das': the "
     "active-set backend has no kappa relaxation. Use method='pdal' or "
     "method='ipm' (with target_kappa > 0) for gradients"
@@ -260,7 +260,7 @@ def _(Q, A, G, h, xr, tr, yr, z1r, z2r, ct_x, ct_t, ct_y, ct_z_t, ct_z):
 
 def _backward(ctx, grads, vjp):
     if ctx.method == "das":
-        raise RuntimeError(_AS_NOT_DIFFERENTIABLE_MSG)
+        raise RuntimeError(_DAS_NOT_DIFFERENTIABLE_MSG)
     if not ctx.target_kappa > 0:
         raise RuntimeError(_NOT_DIFFERENTIABLE_MSG)
     saved = ctx.saved_tensors
@@ -489,7 +489,7 @@ def solve(
     args = (Q, q, A, b, G, h, penalty)
     differentiating = torch.is_grad_enabled() and any(_requires_grad(x) for x in args)
     if differentiating and method == "das":
-        raise TypeError(_AS_NOT_DIFFERENTIABLE_MSG)
+        raise TypeError(_DAS_NOT_DIFFERENTIABLE_MSG)
     if differentiating and not target_kappa > 0:
         raise TypeError(_NOT_DIFFERENTIABLE_MSG)
     # Tight solution only when not differentiating: no relaxation runs.
