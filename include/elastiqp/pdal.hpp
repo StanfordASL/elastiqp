@@ -62,6 +62,28 @@ struct Settings {
 
   // Warm-start from a previous solution + cached factorization
   bool warm_start = true;
+  // Keep the AL penalties (mu_eq, mu_in) where the previous solve left
+  // them instead of resetting them to *_init on a warm start, when the
+  // cached factorization is still valid (vector-only drift): with an
+  // unchanged active set the previous solve's factorization is then
+  // reusable as is (no refactorization at all on a quiet tick), and the
+  // first Newton step already enforces the hard equalities to ~mu_eq.
+  // After a matrix update the penalties reset (a refactorization is due
+  // anyway). Off = ProxQP behaviour.
+  bool warm_keep_mu = false;
+  // Thresholds on the kept penalties (warm_keep_mu): when the previous
+  // solve ended with mu_eq or mu_in below these, both are reset to their
+  // *_init values instead of being kept -- a solve that had to drive mu to
+  // its floor (a conflict tick, a degenerate active set) must not hand a
+  // floor-level penalty to the next tick, whose first inner loop would
+  // then re-identify the active set at that stiffness one row at a time
+  // and end at the floor again (a self-sustaining cascade). 0 = keep always.
+  double warm_mu_eq_min = 0.0;
+  double warm_mu_in_min = 0.0;
+  // The same reset when the previous solve needed more than this many
+  // inner iterations (a tick that struggled does not hand its penalties
+  // on; a floor-level mu after a cheap tick is fine). 0 = no limit.
+  int warm_keep_mu_max_iters = 0;
 
   // Iteration budget
   int max_outer_iter = 250;  // BCL rounds
@@ -365,10 +387,21 @@ class Solver {
     if (m_ > 0) y_ = ruiz_ ? VectorXd(c_s_ * y.cwiseQuotient(de_s_)) : y;
     z_ = ruiz_ ? VectorXd(c_s_ * z.cwiseQuotient(di_s_)) : z;
     rho_ = rho > 0 ? rho : settings.rho;
-    mu_eq_ = mu_eq > 0 ? mu_eq : settings.mu_eq_init;
-    mu_in_ = mu_in > 0 ? mu_in : settings.mu_in_init;
+    // mu <= 0: the settings' initial values, or (warm_keep_mu) the values
+    // the previous solve of this solver ended at
+    const bool keep = settings.warm_keep_mu && have_warm_ && !matrix_dirty_ &&
+                      mu_eq_ > 0 && mu_in_ > 0 &&
+                      mu_eq_ >= settings.warm_mu_eq_min &&
+                      mu_in_ >= settings.warm_mu_in_min &&
+                      (settings.warm_keep_mu_max_iters <= 0 ||
+                       last_iters_ <= settings.warm_keep_mu_max_iters);
+    mu_eq_ = mu_eq > 0 ? mu_eq : (keep ? mu_eq_ : settings.mu_eq_init);
+    mu_in_ = mu_in > 0 ? mu_in : (keep ? mu_in_ : settings.mu_in_init);
     explicit_warm_ = true;
   }
+  // AL penalties of the current / last solve
+  double mu_eq() const { return mu_eq_; }
+  double mu_in() const { return mu_in_; }
 
   const Solution& solution() const { return sol_; }
 
@@ -423,9 +456,18 @@ class Solver {
       clamp_z();
     } else if (settings.warm_start && have_warm_) {
       // Keep (x, y, z) and the cached factorization, reset AL penalties
-      // z is re-clamped in case the penalty changed
-      mu_eq_ = settings.mu_eq_init;
-      mu_in_ = settings.mu_in_init;
+      // (unless warm_keep_mu); z is re-clamped in case the penalty changed
+      // The penalties are kept only together with the factorization they
+      // belong to: after a matrix update a refactorization is due anyway
+      // and deep inherited penalties only cost inner iterations.
+      if (!settings.warm_keep_mu || matrix_dirty_ ||
+          mu_eq_ < settings.warm_mu_eq_min ||
+          mu_in_ < settings.warm_mu_in_min ||
+          (settings.warm_keep_mu_max_iters > 0 &&
+           last_iters_ > settings.warm_keep_mu_max_iters)) {
+        mu_eq_ = settings.mu_eq_init;
+        mu_in_ = settings.mu_in_init;
+      }
       rho_ = settings.rho;
       clamp_z();
     } else {
@@ -1399,6 +1441,7 @@ class Solver {
     sol_.converged = status == Status::kSolved ? 1 : 0;
     sol_.iters = iters_total_;
     sol_.outer_iters = outer_iters_;
+    last_iters_ = iters_total_;
     sol_.n_active = sol_.n_saturated = 0;
     for (Eigen::Index i = 0; i < p_; ++i) {
       if (state(i) == RowState::kActive) ++sol_.n_active;
@@ -1457,6 +1500,7 @@ class Solver {
   int factor_retries_ = 0, factor_count_ = 0, iters_total_ = 0;
   int outer_iters_ = 0;
   int cold_resets_ = 0;
+  int last_iters_ = 0;  // inner iterations of the previous solve()
 
   // Per-row active-set state and its accessors
   std::vector<RowState> state_;

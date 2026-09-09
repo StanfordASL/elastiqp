@@ -104,6 +104,14 @@ if(ELASTIQP_BUILD_TESTS)
   # certified, just fails).
   elastiqp_test(test_lp)
   add_test(NAME elastiqp.lp COMMAND test_lp)
+
+  # Sparse PDAL: sparseView of the dense generators against the IPM oracle
+  # and the dense PDAL, multiple-shooting MPC (tests/support/mpc_gen.hpp)
+  # cold / warm / through a box conflict, the Woodbury active-set
+  # correction vs refactorization, matrix updates with and without a
+  # pattern change.
+  elastiqp_test(test_sparse_pdal)
+  add_test(NAME elastiqp.sparse_pdal COMMAND test_sparse_pdal)
 endif()
 
 # --- Python bindings + JAX FFI -----------------------------------------------

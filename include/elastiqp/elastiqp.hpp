@@ -6,6 +6,7 @@
 //   elastiqp::das::Solver   DAS:  dual active set (DAQP-style)           das.hpp
 //   elastiqp::pdal::Solver  PDAL: primal-dual augmented Lagrangian       pdal.hpp
 //   elastiqp::ipm::Solver   IPM:  proximal interior-point method (PIQP)  ipm.hpp
+//   elastiqp::sparse_pdal::Solver  PDAL on Eigen::SparseMatrix data     sparse_pdal.hpp
 //
 // elastiqp::Solver / Settings / Solve() name the default backend, the
 // active-set method. Each header is self-contained and can be included on
@@ -18,6 +19,7 @@
 #include "elastiqp/das.hpp"
 #include "elastiqp/ipm.hpp"
 #include "elastiqp/pdal.hpp"
+#include "elastiqp/sparse_pdal.hpp"
 #include "elastiqp/kkt_vjp.hpp"
 
 namespace elastiqp {
