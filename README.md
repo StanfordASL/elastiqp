@@ -41,7 +41,7 @@ In C++ they are `elastiqp::das::Solver`, `elastiqp::pdal::Solver` and `elastiqp:
 
 All three are fast (particularly with warm-starting). The `pdal` and `ipm` backends are additionally *differentiable* with kappa-smoothed gradients: `relax(kappa)` walks the solution to the kappa-relaxed central point (complementarity $s \odot z = \kappa$) through a log-barrier retraction, for smooth implicit differentiation (see `docs/log_barrier_admm_note.tex` and `docs/pdal_differentiability.md`). The active-set backend is forward-only. Ruiz equilibration is available for poorly-conditioned problems (on by default for `das`, off for `pdal` / `ipm`).
 
-For a rough sense of numbers, on a laptop with an Intel i7 CPU, ElastiQP can solve humanoid-scale whole-body control problems at approximately 32 us.
+For a rough sense of numbers, on a laptop with an Intel i7 CPU, ElastiQP can solve humanoid-scale whole-body control problems at approximately 50 us.
 
 
 ## Installation
