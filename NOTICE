@@ -1,36 +1,44 @@
 ElastiQP is licensed under the Apache License, Version 2.0. 
-It builds on four projects:
+It builds on three projects:
 
-  * qpax (https://github.com/qpax-solver/qpax), Apache-2.0 --
-    the elastic QP formulation and the kappa-relaxed smoothed-gradient
-    technique. Portions of this work are derived from qpax.
+  * DAQP (https://github.com/darnstrom/daqp), MIT License -- the core
+    reference for the dual active set (DAS) method.
   * ProxQP / proxsuite (https://github.com/Simple-Robotics/proxsuite),
-    BSD 2-Clause License -- the primal-dual augmented Lagrangian algorithm
-    that the PDAL backend (elastiqp/pdal.hpp) reimplements for the
-    elastic form. proxsuite's copyright notice and license are reproduced
-    at the end of this file, and apply to the portions derived from it.
+    BSD 2-Clause License -- the core reference for the primal-dual
+    augmented Lagrangian (PDAL) method.
   * PIQP (https://github.com/PREDICT-EPFL/piqp), BSD 2-Clause License --
-    the proximal interior-point algorithm that the IPM backend
-    (elastiqp/ipm.hpp) reimplements for the elastic form. PIQP's
-    copyright notice and license are reproduced at the end of this file,
-    and apply to the portions derived from it.
-  * DAQP (https://github.com/darnstrom/daqp), MIT License -- the dual
-    active-set algorithm (recursive LDL' working-set updates, proximal-point
-    outer loop, cycle guard) that the active-set backend
-    (elastiqp/das.hpp) reimplements for the elastic form. DAQP's
-    copyright notice and license are reproduced at the end of this file,
-    and apply to the portions derived from it.
+    the core reference for the interior point (IPM) method.
 
-The repository additionally vendors one set of third-party headers,
-outside the installed ElastiQP headers:
+The repository additionally vendors one set of third-party headers:
 
   * third_party/xla_ffi -- the XLA FFI API headers (Copyright The OpenXLA
-    Authors, Apache License 2.0; see the header of each file and
-    third_party/xla_ffi/README.md).
+    Authors, Apache License 2.0).
 
-PIQP's, proxsuite's and DAQP's own sources are not vendored; the benchmarks project
-(benchmarks/, elastiqp_benchmarks) fetches their pinned release tarballs at
-configure time for cross-solver tests and benchmarks.
+=======================================================================
+Third-party notice: DAQP
+=======================================================================
+
+MIT License
+
+Copyright (c) 2022 Daniel Arnström
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 =======================================================================
 Third-party notice: ProxQP (proxsuite)
@@ -91,29 +99,3 @@ SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
 CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-=======================================================================
-Third-party notice: DAQP
-=======================================================================
-
-MIT License
-
-Copyright (c) 2022 Daniel Arnström
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
