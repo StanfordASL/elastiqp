@@ -1,5 +1,7 @@
 # ElastiQP
 
+[![Paper](http://img.shields.io/badge/arXiv-2609.19080-B31B1B.svg)](https://arxiv.org/abs/2609.19080)
+
 An always-feasible QP solver for constrained robot control.
 
 ElastiQP solves the following problem:
@@ -27,22 +29,13 @@ Likewise, in the control setting, we often encode dynamics via strict equality c
 Given this, in the case of infeasibility, ElastiQP naturally relaxes the inequality constraints in an $\ell_1$ manner, relaxing *only* the constraints that strictly need to be adjusted for a feasible solution.
 
 
-### Feature Overview
+### Overview
 
 ElastiQP is a C++/Eigen header-only library with Python bindings and a JAX foreign function interface (FFI). 
 
-ElastiQP ships three backends that solve the same elastic QP with the same condensed formulation of the slacks, and return the same `Solution`:
+ElastiQP's primary backend (`das.hpp`) is is a dual active-set method, based on [DAQP](https://github.com/darnstrom/daqp). We also have two additional backends, which were primarily used as a point of comparison for the paper: `pdal.hpp` is a primal-dual augmented Lagrangian method, based on [ProxQP](https://github.com/Simple-Robotics/proxsuite), and `ipm.hpp` is a proximal interior point method, based on [PIQP](https://github.com/PREDICT-EPFL/piqp) and inspired by [qpax](https://github.com/qpax-solver/qpax)
 
-- `das` (default, Dual Active Set): an elastic active-set method based on [DAQP](https://github.com/darnstrom/daqp). The multiplier box $[0, w_i]$ gives the working set a third, saturated state; exact termination, no penalty schedule, and the fastest choice for small dense robot QPs, warm or cold.
-- `pdal` (Primal-Dual Augmented Lagrangian): an elastic PDAL method based on [ProxQP](https://github.com/Simple-Robotics/proxsuite), with a modified BCL outer loop for the elastic residuals.
-- `ipm` (Interior-Point Method): an elastic proximal IPM based on [PIQP](https://github.com/PREDICT-EPFL/piqp), with the qpax elastic condensation.
-
-In C++ they are `elastiqp::das::Solver`, `elastiqp::pdal::Solver` and `elastiqp::ipm::Solver` (one self-contained header each; `elastiqp::Solver` is the active-set default). In Python, `elastiqp.Solver(method)` / `elastiqp.solve(..., method=)` with `method` in `"das"`, `"pdal"`, `"ipm"`.
-
-All three are fast (particularly with warm-starting). The `pdal` and `ipm` backends are additionally *differentiable* with kappa-smoothed gradients: `relax(kappa)` walks the solution to the kappa-relaxed central point (complementarity $s \odot z = \kappa$) through a log-barrier retraction, for smooth implicit differentiation (see `docs/log_barrier_admm_note.tex` and `docs/pdal_differentiability.md`). The active-set backend is forward-only. Ruiz equilibration is available for poorly-conditioned problems (on by default for `das`, off for `pdal` / `ipm`).
-
-For a rough sense of numbers, on a laptop with an Intel i7 CPU, ElastiQP can solve humanoid-scale whole-body control problems at approximately 50 us.
-
+ElastiQP is *fast*, particularly when warm-started. For a rough sense of numbers, on a laptop with an Intel i7 CPU, ElastiQP can solve humanoid-scale whole-body control problems at approximately 50 us.
 
 ## Installation
 
@@ -63,13 +56,15 @@ cmake -B build-native . -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-march=nat
 cmake --build build-native --config Release
 ```
 
-The tests are self-contained (Eigen only) and run with `ctest --test-dir build`. Benchmarks, cross-solver comparisons, and tests against external solvers live in the separate [elastiqp_benchmarks](https://github.com/StanfordASL/elastiqp_benchmarks) project, which pulls in PIQP / ProxQP / Pinocchio so that this repo does not have to.
-
 If you've installed with CMake, you can also `find_package(elastiqp)`
 
 ### Python
 
 #### From PyPI
+
+> [!WARNING]  
+> The code is not yet available on PyPI but I will upload a copy shortly
+
 ```
 pip install elastiqp
 ```
@@ -97,19 +92,18 @@ Note: if using UV, you can directly replace the above `pip` commands with `uv pi
 ### C++
 
 ```cpp
-#include "elastiqp/elastiqp.hpp"  // umbrella: all three backends
+#include "elastiqp/elastiqp.hpp"
 // or one backend only: "elastiqp/das.hpp", "pdal.hpp", "ipm.hpp"
 
-// If you just need to solve a single problem (elastiqp::Solve = the
-// active-set default; elastiqp::pdal::Solve / elastiqp::ipm::Solve likewise):
+// If you just need to solve a single problem
 elastiqp::Solution sol = elastiqp::Solve(Q, q, A, b, G, h, penalty);
 // or without equalities: elastiqp::Solve(Q, q, G, h, penalty)
 
 // If you are solving multiple times in a control loop:
-elastiqp::Solver solver;  // == elastiqp::das::Solver; pdal::Solver, ipm::Solver same API
+elastiqp::Solver solver;
 solver.setup(Q, q, A, b, G, h, penalty);
 while (running) {
-  // Set your updated problem data (example below) and warm-start
+  // Set your updated problem data and warm-start
   solver.set_q(q_k); solver.set_h(h_k); solver.set_b(b_k);
   const elastiqp::Solution& sol = solver.solve();
 }
@@ -148,22 +142,21 @@ sol = solver.solve()
 solver.settings.eps_abs = 1e-8
 ```
 
-### JAX
+### JAX / PyTorch
+
+> [!WARNING]  
+> Differentiability support is still in beta, and is not implemented in the default (active set) backend
 
 ```python
 import jax
 jax.config.update("jax_enable_x64", True)
 import elastiqp.jax
 
-# Same API as Python, just with elastiqp.jax (method= picks the backend)
-# No warm starting, for now
+# Same API as Python, just with elastiqp.jax
 sol = elastiqp.jax.solve(Q, q, G, h, penalty, A=A, b=b)
 
 # Compatible with jax.grad and vjp on the pdal / ipm backends
 def loss(q_):
-    # Smoothed gradients are on by default (target_kappa=1e-3, qpax's
-    # default); pass target_kappa=0 to forbid differentiation. The default
-    # method="das" is forward-only: grad through it raises.
     sol = elastiqp.jax.solve(Q, q_, G, h, penalty, A=A, b=b, method="pdal")
     return jnp.sum(sol.x**2)
 
@@ -178,9 +171,7 @@ vmap_loss = jax.vmap(loss)
 batch_q = jnp.tile(q, (10, 1))
 batch_ls = vmap_loss(batch_q)
 
-# Warm starting is explicit (the call stays pure): pass the previous Result
-# as warm_start= and carry it as loop state, e.g. a lax.scan carry. Works
-# with every backend under jit / vmap / scan; not differentiable.
+# Explicit warm starting
 def step(state, q_k):
     sol = elastiqp.jax.solve(Q, q_k, G, h, penalty, A=A, b=b, warm_start=state)
     return sol, sol.x
@@ -188,52 +179,22 @@ init = elastiqp.jax.solve(Q, qs[0], G, h, penalty, A=A, b=b)
 _, xs = jax.lax.scan(step, init, qs)
 ```
 
-### PyTorch
-
-```python
-import elastiqp.torch
-
-# Same API again; tensors in, float64 tensors out (solved on the CPU)
-sol = elastiqp.torch.solve(Q, q, G, h, penalty, A=A, b=b)
-
-# Compatible with autograd on the pdal / ipm backends (implicit
-# differentiation of the KKT system, smoothed at target_kappa=1e-3 by
-# default; target_kappa=0 forbids it; the default method="das" is forward-only)
-q_ = q.clone().requires_grad_(True)
-loss = torch.sum(elastiqp.torch.solve(Q, q_, G, h, penalty, A=A, b=b, method="pdal").x ** 2)
-loss.backward()
-grad_q = q_.grad
-
-# Compatible with torch.compile: the solve is an opaque custom op
-compiled = torch.compile(lambda q_: elastiqp.torch.solve(Q, q_, G, h, penalty, A=A, b=b).x)
-
-# Batched: leading batch dims solve one problem per entry (or use torch.vmap)
-batch_x = elastiqp.torch.solve(Q, q.expand(10, -1), G, h, penalty, A=A, b=b).x
-
-# torch.func transforms work too (grad, jacrev, vmap(grad))
-J = torch.func.jacrev(lambda q_: elastiqp.torch.solve(Q, q_, G, h, penalty, A=A, b=b, method="pdal").x)(q)
-```
-
 For runnable Python/JAX/PyTorch examples, see the `examples` folder
 
 ## Benchmarks
 
+> [!WARNING]  
+> Under development
+
 See [StanfordASL/elastiqp_benchmarks](https://github.com/StanfordASL/elastiqp_benchmarks)
-
-
-## Assorted Tips
-
-- If differentiating through problems with large penalty weights (roughly >= 1e4), or for badly row-scaled constraints (mixed units), consider turning on Ruiz equilibration. In Python/JAX/PyTorch: `ruiz=True`; in C++: `settings.ruiz = true` (the active-set backend has it on by default). The scaling is computed at `setup()` and carried through the `set_*` updates (still exact, only the conditioning drifts); the `das` and `pdal` backends re-equilibrate automatically in `solve()` once a matrix update has drifted a scaled row/column norm past `settings.ruiz_refresh_ratio` (4x by default), keeping the warm start. `scaling_drift()` reports the current drift and (PDAL) `reequilibrate()` refreshes on demand, so a control loop never needs a second `setup()` for this.
-- `eps_abs` defaults to 1e-6 on `das` and 1e-5 on `pdal` and `ipm`, and means different things: `das` terminates when no row violates its bound by more than `eps_abs` (user units; dual feasibility is exact, complementarity is bounded by `penalty * eps_abs`), while `pdal` and `ipm` terminate on the inf-norm of the elastic KKT residuals and the duality gap. The one-shot `solve(..., eps_abs=)` sets whichever applies.
-
 
 ## Acknowledgments
 
 ElastiQP builds on the following excellent projects:
 
-- [qpax](https://github.com/qpax-solver/qpax): ElastiQP is inspired by the condensation strategy from their elastic primal-dual interior point method, and builds on their kappa-smoothed derivatives. Apache-2.0
-- [DAQP](https://github.com/darnstrom/daqp): the default `das` backend is an elastic formulation of their dual active-set method with recursive LDL' updates (`include/elastiqp/das.hpp`). MIT.
-- [ProxQP](https://github.com/Simple-Robotics/proxsuite): the `pdal` backend is an elastic formulation of their primal-dual augmented Lagrangian method (`include/elastiqp/pdal.hpp`). BSD 2-Clause.
-- [PIQP](https://github.com/PREDICT-EPFL/piqp): the `ipm` backend (`include/elastiqp/ipm.hpp`), which the test suite also uses as the oracle for the other two, is based on it, and the benchmarks project cross-validates all three against vanilla PIQP. BSD 2-Clause.
+- [qpax](https://github.com/qpax-solver/qpax)
+- [DAQP](https://github.com/darnstrom/daqp)
+- [ProxQP](https://github.com/Simple-Robotics/proxsuite)
+- [PIQP](https://github.com/PREDICT-EPFL/piqp)
 
 ElastiQP is licensed under Apache 2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE) for third-party notices.
