@@ -76,18 +76,12 @@ If installing the Python bindings from source, first make sure that you've run t
 pip install .
 ```
 
-### JAX
-
-Same as above, but specify the `[jax]` option to pull in the the JAX dependencies and FFI, i.e. `pip install "elastiqp[jax]"`. The JAX interface can then be imported via `elastiqp.jax` 
-
-### PyTorch
-
-Same as above with the `[torch]` option, i.e. `pip install "elastiqp[torch]"`. The PyTorch interface can then be imported via `elastiqp.torch`. It needs no extra compiled code beyond the standard bindings (the solve is registered as a torch custom operator on top of them), so it also works from a source build that was configured without torch installed.
+JAX/PyTorch dependencies can be installed with `pip install "elastiqp[jax]"` or `pip install "elastiqp[torch]"`, respectively.
 
 Note: if using UV, you can directly replace the above `pip` commands with `uv pip`
 
-## Usage
 
+## Usage
 
 ### C++
 
@@ -107,16 +101,6 @@ while (running) {
   solver.set_q(q_k); solver.set_h(h_k); solver.set_b(b_k);
   const elastiqp::Solution& sol = solver.solve();
 }
-
-// When differentiating (pdal / ipm backends): relax to the kappa-smoothed
-// differentiation point (does not disturb the solver's warm-start state).
-// Repeated calls on a persistent PDAL solver warm-start from the previous
-// relaxed point (~2 Newton steps per call in a control loop); pass
-// warm=false to force a restart from the tight solution.
-elastiqp::pdal::Solver dsolver;
-dsolver.setup(Q, q, A, b, G, h, penalty);
-dsolver.solve();
-const elastiqp::Solution relaxed = dsolver.relax(kappa);
 ```
 
 ### Python
@@ -126,20 +110,15 @@ import elastiqp
 
 # If you just need to solve a single problem:
 sol = elastiqp.solve(Q, q, G, h, penalty, A=A, b=b)
-# A, b equality terms are optional kwargs in the python API
-# method="das" (default) / "pdal" / "ipm" picks the backend:
-sol = elastiqp.solve(Q, q, G, h, penalty, A=A, b=b, method="pdal")
+# Specify the backend (default "das") via the method kwarg
+sol = elastiqp.solve(Q, q, G, h, penalty, A=A, b=b, method="das")
 
 # If you are solving multiple times in a control loop:
-solver = elastiqp.Solver()  # == elastiqp.das.Solver(); Solver("pdal"), Solver("ipm")
+solver = elastiqp.Solver()
 solver.setup(Q, q, G, h, penalty, A=A, b=b)
 sol = solver.solve()
 solver.update(q=q_k, h=h_k, b=b_k)
 sol = solver.solve()
-
-# Backend settings: solver.settings is a das.Settings / pdal.Settings /
-# ipm.Settings; elastiqp.Settings(method) builds a default one.
-solver.settings.eps_abs = 1e-8
 ```
 
 ### JAX / PyTorch
@@ -157,7 +136,7 @@ sol = elastiqp.jax.solve(Q, q, G, h, penalty, A=A, b=b)
 
 # Compatible with jax.grad and vjp on the pdal / ipm backends
 def loss(q_):
-    sol = elastiqp.jax.solve(Q, q_, G, h, penalty, A=A, b=b, method="pdal")
+    sol = elastiqp.jax.solve(Q, q_, G, h, penalty, A=A, b=b, method="ipm")
     return jnp.sum(sol.x**2)
 
 grad_q = jax.grad(loss)(q)
