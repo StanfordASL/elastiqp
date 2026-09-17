@@ -177,3 +177,15 @@ ElastiQP builds on the following excellent projects:
 - [PIQP](https://github.com/PREDICT-EPFL/piqp)
 
 ElastiQP is licensed under Apache 2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE) for third-party notices.
+
+
+## Citation
+
+```
+@article{morton2026elastiqp,
+  author={Morton, Daniel and Arrizabalaga, Jon and Manchester, Zachary and Pavone, Marco},
+  title={Elasti{QP}: An Always-Feasible QP Solver for Constrained Robot Control},
+  journal={arXiv preprint arXiv:2609.19080},
+  year={2026},
+}
+```
