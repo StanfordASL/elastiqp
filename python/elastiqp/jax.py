@@ -47,6 +47,7 @@ _DEFAULT_EPS_ABS = {"das": 1e-6, "pdal": 1e-5, "ipm": 1e-5}
 _DEFAULT_RUIZ = {"das": True, "pdal": False, "ipm": False}
 # TODO (dan): get these defaults in alignment across backends
 
+
 def _find_library():
     # Search order mirrors elastiqp._core (see _import_core): an explicit
     # ELASTIQP_BUILD_DIR first, so a source checkout tests the build it just
@@ -98,7 +99,18 @@ class Result(NamedTuple):
 
 
 def _ffi_solve(
-    Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, vmap_method, target_kappa,
+    Q,
+    q,
+    A,
+    b,
+    G,
+    h,
+    penalty,
+    eps_abs,
+    max_iter,
+    ruiz,
+    vmap_method,
+    target_kappa,
     method="pdal",
 ):
     n = Q.shape[-1]
@@ -140,7 +152,20 @@ def _ffi_solve(
 
 
 def _ffi_solve_warm(
-    Q, q, A, b, G, h, penalty, x0, y0, z0, eps_abs, max_iter, ruiz, vmap_method,
+    Q,
+    q,
+    A,
+    b,
+    G,
+    h,
+    penalty,
+    x0,
+    y0,
+    z0,
+    eps_abs,
+    max_iter,
+    ruiz,
+    vmap_method,
     method,
 ):
     n = Q.shape[-1]
@@ -150,9 +175,7 @@ def _ffi_solve_warm(
     vec = lambda d: jax.ShapeDtypeStruct(batch + (d,), jnp.float64)
     # (x, t, y, z_t, z), then info = [converged, iters].
     out_types = [vec(n), vec(p), vec(m), vec(p), vec(p), vec(2)]
-    call = jax.ffi.ffi_call(
-        "elastiqp_solve_warm", out_types, vmap_method=vmap_method
-    )
+    call = jax.ffi.ffi_call("elastiqp_solve_warm", out_types, vmap_method=vmap_method)
     return call(
         Q,
         q,
@@ -170,21 +193,46 @@ def _ffi_solve_warm(
         method=np.int64(_METHOD_ID[method]),
     )
 
+
 @partial(jax.custom_vjp, nondiff_argnums=(10, 11, 12, 13, 14))
 def _solve_warm(
-    Q, q, A, b, G, h, penalty, x0, y0, z0, eps_abs, max_iter, ruiz, vmap_method,
+    Q,
+    q,
+    A,
+    b,
+    G,
+    h,
+    penalty,
+    x0,
+    y0,
+    z0,
+    eps_abs,
+    max_iter,
+    ruiz,
+    vmap_method,
     method,
 ):
     return _ffi_solve_warm(
-        Q, q, A, b, G, h, penalty, x0, y0, z0, eps_abs, max_iter, ruiz,
-        vmap_method, method,
+        Q,
+        q,
+        A,
+        b,
+        G,
+        h,
+        penalty,
+        x0,
+        y0,
+        z0,
+        eps_abs,
+        max_iter,
+        ruiz,
+        vmap_method,
+        method,
     )
 
 
 def _solve_warm_fwd(*args):
-    raise TypeError(
-        "elastiqp.jax.solve is not differentiable when warm-starting "
-    )
+    raise TypeError("elastiqp.jax.solve is not differentiable when warm-starting ")
 
 
 def _solve_warm_bwd(*args):
@@ -196,6 +244,7 @@ _solve_warm.defvjp(_solve_warm_fwd, _solve_warm_bwd)
 
 def _outer(a, b):
     return a[..., :, None] * b[..., None, :]
+
 
 # Note: this funciton is a port of equivalent logic in qpax
 # See also: kkt_vjp.hpp (c++ version) and _vjp_torch in torch.py
@@ -251,19 +300,52 @@ def _kkt_bwd(res, ct):
 
 @partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12))
 def _solve(
-    Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, vmap_method, target_kappa,
+    Q,
+    q,
+    A,
+    b,
+    G,
+    h,
+    penalty,
+    eps_abs,
+    max_iter,
+    ruiz,
+    vmap_method,
+    target_kappa,
     method,
 ):
     # Tight solution when not differentiating
     out = _ffi_solve(
-        Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, vmap_method, 0.0,
+        Q,
+        q,
+        A,
+        b,
+        G,
+        h,
+        penalty,
+        eps_abs,
+        max_iter,
+        ruiz,
+        vmap_method,
+        0.0,
         method,
     )
     return tuple(out[:5]) + (out[10],)  # solution + info
 
 
 def _solve_fwd(
-    Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, vmap_method, target_kappa,
+    Q,
+    q,
+    A,
+    b,
+    G,
+    h,
+    penalty,
+    eps_abs,
+    max_iter,
+    ruiz,
+    vmap_method,
+    target_kappa,
     method,
 ):
     if method == "das":
@@ -295,9 +377,7 @@ def _solve_fwd(
     return (x, t, y, z1, z2, info), (Q, A, G, h, xr, tr, yr, z1r, z2r)
 
 
-def _solve_bwd(
-    eps_abs, max_iter, ruiz, vmap_method, target_kappa, method, res, ct
-):
+def _solve_bwd(eps_abs, max_iter, ruiz, vmap_method, target_kappa, method, res, ct):
     return _kkt_bwd(res, ct)
 
 

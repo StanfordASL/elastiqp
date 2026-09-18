@@ -148,8 +148,18 @@ def _solve_impl(
     n, m, p = Q.shape[-1], b.shape[-1], h.shape[-1]
     if not batch:  # fast path: no reshapes, C++ outputs handed to torch as-is
         res = _core._solve_relaxed(
-            _np(Q), _np(q), _np(A), _np(b), _np(G), _np(h), _np(penalty),
-            eps_abs, max_iter, ruiz, target_kappa, method,
+            _np(Q),
+            _np(q),
+            _np(A),
+            _np(b),
+            _np(G),
+            _np(h),
+            _np(penalty),
+            eps_abs,
+            max_iter,
+            ruiz,
+            target_kappa,
+            method,
         )
         return tuple(torch.from_numpy(r) for r in res)
     nb = int(np.prod(batch))
@@ -162,8 +172,18 @@ def _solve_impl(
     out = [np.empty((nb, d)) for d in dims]
     for i in range(nb):
         res = _core._solve_relaxed(
-            Qf[i], qf[i], Af[i], bf[i], Gf[i], hf[i], pf[i],
-            eps_abs, max_iter, ruiz, target_kappa, method,
+            Qf[i],
+            qf[i],
+            Af[i],
+            bf[i],
+            Gf[i],
+            hf[i],
+            pf[i],
+            eps_abs,
+            max_iter,
+            ruiz,
+            target_kappa,
+            method,
         )
         for o, r in zip(out, res):
             o[i] = r
@@ -222,8 +242,20 @@ def _vjp_impl(
     batch = tuple(Q.shape[:-2])
     if not batch:
         res = _core._kkt_vjp(
-            _np(Q), _np(A), _np(G), _np(h), _np(xr), _np(tr), _np(yr), _np(z1r),
-            _np(z2r), _np(ct_x), _np(ct_t), _np(ct_y), _np(ct_z_t), _np(ct_z),
+            _np(Q),
+            _np(A),
+            _np(G),
+            _np(h),
+            _np(xr),
+            _np(tr),
+            _np(yr),
+            _np(z1r),
+            _np(z2r),
+            _np(ct_x),
+            _np(ct_t),
+            _np(ct_y),
+            _np(ct_z_t),
+            _np(ct_z),
         )
         return tuple(torch.from_numpy(r) for r in res)
     n, m, p = Q.shape[-1], A.shape[-2], G.shape[-2]
@@ -237,8 +269,20 @@ def _vjp_impl(
     out = [np.empty((nb,) + d) for d in dims]
     for i in range(nb):
         res = _core._kkt_vjp(
-            Qf[i], Af[i], Gf[i], hf[i], xf[i], tf[i], yf[i], z1f[i], z2f[i],
-            ctf[0][i], ctf[1][i], ctf[2][i], ctf[3][i], ctf[4][i],
+            Qf[i],
+            Af[i],
+            Gf[i],
+            hf[i],
+            xf[i],
+            tf[i],
+            yf[i],
+            z1f[i],
+            z2f[i],
+            ctf[0][i],
+            ctf[1][i],
+            ctf[2][i],
+            ctf[3][i],
+            ctf[4][i],
         )
         for o, r in zip(out, res):
             o[i] = r
@@ -301,7 +345,9 @@ class _Solve(torch.autograd.Function):
     """Eager path: the same primitive without the custom-op dispatch cost."""
 
     @staticmethod
-    def forward(Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, target_kappa, method):
+    def forward(
+        Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, target_kappa, method
+    ):
         return _solve_impl(
             Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, target_kappa, method
         )

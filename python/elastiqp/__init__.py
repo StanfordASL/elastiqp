@@ -70,9 +70,7 @@ def _lookup(table, method):
     try:
         return table[method]
     except KeyError:
-        raise ValueError(
-            f"method must be one of {METHODS}, got {method!r}"
-        ) from None
+        raise ValueError(f"method must be one of {METHODS}, got {method!r}") from None
 
 
 def Solver(method="das"):
