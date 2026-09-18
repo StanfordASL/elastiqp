@@ -1,6 +1,3 @@
-# Install + CMake package export for the header-only library
-# (find_package(elastiqp) after cmake --install). Included from the root
-# CMakeLists.txt; the SKBUILD (pip wheel) path never reaches this.
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 

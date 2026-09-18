@@ -40,15 +40,12 @@ __all__ = ["solve", "Result", "METHODS"]
 
 METHODS = ("das", "pdal", "ipm")
 _METHOD_ID = {"das": 0, "pdal": 1, "ipm": 2}
-# Default outer budget per backend (active-set iterations / BCL rounds /
-# interior-point iterations), used when max_iter is None.
+# Default outer budget for das/pdal/ipm,
+# (active-set iterations / BCL rounds / interior-point iterations)
 _DEFAULT_MAX_ITER = {"das": 10000, "pdal": 250, "ipm": 250}
-# Backend eps_abs defaults (see Settings in each header).
 _DEFAULT_EPS_ABS = {"das": 1e-6, "pdal": 1e-5, "ipm": 1e-5}
-# Ruiz equilibration default per backend (on for the active set, whose LDP
-# conditioning depends on it; off for PDAL / IPM), used when ruiz is None.
 _DEFAULT_RUIZ = {"das": True, "pdal": False, "ipm": False}
-
+# TODO (dan): get these defaults in alignment across backends
 
 def _find_library():
     # Search order mirrors elastiqp._core (see _import_core): an explicit
@@ -92,11 +89,11 @@ jax.ffi.register_ffi_target(
 
 class Result(NamedTuple):
     x: jax.Array
-    t: jax.Array  # elastic slacks (per-row constraint violations)
-    y: jax.Array  # equality duals (empty if no equalities)
-    z_t: jax.Array  # duals of t >= 0
-    z: jax.Array  # duals of G x - t <= h, in [0, penalty]
-    converged: jax.Array  # 0/1; includes the kappa relaxation when it runs
+    t: jax.Array
+    y: jax.Array
+    z_t: jax.Array
+    z: jax.Array
+    converged: jax.Array
     iters: jax.Array
 
 
@@ -173,10 +170,6 @@ def _ffi_solve_warm(
         method=np.int64(_METHOD_ID[method]),
     )
 
-
-# The warm-started solve is a plain (non-differentiable) primitive. The
-# custom_vjp only exists to turn jax.grad through it into a clear error
-# instead of "differentiation rule for ffi_call not implemented".
 @partial(jax.custom_vjp, nondiff_argnums=(10, 11, 12, 13, 14))
 def _solve_warm(
     Q, q, A, b, G, h, penalty, x0, y0, z0, eps_abs, max_iter, ruiz, vmap_method,
@@ -190,15 +183,12 @@ def _solve_warm(
 
 def _solve_warm_fwd(*args):
     raise TypeError(
-        "elastiqp.jax.solve is not differentiable when warm_start is given: "
-        "gradients use the kappa relaxation, which the warm-started path "
-        "does not run. Drop warm_start (and use method='pdal' or 'ipm') to "
-        "differentiate"
+        "elastiqp.jax.solve is not differentiable when warm-starting "
     )
 
 
-def _solve_warm_bwd(*args):  # pragma: no cover - fwd raises first
-    raise TypeError("elastiqp.jax.solve is not differentiable with warm_start")
+def _solve_warm_bwd(*args):
+    raise TypeError("elastiqp.jax.solve is not differentiable when warm-starting")
 
 
 _solve_warm.defvjp(_solve_warm_fwd, _solve_warm_bwd)
@@ -207,51 +197,11 @@ _solve_warm.defvjp(_solve_warm_fwd, _solve_warm_bwd)
 def _outer(a, b):
     return a[..., :, None] * b[..., None, :]
 
-
+# Note: this funciton is a port of equivalent logic in qpax
+# See also: kkt_vjp.hpp (c++ version) and _vjp_torch in torch.py
 def _kkt_bwd(res, ct):
-    """Implicit differentiation of the elastic KKT conditions.
-
-    MIRROR: include/elastiqp/kkt_vjp.hpp is the C++ port of this function
-    (for gradients without JAX) and _vjp_torch in python/elastiqp/torch.py
-    the torch port (for torch.func transforms); keep the three in sync.
-    tests/test_pdal.cc pins the C++ side against finite differences of the
-    relaxed map, tests/test_jax_ffi.py pins this one, tests/test_torch.py
-    pins the torch one against the C++ path.
-
-    Below, z1 and z2 are the duals Result calls z_t and z; the numeric
-    subscripts keep the block algebra (g4/g5, v2/v5, rb1/rb2) readable.
-
-    F(w, theta) = 0 at the solution, with w = (x, t, y, z1, z2) and
-    theta = (Q, q, A, b, G, h, penalty):
-        g1: Q x + q + A' y + G' z2      = 0
-        g2: penalty - z1 - z2           = 0
-        g3: A x - b                     = 0
-        g4: z1 * t                      = 0
-        g5: z2 * (G x - t - h)          = 0
-    Solve K' u = wbar with K = dF/dw, then theta_bar = -(dF/dtheta)' u.
-
-    The solve is CONDENSED, mirroring the forward solver: K is never formed.
-    Scaling rows g4 by -1/z1 and g5 by 1/z2 makes K symmetric (S = D_r K),
-    so the transpose solve K'u = wbar becomes the ordinary solve
-    K v = D_r^{-1} wbar = (xb, tb, yb, -z1*z1b, z2*z2b) with u = D_r v.
-    Eliminating the diagonal t/z1/z2 blocks of K v = r:
-        v4 = -r2 - v5
-        v2 = (r4 + t*r2 + t*v5) / z1
-        E  = D - z2*t/z1  (diagonal, < 0 at any interior point)
-        v5 = (r5 + z2*(r4 + t*r2)/z1 - z2*(G v1)) / E
-    leaves the (n+m) saddle system
-        [Q + G' diag(-z2/E) G,  A'] [v1]   [r1 - G'(r5_tilde/E)]
-        [A,                     0 ] [v3] = [r3]
-    -- O(p n^2 + (n+m)^3) instead of O((n+3p+m)^3) for the dense Jacobian.
-
-    With kappa relaxation, g4 and g5 carry constant offsets (z1*t = kappa,
-    z2*(Gx - t - h) = -kappa); constants drop out of both dF/dw and
-    dF/dtheta, so the formulas are unchanged -- only the evaluation point
-    (the relaxed solution stored in res) moves. At that point every
-    complementarity pair has margin ~kappa, which bounds the conditioning
-    near degenerate active sets.
-    """
-    Q, A, G, h, x, t, y, z1, z2 = res  # (x..z2) = relaxed point if kappa > 0
+    """Implicit differentiation of the elastic KKT conditions."""
+    Q, A, G, h, x, t, y, z1, z2 = res
     xb, tb, yb, z1b, z2b, _ = ct
     n = Q.shape[-1]
     m = A.shape[-2]
@@ -261,8 +211,8 @@ def _kkt_bwd(res, ct):
     At = jnp.swapaxes(A, -1, -2)
     mv = lambda M, v: jnp.einsum("...ij,...j->...i", M, v)
 
-    D = mv(G, x) - t - h  # = -s2 <= 0
-    E = D - z2 * t / z1  # < 0 at any interior point
+    D = mv(G, x) - t - h
+    E = D - z2 * t / z1
 
     # Rescaled rhs for the symmetrized transpose solve.
     r1, r2, r3 = xb, tb, yb
@@ -299,20 +249,12 @@ def _kkt_bwd(res, ct):
     return Qb, qb, Ab, bb, Gb, hb, penalty_b
 
 
-# custom_vjp-wrapped solve.
-#
-# The primal path always runs the plain (tight) solve; only the
-# differentiation path (fwd) pays for the kappa relaxation, and the bwd
-# differentiates the KKT system at the relaxed point via _kkt_bwd. fwd
-# raises unless target_kappa > 0: the solver's certificate sits exactly on
-# the constraint boundary, where the exact KKT derivative is undefined
-# (division by zero complementarity margins).
 @partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12))
 def _solve(
     Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, vmap_method, target_kappa,
     method,
 ):
-    # Tight solution when not differentiating: no relaxation runs.
+    # Tight solution when not differentiating
     out = _ffi_solve(
         Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, vmap_method, 0.0,
         method,
@@ -326,16 +268,13 @@ def _solve_fwd(
 ):
     if method == "das":
         raise TypeError(
-            "elastiqp.jax.solve is not differentiable with method='das': the "
-            "active-set backend has no kappa relaxation. Use method='pdal' "
-            "or method='ipm' (with target_kappa > 0) for gradients"
+            "elastiqp.jax.solve is not differentiable with method='das': "
+            "See method='ipm' or 'pdal' instead"
         )
     if not target_kappa > 0:
         raise TypeError(
             "elastiqp.jax.solve is not differentiable with target_kappa=0: "
-            "the solution sits exactly on the constraint boundary, where "
-            "the exact KKT derivative is undefined. Set target_kappa > 0 "
-            "(e.g. 1e-3) for log-barrier smoothed gradients"
+            "Set target_kappa > 0  e.g. 1e-3) for smoothed gradients"
         )
     out = _ffi_solve(
         Q,
@@ -353,8 +292,6 @@ def _solve_fwd(
         method,
     )
     x, t, y, z1, z2, xr, tr, yr, z1r, z2r, info = out
-    # Differentiate at the kappa-relaxed point; the returned VALUE is
-    # always the tight solution.
     return (x, t, y, z1, z2, info), (Q, A, G, h, xr, tr, yr, z1r, z2r)
 
 
@@ -387,7 +324,7 @@ def solve(
     """Solve the elastic QP
 
         min 0.5 x'Qx + q'x + penalty' t
-        s.t. A x == b (hard, optional), G x - t <= h, t >= 0
+        s.t. A x == b, G x - t <= h, t >= 0
 
     `penalty` may be a scalar or a per-constraint vector of length p.
     `method`, `eps_abs`, `max_iter`, `ruiz` and `target_kappa` are static
@@ -527,8 +464,7 @@ def solve(
         method,
     )
     # Recall: info = [converged, iters, relax_converged]. The converged
-    # flag here considers both forward and backward (relax); the two agree
-    # whenever no relaxation runs.
+    # flag here considers both forward and backward (relax)
     converged = jnp.minimum(info[..., 0], info[..., 2])
     return Result(
         x=x,
