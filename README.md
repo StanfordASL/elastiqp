@@ -2,6 +2,10 @@
 
 [![Paper](http://img.shields.io/badge/arXiv-2609.19080-B31B1B.svg)](https://arxiv.org/abs/2609.19080)
 
+> [!WARNING]  
+> Currently under construction, apologies for any rough edges
+
+
 An always-feasible QP solver for constrained robot control.
 
 ElastiQP solves the following problem:
