@@ -232,11 +232,11 @@ def _solve_warm(
 
 
 def _solve_warm_fwd(*args):
-    raise TypeError("elastiqp.jax.solve is not differentiable when warm-starting ")
+    raise TypeError("elastiqp.jax.solve is not differentiable with warm_start")
 
 
 def _solve_warm_bwd(*args):
-    raise TypeError("elastiqp.jax.solve is not differentiable when warm-starting")
+    raise TypeError("elastiqp.jax.solve is not differentiable with warm_start")
 
 
 _solve_warm.defvjp(_solve_warm_fwd, _solve_warm_bwd)
@@ -356,7 +356,7 @@ def _solve_fwd(
     if not target_kappa > 0:
         raise TypeError(
             "elastiqp.jax.solve is not differentiable with target_kappa=0: "
-            "Set target_kappa > 0  e.g. 1e-3) for smoothed gradients"
+            "Set target_kappa > 0  (e.g. 1e-3) for smoothed gradients"
         )
     out = _ffi_solve(
         Q,
