@@ -1,21 +1,19 @@
-"""Constraint conflict experiment: infeasible safety constraints, reasonable control.
+"""Constraint conflict experiment
 
-A 2D double-integrator "point robot" (radius r) sits near the corner of a room
-formed by two wall half-plane constraints. A dynamic obstacle (also a disc)
-moves at constant velocity towards the corner, squeezing the robot until
-satisfying all safety constraints (2 walls + obstacle avoidance) is impossible.
-
-Each safety constraint is written as a relative-degree-2 CBF condition on the
-control input and handed to ElastiQP as an elastic inequality. When the
-constraints conflict, the L1 elastic penalties decide which constraint yields:
-high wall / low obstacle penalty pins the robot in the corner and accepts the
-obstacle contact, while low wall / high obstacle penalty lets the robot back
-through the wall slightly to keep clear of the obstacle. A hard-constrained QP
-would simply return "infeasible" at the pinch and leave the controller with no
-input at all.
-
-Run (from the repo root, inside the venv):
-    python examples/experiments/constraint_conflict_demo.py [--save fig.pdf] [--no-animate]
+(From the paper figure --)
+Consider a 2D double-integrator robot which has been backed into a corner,
+with a dynamic obstacle moving towards it. Inherently, this leads to a
+conflict between three safety constraints: stay within the two boundaries
+of the workspace, and avoid collision with moving obstacle. In edge cases
+like this, we would prefer a solver which returns a *reasonable* balance
+between conflicts, rather than returning an infeasible status. Here, the
+balance can be set via the magnitude of the penalty terms, `w`.
+For `w_wall > w_obs`, the optimal action is to accept collision with the
+obstacle while avoiding the walls, whereas for `w_wall < w_obs`, the robot
+accepts violating the workspace boundary to avoid collision with the dynamic
+obstacle. In either case, when conflict occurs, the optimal dual `z` for
+the relaxed constraint reaches its corresponding cap `w`, allowing the
+elastic slack `t` to grow when the conflict is active.
 """
 
 import argparse
@@ -28,9 +26,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.legend_handler import HandlerPatch
 from matplotlib.patches import Circle, FancyArrowPatch
 
-# --- Environment -------------------------------------------------------------
-
-# Room corner: the robot must stay inside {x <= WALL_X, y <= WALL_Y}
+# Max xy values defining the workspace limits
 WALL_X = 1.5
 WALL_Y = 1.5
 
@@ -40,18 +36,17 @@ OBS_RADIUS = 0.30
 ROBOT_START = np.array([1.0, 1.0])
 OBS_START = np.array([-2.5, -2.2])
 OBS_SPEED = 1.1
-# Constant velocity aimed at the corner (small offset keeps it off the diagonal)
+# Constant velocity aimed roughly at the corner
 OBS_TARGET = np.array([WALL_X + 0.1, WALL_Y - 0.1])
 
 DT = 0.01
 SIM_TIME = 7.0
 
-# PD gains for the nominal go-to-start controller
+# PD gains for the nominal controller
 KP = 4.0
 KD = 3.0
 
-# Class-K gains for the cascaded relative-degree-2 CBF condition:
-#   h_ddot + (ALPHA1 + ALPHA2) h_dot + ALPHA1 * ALPHA2 * h >= 0
+# CBF alphas
 ALPHA1 = 3.0
 ALPHA2 = 3.0
 
@@ -63,55 +58,30 @@ CONSTRAINT_COLORS = ["tab:orange", "tab:green", "tab:purple"]
 class Scenario:
     name: str
     penalty: np.ndarray
-    description: str
 
 
 SCENARIOS = [
     Scenario(
         "Walls hard, obstacle soft",
         np.array([1e2, 1e2, 1e1]),
-        "Robot stops in the corner and accepts contact with the obstacle",
     ),
     Scenario(
         "Obstacle hard, walls soft",
         np.array([1e1, 1e1, 1e2]),
-        "Robot yields the workspace bounds slightly to stay clear of the obstacle",
     ),
 ]
 
 
-# --- CBF constraint rows ------------------------------------------------------
-#
-# Double integrator: p_dot = v, v_dot = u. Every barrier h(p) below has relative
-# degree 2, so we enforce the cascaded condition
-#     h_ddot + (a1 + a2) h_dot + a1 a2 h >= 0
-# which is affine in u and becomes one row of G u <= h_vec.
-
-
 def wall_rows(p, v):
-    """CBF rows for the two walls. Returns (G, h_vec, margins).
-
-    Wall x barrier: h = WALL_X - px - r  (>= 0 inside the room)
-        h_dot = -vx, h_ddot = -ux  =>  ux <= a1 a2 h - (a1 + a2) vx
-    and symmetrically for y.
-    """
     hx = WALL_X - p[0] - ROBOT_RADIUS
     hy = WALL_Y - p[1] - ROBOT_RADIUS
     a_sum, a_prod = ALPHA1 + ALPHA2, ALPHA1 * ALPHA2
     G = np.eye(2)
     h_vec = np.array([a_prod * hx - a_sum * v[0], a_prod * hy - a_sum * v[1]])
-    return G, h_vec, np.array([hx, hy])
+    return G, h_vec
 
 
 def obstacle_row(p, v, p_obs, v_obs):
-    """CBF row for the moving obstacle. Returns (G_row, h_val, margin).
-
-    Squared-distance barrier (smooth everywhere):
-        h = ||d||^2 - R^2,  d = p - p_obs,  R = r + r_obs
-        h_dot  = 2 d . (v - v_obs)
-        h_ddot = 2 ||v - v_obs||^2 + 2 d . u   (obstacle acceleration = 0)
-    Condition: -2 d . u <= 2 ||v - v_obs||^2 + (a1 + a2) h_dot + a1 a2 h
-    """
     d = p - p_obs
     dv = v - v_obs
     R = ROBOT_RADIUS + OBS_RADIUS
@@ -120,21 +90,16 @@ def obstacle_row(p, v, p_obs, v_obs):
     a_sum, a_prod = ALPHA1 + ALPHA2, ALPHA1 * ALPHA2
     G_row = -2.0 * d
     h_val = 2.0 * dv @ dv + a_sum * h_dot + a_prod * h
-    margin = np.linalg.norm(d) - R  # signed distance, for reporting
-    return G_row, h_val, margin
+    return G_row, h_val
 
 
 def build_qp(p, v, p_obs, v_obs, u_nom):
     """Assemble (Q, q, G, h) for min 0.5||u - u_nom||^2 s.t. CBF rows G u <= h."""
-    Gw, hw, wall_margins = wall_rows(p, v)
-    Go, ho, obs_margin = obstacle_row(p, v, p_obs, v_obs)
+    Gw, hw = wall_rows(p, v)
+    Go, ho = obstacle_row(p, v, p_obs, v_obs)
     G = np.vstack([Gw, Go])
     h = np.append(hw, ho)
-    margins = np.append(wall_margins, obs_margin)
-    return np.eye(2), -u_nom, G, h, margins
-
-
-# --- Simulation ---------------------------------------------------------------
+    return np.eye(2), -u_nom, G, h
 
 
 def simulate(scenario: Scenario) -> dict:
@@ -146,25 +111,22 @@ def simulate(scenario: Scenario) -> dict:
     )
 
     solver = elastiqp.Solver()
-    Q, q, G, h, _ = build_qp(p, v, p_obs, v_obs, np.zeros(2))
+    Q, q, G, h = build_qp(p, v, p_obs, v_obs, np.zeros(2))
     solver.setup(Q, q, G, h, scenario.penalty)
 
-    log = {k: [] for k in ("time", "p", "p_obs", "margins", "t", "z", "iters")}
+    log = {k: [] for k in ("time", "p", "p_obs", "t", "z", "iters")}
     for k in range(round(SIM_TIME / DT)):
         u_nom = -KP * (p - ROBOT_START) - KD * v
-        _, q, G, h, margins = build_qp(p, v, p_obs, v_obs, u_nom)
+        _, q, G, h = build_qp(p, v, p_obs, v_obs, u_nom)
         solver.update(q=q, G=G, h=h)
         sol = solver.solve()
         if not sol.converged:
-            # A rare warm-start stall at the pinch can hit MaxIter; the iterate
-            # is still usable and the solver recovers on the next tick.
             print(f"  [warn] {sol.status} at t={k * DT:.2f}s (iters={sol.iters})")
         u = sol.x
 
         log["time"].append(k * DT)
         log["p"].append(p.copy())
         log["p_obs"].append(p_obs.copy())
-        log["margins"].append(margins)
         log["t"].append(sol.t.copy())
         log["z"].append(sol.z.copy())
         log["iters"].append(sol.iters)
@@ -177,16 +139,14 @@ def simulate(scenario: Scenario) -> dict:
     return {k: np.asarray(val) for k, val in log.items()}
 
 
-# --- Plotting -----------------------------------------------------------------
-
+# Plotting parameters
 TRAJ_XLIM = (0.0, 1.85)
 TRAJ_YLIM = (0.0, 1.95)
 TIME_WINDOW = (2.0, 6.0)
 PAPER_RC = {"figure.figsize": (20, 4.25), "font.size": 14}
 
-# Snapshot instants for the disc trails, in seconds relative to the moment the
-# robot is pushed furthest from its start (which coincides with the pinch).
-SNAP_OFFSETS = (-1.2, -0.6, 0.0)
+# Snapshot timing/coloring for showing robot/obstacle motion
+SNAP_OFFSETS = (-1.2, -0.6, 0.0)  # seconds
 SNAP_ALPHAS = (0.20, 0.42, 0.75)
 
 
@@ -236,7 +196,7 @@ def plot_trajectory(ax, data: dict, scenario: Scenario):
     p = data["p"]
     p_obs = data["p_obs"]
 
-    # Walls (room interior is down-left of the corner)
+    # Walls
     ax.plot([WALL_X, WALL_X], [TRAJ_YLIM[0], WALL_Y], "k-", lw=2)
     ax.plot([TRAJ_XLIM[0], WALL_X], [WALL_Y, WALL_Y], "k-", lw=2)
     ax.fill_betweenx(
@@ -244,9 +204,7 @@ def plot_trajectory(ax, data: dict, scenario: Scenario):
     )
     ax.fill_between(TRAJ_XLIM, WALL_Y, TRAJ_YLIM[1], color="0.85", zorder=0)
 
-    # Snapshot indices: last frame = robot's furthest excursion (the pinch),
-    # earlier frames at fixed offsets so robot and obstacle discs are
-    # synchronized in time.
+    # Snapshot indices
     disp = np.linalg.norm(p - ROBOT_START, axis=1)
     i_last = int(disp.argmax())
     snap_idx = [
@@ -254,8 +212,7 @@ def plot_trajectory(ax, data: dict, scenario: Scenario):
         for off in SNAP_OFFSETS
     ]
 
-    # Robot: path up to the pinch (the return leg retraces it), arrowhead
-    # partway along the moving section.
+    # Robot trajectory
     ax.plot(
         p[: i_last + 1, 0],
         p[: i_last + 1, 1],
@@ -268,8 +225,7 @@ def plot_trajectory(ax, data: dict, scenario: Scenario):
     if disp[i_last] > 0.05:
         _arrow_along(ax, p[i_mid - 1], p[i_mid + 1], "tab:blue")
 
-    # Obstacle: dashed path starting at the first plotted disc, arrowheads in
-    # the gaps between discs pointing along the motion.
+    # Obstacle trajectory
     i0, i1 = snap_idx[0], snap_idx[-1]
     ax.plot(
         p_obs[i0 : i1 + 1, 0],
@@ -282,7 +238,7 @@ def plot_trajectory(ax, data: dict, scenario: Scenario):
     for ia, ib in zip(snap_idx[:-1], snap_idx[1:]):
         _arrow_along(ax, p_obs[ia], p_obs[ib], "tab:red")
 
-    # Discs at the snapshot instants, fading in towards the pinch
+    # Discs at the snapshot instants
     for i, alpha in zip(snap_idx, SNAP_ALPHAS):
         ax.add_patch(
             Circle(p_obs[i], OBS_RADIUS, color="tab:red", alpha=alpha, lw=0, zorder=1.8)
@@ -299,8 +255,7 @@ def plot_trajectory(ax, data: dict, scenario: Scenario):
     ax.set_title(scenario.name)
 
 
-def plot_paper_figure(runs):
-    """Full-page-width figure: [trajectory | duals/slacks] x two scenarios."""
+def plot_figure(runs):
     with plt.rc_context(PAPER_RC):
         fig = plt.figure()
         outer = fig.add_gridspec(1, 4, width_ratios=[1.0, 1.05, 1.0, 1.05], wspace=0.55)
@@ -311,17 +266,13 @@ def plot_paper_figure(runs):
 
             ax_traj = fig.add_subplot(outer[0, 2 * j])
             plot_trajectory(ax_traj, data, scenario)
-            # aspect="equal" leaves slack in the gridspec cell; push it away from
-            # the dual/slack column so the ylabels don't collide
             ax_traj.set_anchor("W")
 
-            zt_hspace = 0.15  # gap between z and t panels, fraction of panel height
+            zt_hspace = 0.15
             inner = outer[0, 2 * j + 1].subgridspec(2, 1, hspace=zt_hspace)
             ax_z = fig.add_subplot(inner[0])
             ax_t = fig.add_subplot(inner[1], sharex=ax_z)
 
-            # aspect="equal" shrinks the trajectory box at draw time; resolve it
-            # now and pin the z/t stack to span exactly the same vertical extent
             ax_traj.apply_aspect()
             tp = ax_traj.get_position()
             zp = ax_z.get_position()
@@ -334,7 +285,6 @@ def plot_paper_figure(runs):
             for i, (name, color) in enumerate(zip(CONSTRAINT_NAMES, CONSTRAINT_COLORS)):
                 ax_z.plot(t[mask], data["z"][mask, i], color=color)
                 ax_t.plot(t[mask], data["t"][mask, i], color=color, label=name)
-                # Maximum attainable dual = the L1 penalty on that constraint
                 ax_z.axhline(scenario.penalty[i], color=color, ls="--")
 
             ax_z.set_yscale("log")
@@ -350,7 +300,6 @@ def plot_paper_figure(runs):
                 ax.minorticks_off()
                 ax.grid(alpha=0.3)
 
-        # Unified legend: robot/obstacle trajectories + constraint colors
         traj_h = _traj_legend_handles()
         cons_h, cons_l = ax_t.get_legend_handles_labels()
         fig.legend(
@@ -367,7 +316,6 @@ def plot_paper_figure(runs):
 
 
 def animate(runs):
-    """Side-by-side animation of the scenarios, over the paper-figure trails."""
     fig, axes = plt.subplots(1, len(runs), figsize=(5 * len(runs), 5))
     artists = []
     for ax, (scenario, data) in zip(axes, runs):
@@ -405,19 +353,13 @@ def main():
     for scenario in SCENARIOS:
         data = simulate(scenario)
         runs.append((scenario, data))
-        print(f"{scenario.name}:")
-        print(f"  {scenario.description}")
-        for name, w in zip(CONSTRAINT_NAMES, data["margins"].min(axis=0)):
-            status = "violated" if w < 0 else "held"
-            print(f"  {name:9s}: worst margin {w:+.3f} m ({status})")
-        print(f"  mean solver iters: {data['iters'].mean():.1f}")
 
-    fig = plot_paper_figure(runs)
+    fig = plot_figure(runs)
     if args.save:
         fig.savefig(args.save, bbox_inches="tight", dpi=300)
-        print(f"Saved paper figure to {args.save}")
+        print(f"Saved figure to {args.save}")
 
-    anim = animate(runs) if not args.no_animate else None  # noqa: F841 (keep alive)
+    anim = animate(runs) if not args.no_animate else None  # noqa: F841
     plt.show()
 
 
