@@ -1,6 +1,6 @@
 // PDAL regression test for the warm-start deactivation-creep failure mode.
 //
-// Scenario captured from examples/experiments/constraint_conflict_demo.py
+// Scenario captured from examples/constraint_conflict_demo.py
 // ("Equal penalties", ticks 463/464 at dt=0.01): a 2D double-integrator
 // CBF controller squeezed between a wall and a moving obstacle. During
 // the pinch the two conflicting rows ride the elastic penalty cap
