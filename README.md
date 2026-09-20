@@ -50,14 +50,14 @@ ElastiQP is *fast*, particularly when warm-started. For a rough sense of numbers
 git clone https://github.com/StanfordASL/elastiqp
 cd elastiqp
 cmake -B build . -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release
+cmake --build build --config Release -j
 # Optional: cmake --install build --config Release
 ```
 
 For best performance (on your own device), you can also build with `-march=native`
 ```
 cmake -B build-native . -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-march=native"
-cmake --build build-native --config Release
+cmake --build build-native --config Release -j
 ```
 
 If you've installed with CMake, you can also `find_package(elastiqp)`
