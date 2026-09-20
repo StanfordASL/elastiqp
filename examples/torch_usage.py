@@ -1,22 +1,16 @@
 """ElastiQP PyTorch example: autograd, batching, and torch.compile"""
 
-import elastiqp.torch
-import numpy as np
 import torch
 
 torch.set_default_dtype(torch.float64)
+
+import elastiqp.torch
 
 
 def main():
     torch.set_printoptions(sci_mode=False)
 
     print("\n--- ElastiQP: PyTorch Usage ---")
-
-    print("\nElastiQP registers its solve as a torch custom operator, so it sits")
-    print("inside autograd, torch.compile, and torch.vmap like any torch function")
-    print("\nmethod= picks the backend ('das' by default). Gradients need the kappa")
-    print("relaxation, which the 'pdal' and 'ipm' backends provide; the examples")
-    print("below that differentiate use method='pdal'")
 
     print("\nConsider a 4D problem where x is pulled towards a goal x_des")
     n = 4
@@ -47,30 +41,37 @@ def main():
 
     print("\n--- Batching ---")
 
-    print("\nLeading batch dimensions solve one problem per entry (with the")
-    print("other arguments broadcast). For example, sweeping the goal over 8")
-    print("scales of x_des:")
+    print("\nFor leading batch dimensions, ElastiQP will solve each problem")
+    print("in the batch (with other problem data broadcast as necessary)")
+    print("For example, if we vary the target x_des over 8 values,")
     targets = torch.stack([x_des * s for s in torch.linspace(0.2, 2.0, 8)])
     xs = elastiqp.torch.solve(Q, -targets, G, h, penalty, A=A, b=b).x
     print(f"\nWe get a batch of solutions with shape {tuple(xs.shape)}")
-    print(
-        f"where x0 spans [{xs[:, 0].min():.3f}, {xs[:, 0].max():.3f}] as the goal moves"
-    )
-    print("(torch.vmap over a per-problem function does the same thing)")
+    print("(Note: you can use torch.vmap as well)")
 
     print("\n--- Differentiation ---")
 
-    print("\nWith autograd, we can differentiate scalar losses through the solver")
-    print("This uses implicit differentiation of the KKT system (not unrolling)")
-    print("\nDifferentiation requires target_kappa > 0: the solution sits exactly")
-    print("on the constraint boundary, so gradients are evaluated at a")
-    print("kappa-relaxed central point (as in qpax), trading an O(kappa) bias")
-    print("for smooth, well-conditioned gradients")
+    print("\nWith autograd, we can differentiate through the solver using")
+    print("implicit differentiation rather than loop unrolling.")
+
+    print("\nAs in solvers like qpax, we relax the solution to some kappa > 0")
+    print("smoothed value for well-conditioned gradients")
+
+    print("\nNote: Currently, differentiation is only supported in the `ipm`")
+    print("and `pdal` backends")
 
     def loss(q_, kappa=1e-6):
         sol = elastiqp.torch.solve(
-            Q, q_, G, h, penalty, A=A, b=b, method="pdal",
-            target_kappa=kappa, eps_abs=1e-10,
+            Q,
+            q_,
+            G,
+            h,
+            penalty,
+            A=A,
+            b=b,
+            method="pdal",
+            target_kappa=kappa,
+            eps_abs=1e-10,
         )
         return torch.sum(sol.x**2)
 
@@ -81,8 +82,6 @@ def main():
     print(f"dloss/dq = {g_q}")
 
     print("\nWe can check the gradient against finite differences")
-    print("(with a small kappa = 1e-6, so the smoothing bias stays below the")
-    print("finite-differencing error)")
     eps = 1e-6
     fd_q = torch.zeros(n)
     with torch.no_grad():
@@ -95,8 +94,7 @@ def main():
 
     print("\n--- torch.compile ---")
 
-    print("\nThe solve is an opaque custom op with a registered shape function,")
-    print("so it compiles without graph breaks, forward and backward:")
+    print("\nThe solver is also compatible with torch.compile:")
 
     @torch.compile(fullgraph=True)
     def compiled_loss(q_):
@@ -106,7 +104,9 @@ def main():
     compiled_loss(q_c).backward()
     q_e = q.clone().requires_grad_(True)
     loss(q_e, kappa=1e-3).backward()
-    print(f"compiled vs eager gradient: max error {torch.abs(q_c.grad - q_e.grad).max():.1e}")
+    print(
+        f"Compiled vs eager gradient: max error {torch.abs(q_c.grad - q_e.grad).max():.1e}"
+    )
 
     print("\n--- Smoothed Gradients ---")
 
@@ -133,7 +133,6 @@ def main():
 
     print("\nThe near-exact (kappa=1e-9) gradient snaps from 1 to 0 at the")
     print("activation point, while the smoothed gradient transitions continuously")
-    print("between the two regimes")
 
 
 if __name__ == "__main__":
