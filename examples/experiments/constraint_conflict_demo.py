@@ -15,11 +15,11 @@ would simply return "infeasible" at the pinch and leave the controller with no
 input at all.
 
 Run (from the repo root, inside the venv):
-    python examples/experiments/constraint_conflict_demo.py [--animate]
+    python examples/experiments/constraint_conflict_demo.py [--save fig.pdf] [--no-animate]
 """
 
 import argparse
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import elastiqp
 import matplotlib.pyplot as plt
@@ -38,7 +38,7 @@ ROBOT_RADIUS = 0.15
 OBS_RADIUS = 0.30
 
 ROBOT_START = np.array([1.0, 1.0])
-OBS_START = np.array([-2.5, -2.2])  # slight asymmetry so the pinch isn't symmetric
+OBS_START = np.array([-2.5, -2.2])
 OBS_SPEED = 1.1
 # Constant velocity aimed at the corner (small offset keeps it off the diagonal)
 OBS_TARGET = np.array([WALL_X + 0.1, WALL_Y - 0.1])
@@ -56,24 +56,17 @@ ALPHA1 = 3.0
 ALPHA2 = 3.0
 
 CONSTRAINT_NAMES = ["wall x", "wall y", "obstacle"]
-# Constraint colors for the dual/slack time series; "obstacle" is purple so it
-# doesn't read as the (red) obstacle trajectory in the xy panels
 CONSTRAINT_COLORS = ["tab:orange", "tab:green", "tab:purple"]
 
 
 @dataclass
 class Scenario:
     name: str
-    penalty: np.ndarray  # per-constraint L1 weight: [wall x, wall y, obstacle]
+    penalty: np.ndarray
     description: str
 
 
 SCENARIOS = [
-    Scenario(
-        "Equal penalties",
-        np.array([1e3, 1e3, 1e3]),
-        "No stated priority: the solver yields whichever constraint is cheapest to violate",
-    ),
     Scenario(
         "Walls hard, obstacle soft",
         np.array([1e2, 1e2, 1e1]),
@@ -105,7 +98,7 @@ def wall_rows(p, v):
     hx = WALL_X - p[0] - ROBOT_RADIUS
     hy = WALL_Y - p[1] - ROBOT_RADIUS
     a_sum, a_prod = ALPHA1 + ALPHA2, ALPHA1 * ALPHA2
-    G = np.array([[1.0, 0.0], [0.0, 1.0]])
+    G = np.eye(2)
     h_vec = np.array([a_prod * hx - a_sum * v[0], a_prod * hy - a_sum * v[1]])
     return G, h_vec, np.array([hx, hy])
 
@@ -127,7 +120,7 @@ def obstacle_row(p, v, p_obs, v_obs):
     a_sum, a_prod = ALPHA1 + ALPHA2, ALPHA1 * ALPHA2
     G_row = -2.0 * d
     h_val = 2.0 * dv @ dv + a_sum * h_dot + a_prod * h
-    margin = np.linalg.norm(d) - R  # signed distance, for plotting
+    margin = np.linalg.norm(d) - R  # signed distance, for reporting
     return G_row, h_val, margin
 
 
@@ -137,32 +130,11 @@ def build_qp(p, v, p_obs, v_obs, u_nom):
     Go, ho, obs_margin = obstacle_row(p, v, p_obs, v_obs)
     G = np.vstack([Gw, Go])
     h = np.append(hw, ho)
-    Q = np.eye(2)
-    q = -u_nom
     margins = np.append(wall_margins, obs_margin)
-    return Q, q, G, h, margins
+    return np.eye(2), -u_nom, G, h, margins
 
 
 # --- Simulation ---------------------------------------------------------------
-
-
-@dataclass
-class Log:
-    time: list = field(default_factory=list)
-    p: list = field(default_factory=list)
-    p_obs: list = field(default_factory=list)
-    u: list = field(default_factory=list)
-    u_nom: list = field(default_factory=list)
-    margins: list = field(
-        default_factory=list
-    )  # signed distances [wall x, wall y, obs]
-    cbf_slack: list = field(default_factory=list)  # G u - h per row (constraint room)
-    t_elastic: list = field(default_factory=list)  # ElastiQP slacks t
-    z: list = field(default_factory=list)  # ElastiQP inequality duals
-    iters: list = field(default_factory=list)
-
-    def as_arrays(self):
-        return {k: np.asarray(getattr(self, k)) for k in self.__dataclass_fields__}
 
 
 def simulate(scenario: Scenario) -> dict:
@@ -177,9 +149,8 @@ def simulate(scenario: Scenario) -> dict:
     Q, q, G, h, _ = build_qp(p, v, p_obs, v_obs, np.zeros(2))
     solver.setup(Q, q, G, h, scenario.penalty)
 
-    log = Log()
-    n_steps = int(round(SIM_TIME / DT))
-    for k in range(n_steps):
+    log = {k: [] for k in ("time", "p", "p_obs", "margins", "t", "z", "iters")}
+    for k in range(round(SIM_TIME / DT)):
         u_nom = -KP * (p - ROBOT_START) - KD * v
         _, q, G, h, margins = build_qp(p, v, p_obs, v_obs, u_nom)
         solver.update(q=q, G=G, h=h)
@@ -190,27 +161,28 @@ def simulate(scenario: Scenario) -> dict:
             print(f"  [warn] {sol.status} at t={k * DT:.2f}s (iters={sol.iters})")
         u = sol.x
 
-        log.time.append(k * DT)
-        log.p.append(p.copy())
-        log.p_obs.append(p_obs.copy())
-        log.u.append(u.copy())
-        log.u_nom.append(u_nom.copy())
-        log.margins.append(margins)
-        log.cbf_slack.append(G @ u - h)
-        log.t_elastic.append(sol.t.copy())
-        log.z.append(sol.z.copy())
-        log.iters.append(sol.iters)
+        log["time"].append(k * DT)
+        log["p"].append(p.copy())
+        log["p_obs"].append(p_obs.copy())
+        log["margins"].append(margins)
+        log["t"].append(sol.t.copy())
+        log["z"].append(sol.z.copy())
+        log["iters"].append(sol.iters)
 
         # Exact double-integrator step under zero-order-hold u
         p = p + v * DT + 0.5 * u * DT**2
         v = v + u * DT
         p_obs = p_obs + v_obs * DT
 
-    return log.as_arrays()
+    return {k: np.asarray(val) for k, val in log.items()}
 
 
 # --- Plotting -----------------------------------------------------------------
 
+TRAJ_XLIM = (0.0, 1.85)
+TRAJ_YLIM = (0.0, 1.95)
+TIME_WINDOW = (2.0, 6.0)
+PAPER_RC = {"figure.figsize": (20, 4.25), "font.size": 14}
 
 # Snapshot instants for the disc trails, in seconds relative to the moment the
 # robot is pushed furthest from its start (which coincides with the pinch).
@@ -226,7 +198,7 @@ def _arrow_along(ax, a, b, color, zorder=4):
         "",
         xy=mid + step,
         xytext=mid - step,
-        arrowprops=dict(arrowstyle="-|>", color=color, lw=0, mutation_scale=14),
+        arrowprops={"arrowstyle": "-|>", "color": color, "lw": 0, "mutation_scale": 14},
         zorder=zorder,
     )
 
@@ -254,29 +226,23 @@ class _HandlerArrow(HandlerPatch):
 def _traj_legend_handles():
     """Proxy handles (dashed arrow lines) for the robot/obstacle trajectories."""
     return [
-        FancyArrowPatch(
-            (0, 0), (1, 0), color=color, ls="--", lw=1.5, label=label
-        )
+        FancyArrowPatch((0, 0), (1, 0), color=color, ls="--", lw=1.5, label=label)
         for color, label in (("tab:blue", "robot"), ("tab:red", "obstacle"))
     ]
 
 
-def plot_trajectory(
-    ax, data: dict, scenario: Scenario, xlim=None, ylim=None, legend=True
-):
+def plot_trajectory(ax, data: dict, scenario: Scenario):
     t = data["time"]
     p = data["p"]
     p_obs = data["p_obs"]
 
     # Walls (room interior is down-left of the corner)
-    xlim = xlim if xlim is not None else (-3.0, 2.5)
-    ylim = ylim if ylim is not None else (-3.0, 2.5)
-    lim_lo = min(xlim[0], ylim[0])
-    lim_hi = max(xlim[1], ylim[1])
-    ax.plot([WALL_X, WALL_X], [lim_lo, WALL_Y], "k-", lw=2)
-    ax.plot([lim_lo, WALL_X], [WALL_Y, WALL_Y], "k-", lw=2)
-    ax.fill_betweenx([lim_lo, WALL_Y], WALL_X, lim_hi, color="0.85", zorder=0)
-    ax.fill_between([lim_lo, lim_hi], WALL_Y, lim_hi, color="0.85", zorder=0)
+    ax.plot([WALL_X, WALL_X], [TRAJ_YLIM[0], WALL_Y], "k-", lw=2)
+    ax.plot([TRAJ_XLIM[0], WALL_X], [WALL_Y, WALL_Y], "k-", lw=2)
+    ax.fill_betweenx(
+        [TRAJ_YLIM[0], WALL_Y], WALL_X, TRAJ_XLIM[1], color="0.85", zorder=0
+    )
+    ax.fill_between(TRAJ_XLIM, WALL_Y, TRAJ_YLIM[1], color="0.85", zorder=0)
 
     # Snapshot indices: last frame = robot's furthest excursion (the pinch),
     # earlier frames at fixed offsets so robot and obstacle discs are
@@ -290,23 +256,33 @@ def plot_trajectory(
 
     # Robot: path up to the pinch (the return leg retraces it), arrowhead
     # partway along the moving section.
-    ax.plot(p[: i_last + 1, 0], p[: i_last + 1, 1], color="tab:blue", lw=1.5,
-            ls="--", label="robot", zorder=3)
-    i_mid = snap_idx[1]
+    ax.plot(
+        p[: i_last + 1, 0],
+        p[: i_last + 1, 1],
+        color="tab:blue",
+        lw=1.5,
+        ls="--",
+        zorder=3,
+    )
+    i_mid = (snap_idx[1] + i_last) // 2
     if disp[i_last] > 0.05:
-        _arrow_along(ax, p[(i_mid + i_last) // 2 - 1], p[(i_mid + i_last) // 2 + 1],
-                     "tab:blue")
+        _arrow_along(ax, p[i_mid - 1], p[i_mid + 1], "tab:blue")
 
     # Obstacle: dashed path starting at the first plotted disc, arrowheads in
     # the gaps between discs pointing along the motion.
-    i0 = snap_idx[0]
-    ax.plot(p_obs[i0: snap_idx[-1] + 1, 0], p_obs[i0: snap_idx[-1] + 1, 1],
-            color="tab:red", lw=1.5, ls="--", label="obstacle", zorder=3)
+    i0, i1 = snap_idx[0], snap_idx[-1]
+    ax.plot(
+        p_obs[i0 : i1 + 1, 0],
+        p_obs[i0 : i1 + 1, 1],
+        color="tab:red",
+        lw=1.5,
+        ls="--",
+        zorder=3,
+    )
     for ia, ib in zip(snap_idx[:-1], snap_idx[1:]):
         _arrow_along(ax, p_obs[ia], p_obs[ib], "tab:red")
 
-    # Discs at the snapshot instants, fading in towards the pinch; robot discs
-    # sit above obstacle discs, trajectory lines (zorder 3+) above both
+    # Discs at the snapshot instants, fading in towards the pinch
     for i, alpha in zip(snap_idx, SNAP_ALPHAS):
         ax.add_patch(
             Circle(p_obs[i], OBS_RADIUS, color="tab:red", alpha=alpha, lw=0, zorder=1.8)
@@ -315,105 +291,31 @@ def plot_trajectory(
             Circle(p[i], ROBOT_RADIUS, color="tab:blue", alpha=alpha, lw=0, zorder=2)
         )
 
-    ax.set_xlim(*xlim)
-    ax.set_ylim(*ylim)
+    ax.set_xlim(*TRAJ_XLIM)
+    ax.set_ylim(*TRAJ_YLIM)
     ax.set_aspect("equal")
     ax.set_xlabel("x [m]")
     ax.set_ylabel("y [m]")
     ax.set_title(scenario.name)
-    if legend:
-        ax.legend(
-            handles=_traj_legend_handles(),
-            handler_map={FancyArrowPatch: _HandlerArrow()},
-            loc="lower left",
-            handlelength=1.4,
-            borderpad=0.3,
-            labelspacing=0.3,
-        )
-
-
-def plot_timeseries(fig, axes, data: dict, scenario: Scenario):
-    t = data["time"]
-    colors = CONSTRAINT_COLORS
-
-    ax = axes[0]
-    for i, name in enumerate(CONSTRAINT_NAMES):
-        ax.plot(t, data["margins"][:, i], color=colors[i], label=name)
-    ax.axhline(0.0, color="k", lw=0.8)
-    ax.set_ylabel("signed distance [m]")
-    ax.legend(fontsize=8, loc="upper right")
-
-    ax = axes[1]
-    for i, name in enumerate(CONSTRAINT_NAMES):
-        ax.plot(t, data["t_elastic"][:, i], color=colors[i], label=name)
-    ax.set_ylabel("elastic slack t")
-
-    ax = axes[2]
-    for i, name in enumerate(CONSTRAINT_NAMES):
-        ax.plot(t, data["z"][:, i], color=colors[i], label=name)
-    ax.set_ylabel("dual z")
-    ax.set_yscale("symlog", linthresh=1.0)
-
-    ax = axes[3]
-    ax.plot(t, data["u"][:, 0], color="tab:blue", label="$u_x$")
-    ax.plot(t, data["u"][:, 1], color="tab:cyan", label="$u_y$")
-    ax.plot(t, data["u_nom"][:, 0], color="tab:blue", ls=":", lw=1, label="$u_x$ nom")
-    ax.plot(t, data["u_nom"][:, 1], color="tab:cyan", ls=":", lw=1, label="$u_y$ nom")
-    ax.set_ylabel("control [m/s²]")
-    ax.set_xlabel("time [s]")
-    ax.legend(fontsize=8, loc="upper right", ncols=2)
-
-    for ax in axes:
-        ax.grid(alpha=0.3)
-    fig.suptitle(f"{scenario.name} — {scenario.description}", fontsize=10)
-
-
-PAPER_SCENARIOS = ["Walls hard, obstacle soft", "Obstacle hard, walls soft"]
-TRAJ_XLIM = (0.0, 1.85)
-TRAJ_YLIM = (0.0, 1.95)
-TIME_WINDOW = (2.0, 6.0)
-
-# Sized for ieeeconf: figure* spans \textwidth (~7.16 in), body text is 10 pt,
-# so 8 pt labels / 7 pt ticks match typical IEEE figure typography at 1:1 scale.
-# Include with \includegraphics[width=\textwidth] (no scaling) to keep fonts true.
-PAPER_RC = {
-    "figure.figsize": (20, 4.25),
-    "font.size": 14,
-    # "axes.labelsize": 10,
-    # "axes.titlesize": 10,
-    # "xtick.labelsize": 10,
-    # "ytick.labelsize": 10,
-    # "legend.fontsize": 6.5,
-    # "lines.linewidth": 1,
-    # "axes.linewidth": 0.6,
-    # "grid.linewidth": 0.4,
-}
 
 
 def plot_paper_figure(runs):
     """Full-page-width figure: [trajectory | duals/slacks] x two scenarios."""
-    selected = [(s, d) for s, d in runs if s.name in PAPER_SCENARIOS]
-    colors = CONSTRAINT_COLORS
-
     with plt.rc_context(PAPER_RC):
         fig = plt.figure()
         outer = fig.add_gridspec(1, 4, width_ratios=[1.0, 1.05, 1.0, 1.05], wspace=0.55)
 
-        for j, (scenario, data) in enumerate(selected):
+        for j, (scenario, data) in enumerate(runs):
             t = data["time"]
             mask = (t >= TIME_WINDOW[0]) & (t <= TIME_WINDOW[1])
 
             ax_traj = fig.add_subplot(outer[0, 2 * j])
-            plot_trajectory(
-                ax_traj, data, scenario, xlim=TRAJ_XLIM, ylim=TRAJ_YLIM, legend=False
-            )
+            plot_trajectory(ax_traj, data, scenario)
             # aspect="equal" leaves slack in the gridspec cell; push it away from
             # the dual/slack column so the ylabels don't collide
             ax_traj.set_anchor("W")
 
-            zt_hspace = (
-                0.15  # gap between z and t panels, as a fraction of panel height
-            )
+            zt_hspace = 0.15  # gap between z and t panels, fraction of panel height
             inner = outer[0, 2 * j + 1].subgridspec(2, 1, hspace=zt_hspace)
             ax_z = fig.add_subplot(inner[0])
             ax_t = fig.add_subplot(inner[1], sharex=ax_z)
@@ -429,51 +331,34 @@ def plot_paper_figure(runs):
                 [zp.x0, tp.y0 + panel_h * (1.0 + zt_hspace), zp.width, panel_h]
             )
 
-            for i, name in enumerate(CONSTRAINT_NAMES):
-                ax_z.plot(t[mask], data["z"][mask, i], color=colors[i])
-                ax_t.plot(
-                    t[mask], data["t_elastic"][mask, i], color=colors[i], label=name
-                )
+            for i, (name, color) in enumerate(zip(CONSTRAINT_NAMES, CONSTRAINT_COLORS)):
+                ax_z.plot(t[mask], data["z"][mask, i], color=color)
+                ax_t.plot(t[mask], data["t"][mask, i], color=color, label=name)
                 # Maximum attainable dual = the L1 penalty on that constraint
-                ax_z.axhline(scenario.penalty[i], color=colors[i], ls="--")  # , lw=0.8)
+                ax_z.axhline(scenario.penalty[i], color=color, ls="--")
 
-            rho_max = scenario.penalty.max()
             ax_z.set_yscale("log")
-            ax_z.minorticks_off()
-            ax_z.set_ylim(1e-1, 3.0 * rho_max)
+            ax_z.set_ylim(1e-1, 3.0 * scenario.penalty.max())
             ax_t.set_yscale("log")
             ax_t.set_ylim(1e-1, 10.0)
-            ax_t.minorticks_off()
-            # ax_z.annotate(
-            #     r"$z_{\max} = \rho$",
-            #     xy=(TIME_WINDOW[0], rho_max),
-            #     xytext=(2, -2),
-            #     textcoords="offset points",
-            #     va="top",
-            #     fontsize=7,
-            #     color="0.3",
-            # )
-
             ax_z.set_xlim(*TIME_WINDOW)
             ax_z.set_ylabel("dual $z$")
             ax_z.tick_params(labelbottom=False)
             ax_t.set_ylabel("elastic slack $t$")
             ax_t.set_xlabel("time [s]")
-            if j == 0:
-                # Unified legend: robot/obstacle trajectories + constraint colors
-                traj_h = _traj_legend_handles()
-                cons_h, cons_l = ax_t.get_legend_handles_labels()
-                legend_handles = traj_h + cons_h
-                legend_labels = [h.get_label() for h in traj_h] + cons_l
             for ax in (ax_z, ax_t):
+                ax.minorticks_off()
                 ax.grid(alpha=0.3)
 
+        # Unified legend: robot/obstacle trajectories + constraint colors
+        traj_h = _traj_legend_handles()
+        cons_h, cons_l = ax_t.get_legend_handles_labels()
         fig.legend(
-            legend_handles,
-            legend_labels,
+            traj_h + cons_h,
+            [h.get_label() for h in traj_h] + cons_l,
             handler_map={FancyArrowPatch: _HandlerArrow()},
             loc="lower center",
-            ncols=len(legend_handles),
+            ncols=len(traj_h) + len(cons_h),
             frameon=False,
             bbox_to_anchor=(0.5, -0.18),
         )
@@ -482,10 +367,8 @@ def plot_paper_figure(runs):
 
 
 def animate(runs):
-    """Side-by-side animation of all scenarios."""
+    """Side-by-side animation of the scenarios, over the paper-figure trails."""
     fig, axes = plt.subplots(1, len(runs), figsize=(5 * len(runs), 5))
-    if len(runs) == 1:
-        axes = [axes]
     artists = []
     for ax, (scenario, data) in zip(axes, runs):
         plot_trajectory(ax, data, scenario)
@@ -514,12 +397,7 @@ def animate(runs):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--animate", action="store_true", help="show an animation")
-    parser.add_argument(
-        "--detail",
-        action="store_true",
-        help="also show the per-scenario diagnostic plots",
-    )
+    parser.add_argument("--no-animate", action="store_true", help="skip the animation")
     parser.add_argument("--save", metavar="PATH", help="save the paper figure to PATH")
     args = parser.parse_args()
 
@@ -527,33 +405,19 @@ def main():
     for scenario in SCENARIOS:
         data = simulate(scenario)
         runs.append((scenario, data))
-        worst = data["margins"].min(axis=0)
         print(f"{scenario.name}:")
         print(f"  {scenario.description}")
-        for name, w in zip(CONSTRAINT_NAMES, worst):
+        for name, w in zip(CONSTRAINT_NAMES, data["margins"].min(axis=0)):
             status = "violated" if w < 0 else "held"
             print(f"  {name:9s}: worst margin {w:+.3f} m ({status})")
         print(f"  mean solver iters: {data['iters'].mean():.1f}")
 
-    paper_fig = plot_paper_figure(runs)
+    fig = plot_paper_figure(runs)
     if args.save:
-        paper_fig.savefig(args.save, bbox_inches="tight", dpi=300)
+        fig.savefig(args.save, bbox_inches="tight", dpi=300)
         print(f"Saved paper figure to {args.save}")
 
-    if args.detail:
-        # Trajectories side by side
-        fig, axes = plt.subplots(1, len(runs), figsize=(5 * len(runs), 5))
-        for ax, (scenario, data) in zip(np.atleast_1d(axes), runs):
-            plot_trajectory(ax, data, scenario)
-        fig.tight_layout()
-
-        # Time series per scenario
-        for scenario, data in runs:
-            fig, axes = plt.subplots(4, 1, figsize=(8, 9), sharex=True)
-            plot_timeseries(fig, axes, data, scenario)
-            fig.tight_layout()
-
-    anim = animate(runs) if args.animate else None  # noqa: F841 (keep alive)
+    anim = animate(runs) if not args.no_animate else None  # noqa: F841 (keep alive)
     plt.show()
 
 
