@@ -205,8 +205,8 @@ void def_common(nb::class_<SolverT>& cls) {
       .def("p", [](const SolverT& s) { return static_cast<int>(s.p()); })
       .def("solve", [](SolverT& s) -> Solution { return s.solve(); })
       .def("eq_infeasibility", &SolverT::eq_infeasibility,
-           "certified lower bound on the reachable ||Ax - b|| "
-           "(0 when consistent or unchecked)");
+           "Certified lower bound on ||Ax - b|| (0 when consistent or "
+           "unchecked)");
   def_update(cls);
 }
 
@@ -219,20 +219,17 @@ void def_relax(nb::class_<SolverT>& cls, int default_max_iter) {
       },
       nb::arg("kappa"), nb::arg("tol") = 1e-6,
       nb::arg("max_iter") = default_max_iter,
-      "Walk the converged solution to the kappa-relaxed central point "
-      "(s.z = kappa) for smooth differentiation. Call after solve(); the "
-      "returned Solution is the relaxed point.");
+      "Move the solve() result to the kappa-relaxed point (s.z = kappa) "
+      "for differentiation.");
 }
 
 }  // namespace
 
 NB_MODULE(_core, m) {
   m.doc() =
-      "ElastiQP: an elastic QP solver with per-constraint L1 slack "
-      "relaxation and hard equality constraints. Three backends, each a "
-      "submodule with its own Settings and Solver mirroring the C++ "
-      "namespaces: das (dual active set, the default), pdal (primal-dual "
-      "augmented Lagrangian) and ipm (interior point).";
+      "ElastiQP: elastic QP solver with L1 slack relaxation and hard "
+      "equalities. Backends das (default), pdal and ipm are submodules, "
+      "each with its own Settings and Solver.";
   auto das = m.def_submodule("das", "Dual active-set backend (default)");
   auto pdal = m.def_submodule("pdal", "Primal-dual augmented Lagrangian backend");
   auto ipm = m.def_submodule("ipm", "Proximal interior-point backend");
@@ -247,26 +244,25 @@ NB_MODULE(_core, m) {
   nb::class_<Solution>(m, "Solution")
       .def_prop_ro("x", [](const Solution& s) { return s.x; })
       .def_prop_ro("t", [](const Solution& s) { return s.t; },
-                   "elastic slacks (per-row constraint violations)")
+                   "Elastic slacks, max(G x - h, 0)")
       .def_prop_ro("y", [](const Solution& s) { return s.y; },
-                   "equality duals (empty without A, b)")
+                   "Equality duals (empty without A, b)")
       .def_prop_ro("z", [](const Solution& s) { return s.z; },
-                   "inequality duals of G x - t <= h, in [0, penalty]")
+                   "Inequality duals, in [0, penalty]")
       .def_prop_ro("z_t", [](const Solution& s) { return s.z_t; },
-                   "duals of t >= 0 (= penalty - z at a solution; differs "
-                   "only at a relax() point)")
+                   "Duals of t >= 0; equals penalty - z except at a relax() "
+                   "point")
       .def_ro("status", &Solution::status)
       .def_ro("converged", &Solution::converged,
               "1 iff status == Status.Solved")
       .def_ro("iters", &Solution::iters,
-              "backend's inner iterations: semismooth Newton steps (PDAL), "
-              "interior-point iterations (IPM), working-set changes (DAS)")
+              "Inner iterations")
       .def_ro("outer_iters", &Solution::outer_iters,
-              "BCL rounds (PDAL), proximal-point rounds (AS), 0 (IPM)")
+              "BCL rounds (pdal), proximal rounds (das), 0 (ipm)")
       .def_ro("n_active", &Solution::n_active,
-              "inequality rows with 0 < z < penalty")
+              "Inequality rows with 0 < z < penalty")
       .def_ro("n_saturated", &Solution::n_saturated,
-              "inequality rows at z = penalty (violated, t > 0)")
+              "Inequality rows at z = penalty (violated)")
       .def_ro("primal_obj", &Solution::primal_obj)
       .def_ro("primal_res", &Solution::primal_res)
       .def_ro("dual_res", &Solution::dual_res)
@@ -308,28 +304,24 @@ NB_MODULE(_core, m) {
                               "Dual active-set backend (default)");
     def_common(cls);
     cls.def("row_state", &Sv::row_state, nb::arg("i"),
-            "three-state classification of inequality row i")
+            "RowState of inequality row i")
         .def("proximal", &Sv::proximal,
-             "True if Q was shifted (proximal-point outer loop active)")
-        .def("prox_eps", &Sv::prox_eps, "proximal shift added to Q (0 if none)")
+             "True if Q is proximally shifted")
+        .def("prox_eps", &Sv::prox_eps, "Proximal shift added to Q (0 if none)")
         .def("scaling_drift", &Sv::scaling_drift,
-             "largest factor a scaled column/row max-norm is off from 1")
+             "Largest factor a scaled row/column max-norm has drifted from 1")
         .def("rescaled", &Sv::rescaled,
-             "Ruiz factors were recomputed during the last solve()")
+             "True if the last solve() recomputed the Ruiz scaling")
         .def("rows_updated", &Sv::rows_updated,
-             "rows of [A; G] re-solved against R in the last solve()")
+             "Rows of [A; G] re-solved against R in the last solve()")
         .def("refactored", &Sv::refactored,
-             "the Cholesky of Q was recomputed in the last solve()")
+             "True if the last solve() refactored Q")
         .def("refactors", &Sv::refactors,
-             "cycle-guard / pivot working-set refactorizations in the last solve()")
+             "Working-set refactorizations in the last solve()")
         .def("set_warm_start", &Sv::set_warm_start, nb::arg("x"), nb::arg("y"),
              nb::arg("z"),
-             "Seed the next solve() from a user-frame point (x, y, z), e.g. "
-             "a previous Solution of a nearby problem: the working set is "
-             "read off z (0 inactive, (0, penalty) active, penalty "
-             "saturated), y seeds the equality multipliers and x the "
-             "proximal center. Takes effect once, for the next solve() "
-             "only; the working-set LDL' is rebuilt.");
+             "Seed the next solve() from a user-frame (x, y, z); the working "
+             "set is read off z.");
   }
 
   // --- PDAL ----------------------------------------------------------------
@@ -381,34 +373,26 @@ NB_MODULE(_core, m) {
                               "Primal-dual augmented Lagrangian backend");
     def_common(cls);
     cls.def("solution", [](const Sv& s) -> Solution { return s.solution(); },
-            "the last solve() / relax() certificate")
+            "Result of the last solve() or relax()")
         .def("factorizations", &Sv::factorizations,
-            "KKT factorizations performed by the last solve()")
+             "KKT factorizations in the last solve()")
         .def("cold_resets", &Sv::cold_resets,
-             "BCL cold resets performed by the last solve()")
+             "BCL cold resets in the last solve()")
         .def("reequilibrate", &Sv::reequilibrate,
-             "Recompute the Ruiz scaling for the current matrices and "
-             "rescale the warm-start state in place (no-op with ruiz "
-             "off). solve() does this automatically when the drift "
-             "exceeds settings.ruiz_refresh_ratio.")
+             "Recompute the Ruiz scaling in place; solve() does this when "
+             "drift exceeds settings.ruiz_refresh_ratio")
         .def("scaling_drift", &Sv::scaling_drift,
-             "Largest factor by which a scaled column/row max-norm has "
-             "drifted from 1 since the last equilibration (1 = none)")
+             "Largest factor a scaled row/column max-norm has drifted from 1")
         .def(
             "relax",
             [](Sv& s, double kappa, double tol, int max_iter, bool warm)
                 -> Solution { return s.relax(kappa, tol, max_iter, warm); },
             nb::arg("kappa"), nb::arg("tol") = 1e-6, nb::arg("max_iter") = 50,
             nb::arg("warm") = true,
-            "Walk the converged solution to the kappa-relaxed central "
-            "point (s.z = kappa) for smooth differentiation, via the "
-            "log-barrier retraction. Call after solve(); the returned "
-            "Solution is the relaxed point, while the solver's own "
-            "iterate (used for warm starts) stays at the tight solution. "
-            "With warm=True (default), repeated calls on a persistent "
-            "solver continue from the previous relaxed point, falling "
-            "back to the retraction start automatically if the warm run "
-            "does not converge.")
+            "Move the solve() result to the kappa-relaxed point (s.z = kappa) "
+            "for differentiation; the solver's own iterate stays tight. With "
+            "warm=True, repeated calls continue from the previous relaxed "
+            "point.")
         .def(
             "set_warm_start",
             [](Sv& s, const Eigen::VectorXd& x, const Eigen::VectorXd& y,
@@ -417,8 +401,8 @@ NB_MODULE(_core, m) {
             nb::arg("x"), nb::arg("y"), nb::arg("z"), nb::kw_only(),
             nb::arg("rho") = 0.0, nb::arg("mu_eq") = 0.0,
             nb::arg("mu_in") = 0.0,
-            "Seed the next solve() with an explicit iterate (x, y, z). Pass "
-            "y=zeros(0) without equalities.");
+            "Seed the next solve() from a user-frame (x, y, z); y is empty "
+            "without equalities.");
   }
 
   // --- interior point ------------------------------------------------------
@@ -453,12 +437,11 @@ NB_MODULE(_core, m) {
         .def_rw("ruiz_tol", &S::ruiz_tol);
 
     using Sv = elastiqp::ipm::Solver;
-    auto cls = nb::class_<Sv>(ipm, "Solver",
-                              "Proximal interior-point backend (PIQP-style)");
+    auto cls = nb::class_<Sv>(ipm, "Solver", "Proximal interior-point backend");
     def_common(cls);
     def_relax(cls, 30);
     cls.def("solution", [](const Sv& s) -> Solution { return s.solution(); },
-            "the last solve() / relax() certificate")
+            "Result of the last solve() or relax()")
         .def(
            "set_warm_start",
            [](Sv& s, const Eigen::VectorXd& x, const Eigen::VectorXd& t,
@@ -470,20 +453,19 @@ NB_MODULE(_core, m) {
            nb::arg("x"), nb::arg("t"), nb::arg("y"), nb::arg("s_t"),
            nb::arg("s_ineq"), nb::arg("z_t"), nb::arg("z"), nb::kw_only(),
            nb::arg("rho") = 0.0, nb::arg("delta") = 0.0,
-           "Seed the next solve() with an explicit interior iterate, used "
-           "exactly as given (slacks and duals must be strictly positive).")
+           "Seed the next solve() with a strictly interior iterate, used as "
+           "given.")
         .def("warm_start_from",
              [](Sv& s, const Solution& sol) { s.warm_start_from(sol); },
              nb::arg("solution"),
-             "Seed the next solve() from any backend's Solution, applying "
-             "the interior-point boundary floor.")
+             "Seed the next solve() from a Solution; slacks are rebuilt and "
+             "floored off the boundary.")
         .def("warm_start_from",
              [](Sv& s, const Eigen::VectorXd& x, const Eigen::VectorXd& y,
                 const Eigen::VectorXd& z) { s.warm_start_from(x, y, z); },
              nb::arg("x"), nb::arg("y"), nb::arg("z"),
-             "Seed the next solve() from an elastic point (x, y, z) of any "
-             "backend; the slacks are reconstructed and floored off the "
-             "boundary.");
+             "Seed the next solve() from a user-frame (x, y, z); slacks are "
+             "rebuilt and floored off the boundary.");
   }
 
   // --- one-shot solve ------------------------------------------------------
@@ -525,17 +507,12 @@ NB_MODULE(_core, m) {
   };
 
   const char* solve_doc =
-      "Solve the elastic QP  min 0.5 x'Qx + q'x + penalty't  s.t. "
-      "A x == b (hard, optional), G x - t <= h, t >= 0 (elastic).\n\n"
-      "method selects the backend: 'das' (dual active set, default), 'pdal' "
-      "(primal-dual augmented Lagrangian) or 'ipm' (interior point). "
-      "eps_abs / max_iter / ruiz override the backend's defaults when "
-      "given (max_iter counts BCL rounds for pdal, interior-point "
-      "iterations for ipm, active-set iterations for das); settings= "
-      "passes a full das.Settings / pdal.Settings / ipm.Settings object.\n\n"
-      "For differentiation, use pdal.Solver or ipm.Solver and relax(kappa) "
-      "for the smoothed differentiation point.\n\n"
-      "Returns a Solution (see help(elastiqp.Solution) for the fields).";
+      "Solve  min 0.5 x'Qx + q'x + penalty't  s.t.  A x = b, "
+      "G x - t <= h, t >= 0.\n\n"
+      "method: 'das' (default), 'pdal' or 'ipm'. eps_abs, max_iter (outer "
+      "budget) and ruiz override the backend defaults; settings= passes a "
+      "full Settings object for that method.\n\n"
+      "For gradients use pdal.Solver or ipm.Solver with relax().";
 
   m.def(
       "solve",
