@@ -1,27 +1,3 @@
-// ElastiQP-PDAL: a primal-dual augmented Lagrangian method for the elastic QP
-//
-//   minimize    0.5 x^T Q x + q^T x + penalty^T t
-//   subject to  A x == b          (hard, dual y)
-//               G x - t <= h      (soft, slack s_ineq, dual z)
-//               t >= 0            (slack s_t, dual z_t)
-//
-// Every inequality row is L1-elastic, so the problem is feasible iff
-// Ax = b is consistent. The slacks are eliminated analytically: each
-// multiplier lives in [0, penalty], and proxsuite's active-set test on the
-// unclamped multiplier estimate gains a third state,
-//
-//   z~_i = z_prev_i + (G_i x - h_i) / mu_in
-//   inactive    z~ < 0                 row out, dual = 0
-//   active      0 <= z~ < penalty      identical to hard ProxQP
-//   saturated   z~ >= penalty          row out, dual = penalty
-//
-// The method is proxsuite's dense PDAL (BCL outer loop, semismooth Newton
-// with exact line search) condensed onto the n x n SPD system
-//   K = Q + rho I + (1/mu_eq) A^T A + (1/mu_in) G_act^T G_act,
-// whose factorization is cached across iterations and solve() calls.
-// Elastic BCL changes: docs/elastic_bcl.md. Differentiation via relax():
-// docs/pdal_differentiability.md.
-
 #pragma once
 
 #include <Eigen/Cholesky>
@@ -37,9 +13,7 @@
 namespace elastiqp::pdal {
 
 struct Settings {
-  // Termination criteria
-  // Note: recommend leaving check_duality_gap=true for ensuring
-  // complementarity holds for the elastic problem
+  // Convergence.
   double eps_abs = 1e-5;
   double eps_rel = 0;
   bool check_duality_gap = true;
@@ -47,27 +21,19 @@ struct Settings {
   double eps_duality_gap_rel = 0;
   int max_factor_retries = 10;
 
-  // Incremental factorization updates on active set changes
-  // rather than a full refactorization.
+  // Factorization reuse via rank-one updates on active-set flips.
   bool incremental_updates = true;
-  // Cap on incremental updates between refactorizations
   int incremental_update_budget = 256;
-  // Number of active set changes allowable for incremental updates
-  // More than this = just refactorize anyways. 0 means "auto" (=n/3)
-  int incremental_update_max_flips = 0;
+  int incremental_update_max_flips = 0;  // 0: use n/3.
 
-  // Check if equalities are inconsistent (the only infeasibility case).
-  // Runs when A/b data is set; only applies if eps_rel = 0
   bool check_eq_consistency = true;
-
-  // Warm-start from a previous solution + cached factorization
   bool warm_start = true;
 
-  // Iteration budget
-  int max_outer_iter = 250;  // BCL rounds
-  int max_iter_in = 1500;  // semismooth Newton steps
+  // Outer (BCL) / inner (Newton) iteration limits.
+  int max_outer_iter = 250;
+  int max_iter_in = 1500;
 
-  // Proximal regularization and AL penalties (proxsuite defaults)
+  // Proximal and penalty parameters.
   double rho = 1e-6;
   double mu_eq_init = 1e-3;
   double mu_in_init = 1e-1;
@@ -75,54 +41,30 @@ struct Settings {
   double mu_min_in = 1e-8;
   double mu_update_factor = 0.1;
 
-  // BCL outer-loop schedule (proxsuite defaults)
+  // BCL tolerance schedule and elastic penalty-update rules; see paper.
   double alpha_bcl = 0.1;
   double beta_bcl = 0.9;
-
-  // ElastiQP BCL strategy (modified from proxsuite)
-  // On a BCL bad step, revert the equality duals (only if their residual
-  // is at fault); never revert the inequality duals
   bool bcl_split = true;
-  // Saturation jump: on a stalled bad step, drop mu to the shallowest
-  // saturation point among the stalled inequality rows
   bool bcl_saturation_jump = true;
-  // Release jump: mirror for gap stalls, drop mu so the oversized dual on
-  // the shallowest satisfied row releases to 0
   bool bcl_release_jump = true;
-  // Fire the release jump when the gap's geometric decay would still need more
-  // than this many rounds to pass the gap tolerance
   int bcl_release_jump_horizon = 4;
-  // Warm-start eta seeding
   bool bcl_warm_eta = true;
 
-  // Cold restart of over-tightened mu (proxsuite logic, mainly)
-  // Disabled by default for ElastiQP (reset limit 0)
   double cold_reset_mu = 1.0 / 1.1;
   double cold_reset_threshold = 1e-5;
   double cold_reset_residual = 1e-5;
-  int cold_reset_limit = 0;
-  int safe_guard = 10000;  // total-Newton-iteration escape for BCL
+  int cold_reset_limit = 0;  // 0: disabled.
+  int safe_guard = 10000;
 
-  // Ruiz equilibration (at problem setup)
+  // Ruiz equilibration; refresh when scaling drifts by this ratio (0: never).
   bool ruiz = false;
   int ruiz_max_iter = 10;
   double ruiz_tol = 1e-3;
-  // Automatic re-equilibration: the scaling computed at setup() is kept by
-  // the set_* updates (it stays exact, only the conditioning drifts). When a
-  // matrix update leaves some column/row max-norm of the scaled (Q, A, G)
-  // more than this factor away from 1, solve() re-equilibrates first (see
-  // reequilibrate(); the refactorization is already forced by the update).
-  // 0 = never (manual reequilibrate() only).
   double ruiz_refresh_ratio = 4.0;
 
-  // Regularization added to the relax() Newton system
+  // relax(): regularization and warm-start policy (flip_tol < 0: always warm).
   double relax_reg = 1e-9;
-
-  // relax() / backward-pass warm-starting
-  // Attempts for warm-starting relax() before restarting from the tight sol
   int relax_warm_budget = 15;
-  // Skip warm relax() if more than these rows flip sides of the s.z = kappa
-  // hyperbola between solves. Set negative to disable
   int relax_warm_flip_tol = 0;
 };
 
@@ -130,17 +72,16 @@ class Solver {
  public:
   Settings settings;
 
-  // Inequality row classification on the unclamped estimate z~ (see header)
+  // Inner-loop row classification by the unclamped dual estimate ztilde.
   enum class RowState : unsigned char { kInactive, kActive, kSaturated };
 
   void setup(const MatrixXd& Q, const VectorXd& q, const MatrixXd& A,
              const VectorXd& b, const MatrixXd& G, const VectorXd& h,
              const VectorXd& penalty) {
-    // Dimensions and problem data
     n_ = q.size();
     m_ = b.size();
     p_ = h.size();
-    Q_ = 0.5 * (Q + Q.transpose());  // symmetrize
+    Q_ = 0.5 * (Q + Q.transpose());
     q_ = q;
     A_ = A;
     b_ = b;
@@ -148,7 +89,6 @@ class Solver {
     h_ = h;
     penalty_ = penalty;
 
-    // Reset warm-start, factorization-cache, and proximal state
     have_warm_ = false;
     relax_have_warm_ = false;
     explicit_warm_ = false;
@@ -158,7 +98,6 @@ class Solver {
     mu_eq_ = 0.0;
     mu_in_ = 0.0;
 
-    // Iterates and prox centers
     x_.resize(n_);
     y_.resize(m_);
     z_.resize(p_);
@@ -166,7 +105,6 @@ class Solver {
     yk_.resize(m_);
     zk_.resize(p_);
 
-    // solve() workspace, preallocated
     ztilde_.resize(p_);
     t_.resize(p_);
     s2_.resize(p_);
@@ -190,13 +128,11 @@ class Solver {
     wAx_.resize(m_);
     wGx_.resize(p_);
 
-    // Active-set state and line-search breakpoint buffer
     state_.assign(static_cast<size_t>(p_), RowState::kInactive);
     f_active_.assign(static_cast<size_t>(p_), false);
     bp_.clear();
     bp_.reserve(static_cast<size_t>(2 * p_));
 
-    // Condensed KKT staging and its factorization
     GS_.resize(p_, n_);
     K_.resize(n_, n_);
     llt_ = Eigen::LLT<MatrixXd, Eigen::Lower>(n_);
@@ -204,13 +140,11 @@ class Solver {
     upd_vec_.resize(n_);
     updates_since_factor_ = 0;
 
-    relax_ready_ = false;  // relax() workspace is allocated on first use
+    relax_ready_ = false;
 
-    // Equality-consistency certificate, on the still-unscaled (A_, b_)
     check_eq_A(A_);
     check_eq_b(b_);
 
-    // Scaling state (identity unless Ruiz runs) and the A^T A cache
     ruiz_ = settings.ruiz && p_ > 0;
     dxw_.resize(n_);
     dew_.resize(m_);
@@ -230,7 +164,6 @@ class Solver {
     setup(Q, q, A, b, G, h, VectorXd::Constant(h.size(), penalty));
   }
 
-  // Inequality-only overloads (no equality constraints).
   void setup(const MatrixXd& Q, const VectorXd& q, const MatrixXd& G,
              const VectorXd& h, const VectorXd& penalty) {
     setup(Q, q, MatrixXd(0, q.size()), VectorXd(0), G, h, penalty);
@@ -241,13 +174,12 @@ class Solver {
     setup(Q, q, G, h, VectorXd::Constant(h.size(), penalty));
   }
 
-  // Problem dimensions
   Eigen::Index n() const { return n_; }
   Eigen::Index m() const { return m_; }
   Eigen::Index p() const { return p_; }
 
-  // Data updates between solves
-  // Vector-only updates keep the cached factorization
+  // Setters store data in the current Ruiz frame; matrix changes invalidate
+  // the factorization.
   void set_Q(const MatrixXd& Q) {
     Q_ = 0.5 * (Q + Q.transpose());
     if (ruiz_) Q_ = c_s_ * dx_s_.asDiagonal() * Q_ * dx_s_.asDiagonal();
@@ -278,25 +210,15 @@ class Solver {
     penalty_ = ruiz_ ? VectorXd(c_s_ * penalty.cwiseQuotient(di_s_)) : penalty;
   }
 
-  // Recompute the Ruiz scaling for the current (Q, A, G) and rescale the
-  // stored data and every warm-start iterate in place. A setup() would do
-  // the same but discards the warm start (and redoes allocations, the A'A
-  // cache, and the equality-consistency check). No-op when Ruiz is off, or
-  // the data is still equilibrated. solve() calls this automatically when
-  // the drift exceeds settings.ruiz_refresh_ratio.
+  // Recompute the Ruiz scaling from the user frame and carry the warm-start
+  // iterates across.
   void reequilibrate() {
     if (!ruiz_) return;
     if (scaling_pass(dxw_, dew_, diw_) <= settings.ruiz_tol) return;
     const VectorXd dx0 = dx_s_, de0 = de_s_, di0 = di_s_;
     const double c0 = c_s_;
-    // Undo the current scaling and equilibrate from identity, exactly as
-    // setup() would. Continuing incrementally from the scaled data is NOT
-    // equivalent: the max-norm fixed point of the constraint blocks is only
-    // determined up to (E, D) -> (a E, D / a), and only Q pins the split. A
-    // row that grew dominates its columns and pushes half its scale into
-    // dx; when it shrinks back other rows dominate and nothing pushes it
-    // out, so repeated refreshes leak the row scale into the column factors
-    // without bound (scaled Q -> 0, tests/test_ruiz.cc).
+    // Undo the current scaling, then rescale from scratch. Refreshing
+    // incrementally leaks row scale into the column factors (test_ruiz.cc).
     const VectorXd ix = dx0.cwiseInverse(), ie = de0.cwiseInverse(),
                    ii = di0.cwiseInverse();
     Q_ = (ix.asDiagonal() * Q_ * ix.asDiagonal()) / c0;
@@ -313,8 +235,7 @@ class Solver {
     di_s_.setOnes();
     c_s_ = 1.0;
     equilibrate();
-    // Old scaled frame -> new scaled frame. Primal x scales like 1/dx,
-    // t (and s) like di, duals like c/de and c/di.
+    // Map iterates by the ratio of new to old scaling.
     const VectorXd dx = dx_s_.cwiseQuotient(dx0);
     const VectorXd de = de_s_.cwiseQuotient(de0);
     const VectorXd di = di_s_.cwiseQuotient(di0);
@@ -329,7 +250,6 @@ class Solver {
     }
     z_ = z_.cwiseProduct(zf);
     zk_ = zk_.cwiseProduct(zf);
-    // relax() warm iterate: (z, s) pairs live in v = z - s with z.s = kappa_s
     if (relax_have_warm_) {
       xr_ = xr_.cwiseQuotient(dx);
       if (m_ > 0) yr_ = yr_.cwiseProduct(yf);
@@ -347,17 +267,14 @@ class Solver {
     matrix_dirty_ = true;
   }
 
-  // How far the scaled (Q, A, G) has drifted from equilibrated: the largest
-  // factor by which any column/row max-norm is off from 1 (1 = still
-  // equilibrated, also when Ruiz is off).
+  // Largest rescale a fresh Ruiz pass would apply (1 = still balanced).
   double scaling_drift() const {
     if (!ruiz_) return 1.0;
     scaling_pass(dxw_, dew_, diw_);
     return ruiz_drift(diw_, ruiz_drift(dew_, ruiz_drift(dxw_)));
   }
 
-  // Explicitly set the warm-start for the next solve
-  // Set rho/mu <= 0 to use the default settings
+  // Seed the next solve from user-frame (x, y, z); 0 keeps the default rho/mu.
   void set_warm_start(const VectorXd& x, const VectorXd& y,
                       const VectorXd& z, double rho = 0.0,
                       double mu_eq = 0.0, double mu_in = 0.0) {
@@ -371,15 +288,10 @@ class Solver {
   }
 
   const Solution& solution() const { return sol_; }
-
-  // Number of KKT factorizations performed by the last solve()
   int factorizations() const { return factor_count_; }
-
-  // Number of BCL cold resets performed by the last solve()
   int cold_resets() const { return cold_resets_; }
 
-  // Lower bound on the reachable equality residual (0 if consistent or the
-  // check is disabled)
+  // Certified lower bound on ||Ax - b|| (0 when consistent or unchecked).
   double eq_infeasibility() const { return eq_infeas_lb_; }
 
   const Solution& solve() {
@@ -391,14 +303,12 @@ class Solver {
     factor_retries_ = 0;
     cold_resets_ = 0;
 
-    // A matrix update may have drifted the Ruiz scaling; the refactorization
-    // it forces makes this the cheap moment to refresh
     if (ruiz_ && matrix_dirty_ && settings.ruiz_refresh_ratio > 0 &&
         scaling_drift() > settings.ruiz_refresh_ratio) {
       reequilibrate();
     }
 
-    // Inconsistent equalities: eps_abs is unreachable, report and exit
+    // Inconsistent equalities: report the certificate instead of iterating.
     if (settings.check_eq_consistency && settings.eps_rel <= 0 &&
         eq_infeas_lb_ > settings.eps_abs) {
       if (!have_warm_ && !explicit_ws) {
@@ -422,8 +332,7 @@ class Solver {
     if (explicit_ws) {
       clamp_z();
     } else if (settings.warm_start && have_warm_) {
-      // Keep (x, y, z) and the cached factorization, reset AL penalties
-      // z is re-clamped in case the penalty changed
+      // Warm start keeps (x, y, z) but restarts the penalty schedule.
       mu_eq_ = settings.mu_eq_init;
       mu_in_ = settings.mu_in_init;
       rho_ = settings.rho;
@@ -436,23 +345,19 @@ class Solver {
       }
     }
 
-    // BCL state (proxsuite defaults)
     eta_ext_ = eta_ext_init();
     eta_in_ = 1.0;
 
-    // Initial termination check
     update_residuals();
     if (converged()) return finish(Status::kSolved);
 
-    // If warm-starting, start eta_ext around the current residual level
-    // But, only do so if it results in a 10x skip. Smaller skips might lead
-    // to a bad step / mu-shrink that makes it no longer worth it
+    // Warm start: begin with a tolerance below the current residual so the
+    // first outer step makes progress.
     const double eta_warm = 0.5 * primal_res_;
     if (warm_path && settings.bcl_warm_eta && eta_warm < 0.1 * eta_ext_) {
       eta_ext_ = eta_warm;
     }
 
-    // Store initial residuals to track slow convergence across outer rounds
     const bool track_jump_res =
         settings.bcl_split && settings.bcl_saturation_jump;
     if (track_jump_res) {
@@ -460,45 +365,39 @@ class Solver {
     }
     double gap_prev = duality_gap_;
 
-    // Outer loop (PMM + BCL)
+    // Outer loop: proximal ALM with BCL updates. Inner solves at fixed
+    // (xk, yk, zk, mu).
     for (int oiter = 0; oiter < settings.max_outer_iter; ++oiter) {
       outer_iters_ = oiter + 1;
       const double pri_old = primal_res_;
       const double dua_old = dual_res_;
 
-      // PMM: center the proximal terms on the current iterate and refresh
-      // the unclamped multiplier estimate for the new center
       xk_ = x_;
       if (m_ > 0) yk_ = y_;
       zk_ = z_;
       wGx_.noalias() = G_ * x_;
       ztilde_ = zk_ + (wGx_ - h_) / mu_in_;
 
-      // PMM: newton solve for subproblem
       if (!inner_loop(eta_in_)) {
         return finish(Status::kNumerics);
       }
 
-      // Termination check after newton solve
       update_residuals();
       if (converged()) return finish(Status::kSolved);
 
       const double pri_new = primal_res_;
       const double dua_new = dual_res_;
 
-      // Store residuals for convergence tracking for this round
       if (track_jump_res) {
         jump_res_cur_ = (r_ - t_).cwiseProduct(inv_di_);
       }
 
-      // BCL: accept the step and tighten tolerances, or shrink mu on a bad step
       if (pri_new <= eta_ext_ || iters_total_ > settings.safe_guard) {
+        // Primal progress: tighten tolerances, keep mu.
         eta_ext_ *= std::pow(mu_in_, settings.beta_bcl);
         eta_in_ = std::max(eta_in_ * mu_in_, eps_in_min());
-        // Release jump: residuals pass but the gap stalls because oversized
-        // duals on satisfied rows must come down, and every round counts as
-        // good so mu never shrinks (docs/elastic_bcl.md). Jump one factor
-        // past the shallowest such row so its dual snaps to 0 next step
+        // Residuals met but gap decaying too slowly: jump mu below the
+        // shallowest releasing row.
         if (settings.bcl_release_jump && residuals_ok() &&
             settings.check_duality_gap && !gap_ok() &&
             gap_decay_too_slow(gap_prev)) {
@@ -510,11 +409,11 @@ class Solver {
           shrink_mu(mu_new);
         }
       } else if (settings.bcl_split) {
-        // Bad step (elastic): revert y only if the equalities are at fault,
-        // never z; saturation jump: drop mu just far enough to saturate one
-        // stalled row
+        // Stalled: shrink mu; revert y only if the equalities stalled, never z.
         if (m_ > 0 && eq_res_ > eta_ext_) y_ = yk_;
         double mu_new = mu_in_ * settings.mu_update_factor;
+        // Rows stuck short of saturation: jump mu to where the shallowest one
+        // saturates.
         if (settings.bcl_saturation_jump && in_res_ > eta_ext_ &&
             pri_new > 0.8 * pri_old) {
           const double shallowest = saturation_jump_mu();
@@ -522,19 +421,17 @@ class Solver {
         }
         shrink_mu(mu_new);
       } else {
-        // Bad step (proxqp): revert both duals, shrink both mu
+        // Classic BCL: revert both multipliers.
         if (m_ > 0) y_ = yk_;
         z_ = zk_;
         set_mu(mu_in_ * settings.mu_update_factor,
                mu_eq_ * settings.mu_update_factor);
       }
 
-      // Keep track of residuals for the next round
       if (track_jump_res) jump_res_prev_.swap(jump_res_cur_);
       gap_prev = duality_gap_;
 
-      // Cold restart of stalled, over-tightened penalties
-      // Proxqp has this on, we keep this normally off (limit=0)
+      // Cold reset (off by default).
       if (pri_new >= pri_old && dua_new >= dua_old &&
           mu_in_ <= settings.cold_reset_threshold &&
           std::max(pri_new, dua_new) > settings.cold_reset_residual &&
@@ -548,21 +445,18 @@ class Solver {
     return finish(Status::kMaxIter);
   }
 
-  // Backward pass: walk the tight solution to a kappa-relaxed central point
-  // for smooth implicit differentiation (docs/pdal_differentiability.md).
-  // The returned Solution is at the relaxed point
+  // Re-solve the KKT system with complementarity smoothed at barrier kappa
+  // (differentiable); see paper.
   const Solution& relax(double kappa, double tol = 1e-6, int max_iter = 50,
                         bool warm = true) {
     if (p_ == 0 || kappa <= 0.0 || (!have_warm_ && !relax_have_warm_)) {
       return sol_;
     }
     if (!relax_ready_) relax_alloc();
-    // Ruiz-scaled kappa (the di factors cancel)
     const double kappa_s = c_s_ * kappa;
 
-    // Warm-start from the previous relaxed iterate, unless too many rows are
-    // predicted to flip sides of the s.z = kappa hyperbola (the prediction
-    // needs a tight solve to compare against)
+    // Reuse the last relax point only if few retraction sign flips are
+    // predicted.
     bool use_warm = warm && relax_have_warm_;
     if (use_warm && have_warm_ && settings.relax_warm_flip_tol >= 0) {
       use_warm = relax_predict_flips(kappa_s) <= settings.relax_warm_flip_tol;
@@ -570,7 +464,8 @@ class Solver {
 
     if (use_warm) {
       relax_run(kappa_s, tol, std::min(max_iter, settings.relax_warm_budget));
-      // Stalled warm attempt: retry from the tight solution
+      // Warm attempt failed within budget: fall back to a cold start from
+      // solve().
       if (sol_.converged != 1 && have_warm_) {
         const int warm_iters = sol_.iters;
         relax_init_retraction();
@@ -578,7 +473,7 @@ class Solver {
         sol_.iters += warm_iters;
       }
     } else {
-      if (!have_warm_) return sol_;  // no tight solve to start from
+      if (!have_warm_) return sol_;
       relax_init_retraction();
       relax_run(kappa_s, tol, max_iter);
     }
@@ -588,7 +483,6 @@ class Solver {
   }
 
  private:
-  // ---- problem data: A'A cache, equality certificate, Ruiz scaling ----
   void compute_AtA() {
     if (m_ > 0) {
       AtA_.resize(n_, n_);
@@ -597,8 +491,7 @@ class Solver {
     }
   }
 
-  // Equality consistency (common.hpp EqCertificate) on the unscaled (A, b):
-  // a lower bound on the reachable equality residual, tested in solve()
+  // Consistency certificate for Ax = b, refreshed whenever A or b changes.
   void check_eq_A(const MatrixXd& A) {
     eq_infeas_lb_ = 0.0;
     if (m_ == 0 || !settings.check_eq_consistency) return;
@@ -610,12 +503,11 @@ class Solver {
     eq_infeas_lb_ = eq_cert_.bound(b);
   }
 
-  // One Ruiz pass over the current (scaled) data: per-column and per-row
-  // factors 1/sqrt(max-norm) of the stacked (Q, A, G) system, and the
-  // largest deviation |1 - factor| from equilibrated (common.hpp)
+  // One Ruiz pass: writes column/row scale factors, returns max deviation
+  // from 1.
   double scaling_pass(VectorXd& dx, VectorXd& de, VectorXd& di) const {
     for (Eigen::Index k = 0; k < n_; ++k) {
-      dx[k] = Q_.col(k).cwiseAbs().maxCoeff();  // symmetric: col max = row max
+      dx[k] = Q_.col(k).cwiseAbs().maxCoeff();
     }
     de.setZero();
     di.setZero();
@@ -624,11 +516,8 @@ class Solver {
     return std::max({ruiz_factors(dx), ruiz_factors(de), ruiz_factors(di)});
   }
 
-  // Ruiz equilibration of the stacked (Q, A, G) system
-  // proxqp ruiz logic + piqp limit_scaling + elastic penalty scaling.
-  // Runs on the currently stored data and accumulates into the cumulative
-  // factors; both setup() and reequilibrate() call it on unscaled data with
-  // identity factors (see reequilibrate() for why not incrementally).
+  // Ruiz equilibration accumulating dx_s_/de_s_/di_s_/c_s_. penalty scales
+  // like z.
   void equilibrate() {
     VectorXd &dx = dxw_, &de = dew_, &di = diw_;
     for (int iter = 0; iter < settings.ruiz_max_iter; ++iter) {
@@ -642,13 +531,13 @@ class Solver {
       }
       G_ = di.asDiagonal() * G_ * dx.asDiagonal();
       h_ = h_.cwiseProduct(di);
-      penalty_ = penalty_.cwiseQuotient(di);  // elastiqp addition
+      penalty_ = penalty_.cwiseQuotient(di);
       dx_s_ = dx_s_.cwiseProduct(dx);
       di_s_ = di_s_.cwiseProduct(di);
       const double gamma = ruiz_cost_gamma(Q_);
       Q_ *= gamma;
       q_ *= gamma;
-      penalty_ *= gamma;  // elastiqp addition
+      penalty_ *= gamma;
       c_s_ *= gamma;
     }
   }
@@ -661,10 +550,6 @@ class Solver {
     z_us_ = di_s_ / c_s_;
   }
 
-  // ---- solve() entry paths ----
-
-  // No inequality constraints: plain equality-constrained (or unconstrained)
-  // QP, just solve the KKT system directly + report status from residuals
   const Solution& solve_no_inequalities() {
     SolveEqualityQP(Q_, q_, A_, b_, settings.rho, eq_cert_.rank_deficient(),
                     x_, y_);
@@ -683,9 +568,8 @@ class Solver {
     return finish(ok ? Status::kSolved : Status::kNumerics);
   }
 
-  // Cold start (proxsuite EQUALITY_CONSTRAINED_INITIAL_GUESS): solve
-  // [Q+rho I, A'; A, -mu_eq I][x;y] = [-q; b] via K with an empty active
-  // set; z = 0
+  // Cold start: x from the equality-penalized unconstrained system, y from
+  // its residual.
   bool cold_init() {
     rho_ = settings.rho;
     mu_eq_ = settings.mu_eq_init;
@@ -712,12 +596,10 @@ class Solver {
     return std::isfinite(x_.sum()) && (m_ == 0 || std::isfinite(y_.sum()));
   }
 
-  // ---- BCL outer-loop helpers ----
   double eta_ext_init() const { return std::pow(0.1, settings.alpha_bcl); }
   double eps_in_min() const { return std::min(settings.eps_abs, 1e-9); }
 
-  // Set both AL penalties (floored), reset the BCL tolerances to the new
-  // mu_in, and refresh the residuals (t depends on mu_in)
+  // Set penalties and reset the BCL tolerances to the schedule for the new mu.
   void set_mu(double mu_in_new, double mu_eq_new) {
     mu_in_ = std::max(mu_in_new, settings.mu_min_in);
     mu_eq_ = std::max(mu_eq_new, settings.mu_min_eq);
@@ -726,13 +608,13 @@ class Solver {
     update_residuals();
   }
 
-  // Shrink mu_in to mu_new and mu_eq by the same ratio
+  // Shrink mu_in to mu_new and mu_eq by the same ratio.
   void shrink_mu(double mu_new) {
     set_mu(mu_new, mu_eq_ * (mu_new / mu_in_));
   }
 
-  // Release-jump target: the mu_in at which the shallowest oversized dual on a
-  // satisfied row (r < 0, z > 0) snaps to 0. Returns 0 if there is none
+  // mu at which the shallowest satisfied row with an oversized dual
+  // (r < 0, z > 0) releases to 0.
   double release_jump_mu() const {
     double shallowest = 0.0;
     for (Eigen::Index i = 0; i < p_; ++i) {
@@ -743,9 +625,7 @@ class Solver {
     return shallowest;
   }
 
-  // Saturation-jump target: a violated row improving < 20% per round needs
-  // mu_in <= r / (penalty - z) for its dual to reach the penalty cap.
-  // Returns the shallowest such mu_in, or 0 if no row is stalled
+  // mu at which the shallowest stalled row (residual not shrinking) saturates.
   double saturation_jump_mu() const {
     double shallowest = 0.0;
     for (Eigen::Index i = 0; i < p_; ++i) {
@@ -760,8 +640,8 @@ class Solver {
     return shallowest;
   }
 
-  // True if the gap's per-round geometric decay cannot reach the gap
-  // tolerance within bcl_release_jump_horizon more rounds
+  // True if the gap, extrapolated over the horizon at its current decay rate,
+  // misses tolerance.
   bool gap_decay_too_slow(double gap_prev) const {
     if (duality_gap_ >= gap_prev || !(gap_prev > 0.0)) return true;
     const double decay =
@@ -770,20 +650,15 @@ class Solver {
            duality_gap_rel_ * decay >= settings.eps_duality_gap_rel;
   }
 
-  // ---- inner semismooth Newton ----
-
-  // Newton on the PDAL merit (proxsuite primal_dual_newton_semi_smooth).
-  // Returns false only on a factorization disaster. Invariant on entry and
-  // throughout: ztilde_ = zk_ + (Gx - h) / mu_in
+  // Semismooth Newton on the augmented Lagrangian at fixed prox center and mu.
   bool inner_loop(double eps_int) {
     for (int it = 0; it < settings.max_iter_in; ++it) {
       const double err = compute_inner_terms();
-      // The dual mismatch in err is scaled by mu_in, so always take at least
-      // one step; otherwise tiny mu_in can stall the outer loop
+      // Always take at least one step.
       if (err <= eps_int && it > 0) return true;
 
-      // Three-state row classification on z~ (elastic version of
-      // proxsuite's active-set test; ties mirror its >=)
+      // Classify rows, then the dual step is the clamp of ztilde onto
+      // [0, penalty].
       for (Eigen::Index i = 0; i < p_; ++i) {
         if (ztilde_[i] >= penalty_[i]) {
           state(i) = RowState::kSaturated;
@@ -795,9 +670,6 @@ class Solver {
       }
       if (!ensure_factor()) return false;
 
-      // Newton system condensed onto K. Each row's dual shift is toward its
-      // target: z~ (active), penalty (saturated), 0 (inactive); non-active
-      // rows leave the system and their shift is exact
       for (Eigen::Index i = 0; i < p_; ++i) {
         switch (state(i)) {
           case RowState::kActive:
@@ -831,6 +703,7 @@ class Solver {
       iters_total_++;
       const double alpha = line_search();
 
+      // Step too small to change anything.
       double dwmax = dx_.lpNorm<Eigen::Infinity>();
       if (m_ > 0) dwmax = std::max(dwmax, dy_.lpNorm<Eigen::Infinity>());
       dwmax = std::max(dwmax, dz_.lpNorm<Eigen::Infinity>());
@@ -839,18 +712,15 @@ class Solver {
       x_ += alpha * dx_;
       if (m_ > 0) y_ += alpha * dy_;
       z_ += alpha * dz_;
-      // alpha is unclamped, so the step can push z outside [0, penalty].
-      // So, project it back. Note: this never increases the merit
-      // (merit z terms are separable quadratics with minimizers in range)
+      // ztilde tracks Gx exactly along the step; z is clamped.
       clamp_z();
       ztilde_ += (alpha / mu_in_) * Gdx_;
       if (alpha == 0.0) return true;
     }
-    return true;  // out of inner iterations; the outer loop adapts mu
+    return true;
   }
 
-  // Inner stopping criterion (proxsuite compute_inner_loop_saddle_point
-  // with the [0, penalty] clamp). Fills the buffers the Newton step reuses
+  // Stationarity residuals at the inner iterate; returns their inf-norm.
   double compute_inner_terms() {
     wQx_.noalias() = Q_ * x_;
     wGtz_.noalias() = G_.transpose() * z_;
@@ -872,13 +742,10 @@ class Solver {
     return std::max(err, mu_in_ * inerr);
   }
 
-  // Exact line search on the piecewise-quadratic PDAL merit (proxsuite
-  // linesearch::primal_dual_ls): the derivative is piecewise affine in
-  // alpha with breakpoints where z~_i(alpha) crosses 0 or penalty_i; scan
-  // for its sign change and interpolate
+  // Exact line search: the merit is piecewise quadratic in alpha, so walk its
+  // breakpoints.
   double line_search() {
-    // Smooth part g(alpha) = b + a*alpha. The dual-coupling equality term
-    // collapses via Adx - mu_eq*dy = -dyrhs
+    // Smooth part: derivative is b + a*alpha.
     double a = dx_.dot(Qdx_) + rho_ * dx_.squaredNorm();
     double b = dx_.dot(wQx_) + dx_.dot(q_) + rho_ * dx_.dot(x_ - xk_);
     if (m_ > 0) {
@@ -926,14 +793,14 @@ class Solver {
       alpha_prev = t;
       g_prev = gt;
     }
-    // Affine tail beyond the last breakpoint.
+    // Past the last breakpoint the derivative is linear.
     const double g2 = grad_at(alpha_prev + 1.0);
     const double slope = g2 - g_prev;
-    if (slope <= 0.0) return alpha_prev + 1.0;  // pathological; bounded step
+    if (slope <= 0.0) return alpha_prev + 1.0;
     return alpha_prev + (-g_prev) / slope;
   }
 
-  // ---- factorization cache ----
+  // K = Q + rho I + A'A / mu_eq + G_act' G_act / mu_in.
   bool factor_kkt() {
     Eigen::Index na = 0;
     const double s = std::sqrt(1.0 / mu_in_);
@@ -958,6 +825,8 @@ class Solver {
            std::isfinite(K_.diagonal().sum());
   }
 
+  // Rank-one updates when few rows flipped; otherwise refactor, escalating rho
+  // on failure.
   bool ensure_factor() {
     const bool data_changed = !factored_ || matrix_dirty_ || f_rho_ != rho_ ||
                               f_mu_eq_ != mu_eq_ || f_mu_in_ != mu_in_;
@@ -968,8 +837,6 @@ class Solver {
       }
       if (flip_idx_.empty()) return true;
 
-      // Only the active set changed: fold the flipped rows into the cached
-      // factor as rank-one up/downdates when that beats a refactorization.
       const Eigen::Index max_flips =
           settings.incremental_update_max_flips > 0
               ? settings.incremental_update_max_flips
@@ -985,7 +852,7 @@ class Solver {
           llt_.rankUpdate(upd_vec_, (act ? 1.0 : -1.0) / mu_in_);
           ++updates_since_factor_;
           if (llt_.info() != Eigen::Success) {
-            ok = false;  // factor corrupted; fall through to refactorize
+            ok = false;
             break;
           }
           set_f_active(i, act);
@@ -1013,10 +880,6 @@ class Solver {
     return true;
   }
 
-  // ---- relax() ----
-
-  // Workspace for relax(), allocated on the first call after setup() so
-  // forward-only users pay nothing for the backward pass
   void relax_alloc() {
     xr_.resize(n_);
     tr_.resize(p_);
@@ -1047,7 +910,7 @@ class Solver {
     relax_ready_ = true;
   }
 
-  // Newton on the kappa-relaxed KKT from the current (xr, tr, yr, v1r, v2r)
+  // Newton on the smoothed KKT system with a merit-backtracking line search.
   void relax_run(double kappa_s, double tol, int max_iter) {
     double rho = settings.relax_reg;
     double delta = settings.relax_reg;
@@ -1066,12 +929,7 @@ class Solver {
       }
       iter++;
 
-      // Condensed Newton system. Eliminating dv1, dv2 (with b' in (0, 1)
-      // and D = b'(v)/b'(-v) = z/s) and dt gives, per row,
-      //   E = rho + D1 + D2,  Lambda = D2 (rho + D1) / E,
-      //   E dt = D2 G dx - F2 + D1 F4 + D2 F5,
-      // and the n x n SPD system
-      //   [Q + rho I + (1/delta) A'A + G' diag(Lambda) G] dx = rhs.
+      // Eliminate (t, v1, v2) onto x; see relax_factor.
       d1r_ = z1r_.cwiseQuotient(s1r_);
       d2r_ = z2r_.cwiseQuotient(s2r_);
       bool ok = relax_factor(rho, delta);
@@ -1108,7 +966,6 @@ class Solver {
                    retraction_dcomp(v2r_[i], kappa_s);
       }
 
-      // Backtrack on the 2-norm merit; terminate on max norm
       const double merit_prev = relax_merit_;
       xr_ += dxr_;
       tr_ += dtr_;
@@ -1131,7 +988,6 @@ class Solver {
       }
       res = res_new;
     }
-    // The loop tests res before stepping, so classify the final step too
     if (status == Status::kMaxIter) {
       if (!std::isfinite(res)) {
         status = Status::kNumerics;
@@ -1142,31 +998,22 @@ class Solver {
     relax_finish(status, iter);
   }
 
-
-  // Closed-form prox of kappa*(-log): the positive root of
-  // s^2 - v s - kappa = 0, i.e. b_k(v) = (v + sqrt(v^2 + 4 kappa))/2, with
-  // the cancellation-free branch b_k(v) = 2 kappa / (sqrt(..) - v) for
-  // v < 0 (docs/log_barrier_admm_note.tex).
+  // Smoothed complementarity: retraction(v) * retraction(-v) = kappa. Branch
+  // avoids cancellation.
   static double retraction(double v, double kappa) {
     const double r = std::sqrt(v * v + 4.0 * kappa);
     return v >= 0.0 ? 0.5 * (v + r) : 2.0 * kappa / (r - v);
   }
 
-  // 1 - b_k'(v) = b_k'(-v) in (0, 1). b_k'(v) = (1 + v/r)/2 cancels for
-  // |v| >> sqrt(kappa); the stable small branch is
-  // (1 - |v|/r)/2 = 2 kappa / (r (r + |v|)).
+  // 1 - retraction'(v), computed without cancellation.
   static double retraction_dcomp(double v, double kappa) {
     const double r = std::sqrt(v * v + 4.0 * kappa);
     const double small = 2.0 * kappa / (r * (r + std::abs(v)));
     return v >= 0.0 ? small : 1.0 - small;
   }
 
-  // Relaxed-KKT residuals at (xr, tr, yr, v1r, v2r), with (z, s) pairs
-  // materialized through the retraction so z.s = kappa holds identically:
-  //   F1 = Q x + q + A'y + G'z2      F2 = penalty - z1 - z2
-  //   F3 = A x - b                   F4 = s1 - t     F5 = s2 - (h + t - Gx)
-  // Returns the unscaled max norm (termination) and fills relax_merit_,
-  // the squared 2-norm (line search: Newton is descent for the 2-norm only)
+  // Smoothed-KKT residual at the relax iterate; fills rf1..rf5
+  // (x-stationarity, t-stationarity, eq, t >= 0, Gx - h <= t).
   double relax_residual(double kappa_s) {
     for (Eigen::Index i = 0; i < p_; ++i) {
       z1r_[i] = retraction(v1r_[i], kappa_s);
@@ -1198,9 +1045,8 @@ class Solver {
     return std::max(relax_dual_res_, relax_primal_res_);
   }
 
-  // Rows whose retraction v-sign at the tight iterate disagrees with the
-  // stored relaxed iterate's, ignoring pairs near the hyperbola corner
-  // (|v_old v_new| <= 100 kappa_s). Predicts the cost of a warm relax()
+  // Retraction variables whose sign differs between the solve() point and the
+  // last relax() point.
   int relax_predict_flips(double kappa_s) {
     const double corner2 = 100.0 * kappa_s;
     wGx_.noalias() = G_ * x_;
@@ -1219,8 +1065,7 @@ class Solver {
     return flips;
   }
 
-  // Cold start for relax(): the tight iterate's elastic certificate mapped
-  // through v = z - s
+  // Seed relax from the solve() point.
   void relax_init_retraction() {
     xr_ = x_;
     if (m_ > 0) yr_ = y_;
@@ -1233,10 +1078,7 @@ class Solver {
     }
   }
 
-  // Condensation scalings E^-1, Lambda for the current (D1, D2, rho), then
-  // factor K = Q + rho I + (1/delta) A'A + G' diag(Lambda) G into llt_r_.
-  // Same shape as factor_kkt(), but into a separate factorization (and
-  // reusing the K_/GS_ staging buffers) so the solve() cache stays valid.
+  // Reduced Newton matrix after eliminating (t, v1, v2).
   bool relax_factor(double rho, double delta) {
     einvr_ = ((d1r_ + d2r_).array() + rho).cwiseInverse();
     lamr_ = d2r_.array() * (d1r_.array() + rho) * einvr_.array();
@@ -1252,9 +1094,6 @@ class Solver {
            std::isfinite(K_.diagonal().sum());
   }
 
-  // Unscaled certificate at the relaxed point. Only sol_ is written; the
-  // solver iterate and warm-start state are untouched. The duality gap
-  // converges to ~2 p kappa, not 0
   void relax_finish(Status status, int iters) {
     sol_.x = xr_.cwiseProduct(dx_s_);
     sol_.t = tr_.cwiseProduct(inv_di_);
@@ -1277,19 +1116,16 @@ class Solver {
     sol_.duality_gap = std::abs(sol_.primal_obj - dual_obj);
   }
 
-  // ---- shared row/vector helpers ----
-
-  // Keep the inequality duals in the bounded multiplier set [0, penalty]
   void clamp_z() { z_ = z_.cwiseMax(0.0).cwiseMin(penalty_); }
 
-  // Elastic slack of row i with violation r = (Gx - h)_i at the current
-  // mu_in: t = [r + mu_in (z - penalty)]_+ (argmin of the folded slack)
+  // t_i = max(r_i + mu_in (z_i - penalty_i), 0): elastic slack implied by the
+  // current dual.
   double elastic_slack(Eigen::Index i, double r) const {
     return std::max(r + mu_in_ * (z_[i] - penalty_[i]), 0.0);
   }
 
-  // Row i of the tight iterate mapped to the relax() retraction
-  // coordinates v = z - s: v1 = z_t - s_t, v2 = z - s_ineq
+  // Retraction coordinates (t, v1, v2) of row i from the solve() iterate
+  // (v = z - s).
   struct RowRetraction {
     double t, v1, v2;
   };
@@ -1298,8 +1134,7 @@ class Solver {
     return {t, (penalty_[i] - z_[i]) - t, z_[i] - std::max(t - r, 0.0)};
   }
 
-  // Unscaled inf-norm and squared 2-norm of a scaled-frame vector (or
-  // expression) v, with componentwise unscaling factors s
+  // Norms in the user frame; s holds the unscaling factors.
   template <typename V>
   static double inf_us(const V& v, const VectorXd& s) {
     return v.size() > 0 ? v.cwiseAbs().cwiseProduct(s).maxCoeff() : 0.0;
@@ -1309,13 +1144,7 @@ class Solver {
     return v.size() > 0 ? v.cwiseProduct(s).squaredNorm() : 0.0;
   }
 
-  // ---- residuals and termination ----
-
-  // Residuals of the elastic QP at the reconstructed expanded point
-  //   t = [Gx - h + mu_in (z - penalty)]_+
-  //   z_t = penalty - z, s_t = t, s_ineq = [t - (Gx - h)]_+
-  // The t-block dual residual vanishes identically. All norms are unscaled
-  // componentwise, so termination is tested on the true elastic KKT
+  // Outer residuals, objectives and duality gap in the user frame.
   void update_residuals() {
     wGx_.noalias() = G_ * x_;
     r_ = wGx_ - h_;
@@ -1357,7 +1186,6 @@ class Solver {
     primal_res_ = std::max(in_res, eq_res);
     primal_res_rel_ = primal_res_ / std::max(1.0, primal_rel_norm);
 
-    // Objectives: every scaled term is c_s_ times its unscaled value.
     const double xQx = x_.dot(wQx_);
     primal_obj_ = (0.5 * xQx + q_.dot(x_) + penalty_.dot(t_)) / c_s_;
     double dual_obj = (-0.5 * xQx - h_.dot(z_)) / c_s_;
@@ -1389,7 +1217,6 @@ class Solver {
   }
 
   const Solution& finish(Status status) {
-    // Unscale into the user's frame (identity when Ruiz is off).
     sol_.x = x_.cwiseProduct(dx_s_);
     sol_.t = t_.cwiseProduct(inv_di_);
     sol_.y = y_.cwiseProduct(y_us_);
@@ -1408,57 +1235,51 @@ class Solver {
     sol_.primal_res = primal_res_;
     sol_.dual_res = dual_res_;
     sol_.duality_gap = duality_gap_;
-    // kInfeasible exits early without touching the iterate: keep the
-    // warm-start state as it was.
+    // A Numerics failure discards the warm start.
     if (status != Status::kInfeasible) {
       have_warm_ = status != Status::kNumerics;
     }
     return sol_;
   }
 
-  // ---- state ----
-
-  // Problem data
+  // Problem data (Ruiz frame).
   Eigen::Index n_ = 0, m_ = 0, p_ = 0;
   MatrixXd Q_, A_, G_;
   VectorXd q_, b_, h_, penalty_;
-  MatrixXd AtA_;  // cached A^T A (lower triangle valid), only when m_ > 0
+  MatrixXd AtA_;
 
-  // Iterates and prox centers (persist across solves for warm starting)
+  // Iterates and prox centers.
   VectorXd x_, y_, z_;
   VectorXd xk_, yk_, zk_;
   bool have_warm_ = false;
   bool explicit_warm_ = false;
 
-  // Proximal / AL state (persists across solves)
+  // Penalties and BCL tolerances.
   double rho_ = 0, mu_eq_ = 0, mu_in_ = 0;
-  // BCL tolerances for the current solve
   double eta_ext_ = 0, eta_in_ = 0;
 
-  // Ruiz scaling state (identity when ruiz_ is false)
+  // Ruiz scaling (x = dx_s * x_s, etc.) and cached unscaling vectors.
   bool ruiz_ = false;
   double c_s_ = 1.0;
-  VectorXd dx_s_, de_s_, di_s_;             // cumulative scale factors
-  VectorXd inv_cdx_, inv_de_, inv_di_;      // residual unscaling
-  VectorXd y_us_, z_us_;                    // dual unscaling (de/c, di/c)
-  mutable VectorXd dxw_, dew_, diw_;        // scaling_pass() workspace
+  VectorXd dx_s_, de_s_, di_s_;
+  VectorXd inv_cdx_, inv_de_, inv_di_;
+  VectorXd y_us_, z_us_;
+  mutable VectorXd dxw_, dew_, diw_;
 
-  // Equality-consistency certificate (check_eq_A / check_eq_b)
   EqCertificate eq_cert_;
   double eq_infeas_lb_ = 0.0;
 
-  // Factorization cache
+  // Factorization cache: parameters and active set at last factor.
   bool matrix_dirty_ = true, factored_ = false;
   double f_rho_ = 0, f_mu_eq_ = 0, f_mu_in_ = 0;
-  std::vector<bool> f_active_;  // active set of the cached factor
-  std::vector<Eigen::Index> flip_idx_;  // rows flipped since the cached factor
-  VectorXd upd_vec_;                    // rank-one update staging
+  std::vector<bool> f_active_;
+  std::vector<Eigen::Index> flip_idx_;
+  VectorXd upd_vec_;
   int updates_since_factor_ = 0;
   int factor_retries_ = 0, factor_count_ = 0, iters_total_ = 0;
   int outer_iters_ = 0;
   int cold_resets_ = 0;
 
-  // Per-row active-set state and its accessors
   std::vector<RowState> state_;
   RowState& state(Eigen::Index i) { return state_[static_cast<size_t>(i)]; }
   RowState state(Eigen::Index i) const {
@@ -1474,17 +1295,15 @@ class Solver {
     f_active_[static_cast<size_t>(i)] = act;
   }
 
-  // Residual scalars
+  // Outer residuals.
   double primal_res_ = 0, dual_res_ = 0;
-  double in_res_ = 0, eq_res_ = 0;  // primal_res_ = max of these
+  double in_res_ = 0, eq_res_ = 0;
   double primal_res_rel_ = 0, dual_res_rel_ = 0;
   double primal_obj_ = 0, duality_gap_ = 0, duality_gap_rel_ = 0;
 
-  // Workspace (allocated in setup, reused every iteration)
-  VectorXd ztilde_;  // unclamped multiplier estimate (proxsuite's S / mu_in)
-  VectorXd t_, s2_, r_, dzs_;  // dzs_: per-row dual shift in the Newton step
-  // Per-row inequality residuals across outer rounds, for the saturation
-  // jump's stall gate (maintained only while the jump is enabled).
+  // Inner-loop workspace.
+  VectorXd ztilde_;
+  VectorXd t_, s2_, r_, dzs_;
   VectorXd jump_res_prev_, jump_res_cur_;
   VectorXd verr_, dyrhs_, rhs_x_, dx_, dy_, dz_, Qdx_, Adx_, Gdx_;
   VectorXd wQx_, wGtz_, wGtd_, wAty_, wAx_, wGx_;
@@ -1492,27 +1311,22 @@ class Solver {
   Eigen::LLT<MatrixXd, Eigen::Lower> llt_;
   std::vector<double> bp_;
 
-  // relax() iterate and workspace (allocated in setup). Kept separate from
-  // the solve() state so the relaxation never disturbs warm starting or the
-  // factorization cache.
-  VectorXd xr_, tr_, yr_, v1r_, v2r_;      // iterate (v parametrizes z, s)
-  VectorXd z1r_, z2r_, s1r_, s2r_;         // retraction images of v
-  VectorXd rf1_, rf2_, rf3_, rf4_, rf5_;   // relaxed-KKT residuals
-  VectorXd d1r_, d2r_, einvr_, lamr_, wr_, pvr_;  // condensation scalings
-  VectorXd dxr_, dtr_, dyr_, dv1r_, dv2r_;        // Newton step
+  // relax() workspace and warm-start state.
+  VectorXd xr_, tr_, yr_, v1r_, v2r_;
+  VectorXd z1r_, z2r_, s1r_, s2r_;
+  VectorXd rf1_, rf2_, rf3_, rf4_, rf5_;
+  VectorXd d1r_, d2r_, einvr_, lamr_, wr_, pvr_;
+  VectorXd dxr_, dtr_, dyr_, dv1r_, dv2r_;
   Eigen::LLT<MatrixXd, Eigen::Lower> llt_r_;
   double relax_primal_res_ = 0, relax_dual_res_ = 0;
-  double relax_merit_ = 0;  // squared 2-norm of the relaxed-KKT residual
-  // True while (xr_, tr_, yr_, v1r_, v2r_) holds a converged relaxed
-  // iterate usable as the next relax() warm start; cleared by setup().
+  double relax_merit_ = 0;
   bool relax_have_warm_ = false;
-  double relax_kappa_s_ = 0;  // scaled kappa the warm iterate was solved at
-  bool relax_ready_ = false;  // workspace sized for the current problem
+  double relax_kappa_s_ = 0;
+  bool relax_ready_ = false;
 
   Solution sol_;
 };
 
-// One-shot convenience wrappers (cold start).
 inline Solution Solve(
     const MatrixXd& Q, const VectorXd& q, const MatrixXd& A, const VectorXd& b,
     const MatrixXd& G, const VectorXd& h, const VectorXd& penalty,
@@ -1531,7 +1345,6 @@ inline Solution Solve(
                settings);
 }
 
-// Inequality-only overloads.
 inline Solution Solve(
     const MatrixXd& Q, const VectorXd& q, const MatrixXd& G, const VectorXd& h,
     const VectorXd& penalty, const Settings& settings = {}) {
