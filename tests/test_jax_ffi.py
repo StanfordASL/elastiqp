@@ -305,17 +305,17 @@ def main():
     # construction, so the relaxed complementarity is exact to round-off.
     # The status must be observable: info[2] reports the relax convergence
     # (the backward pass differentiates at that point, so a stalled
-    # relaxation would otherwise mean silently wrong gradients). s1 = t and
-    # s2 = h + t - Gx are the slacks of t >= 0 and Gx - t <= h; s2 is
+    # relaxation would otherwise mean silently wrong gradients). s_t = t and
+    # s_in = h + t - Gx are the slacks of t >= 0 and Gx - t <= h; s_in is
     # reconstructed from x, so it carries the O(tol) primal residual.
     out = elastiqp.jax._ffi_solve(
         *args, 1e-11, 300, False, "sequential", kappa, "pdal"
     )
-    xr, tr, z1r, z2r, info = out[5], out[6], out[8], out[9], out[10]
-    s2r = args[5] + tr - args[4] @ xr
+    xr, tr, z_t_r, z_r, info = out[5], out[6], out[8], out[9], out[10]
+    s_in_r = args[5] + tr - args[4] @ xr
     comp = max(
-        float(jnp.max(jnp.abs(tr * z1r - kappa))),
-        float(jnp.max(jnp.abs(s2r * z2r - kappa))),
+        float(jnp.max(jnp.abs(tr * z_t_r - kappa))),
+        float(jnp.max(jnp.abs(s_in_r * z_r - kappa))),
     )
     check(
         "relaxed point satisfies s.z = kappa, and reports so",

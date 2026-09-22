@@ -284,9 +284,9 @@ def main():
         "",
     )
     out = torch.ops.elastiqp.solve(*args, 1e-11, 300, False, kappa, "pdal")
-    xr, tr, z1r, z2r, info = out[5], out[6], out[8], out[9], out[10]
-    s2r = args[5] + tr - args[4] @ xr
-    comp = max(maxabs(tr * z1r - kappa), maxabs(s2r * z2r - kappa))
+    xr, tr, z_t_r, z_r, info = out[5], out[6], out[8], out[9], out[10]
+    s_in_r = args[5] + tr - args[4] @ xr
+    comp = max(maxabs(tr * z_t_r - kappa), maxabs(s_in_r * z_r - kappa))
     check(
         "relaxed point satisfies s.z = kappa, and reports so",
         comp < 1e-13 and int(info[2]) == 1,

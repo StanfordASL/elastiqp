@@ -255,10 +255,10 @@ class Solver {
       if (m_ > 0) yr_ = yr_.cwiseProduct(yf);
       tr_ = tr_.cwiseProduct(di);
       for (Eigen::Index i = 0; i < p_; ++i) {
-        v1r_[i] = zf[i] * retraction(v1r_[i], relax_kappa_s_) -
-                  di[i] * retraction(-v1r_[i], relax_kappa_s_);
-        v2r_[i] = zf[i] * retraction(v2r_[i], relax_kappa_s_) -
-                  di[i] * retraction(-v2r_[i], relax_kappa_s_);
+        v_t_r_[i] = zf[i] * retraction(v_t_r_[i], relax_kappa_s_) -
+                  di[i] * retraction(-v_t_r_[i], relax_kappa_s_);
+        v_in_r_[i] = zf[i] * retraction(v_in_r_[i], relax_kappa_s_) -
+                  di[i] * retraction(-v_in_r_[i], relax_kappa_s_);
       }
       relax_kappa_s_ *= gamma;
     }
@@ -884,19 +884,19 @@ class Solver {
     xr_.resize(n_);
     tr_.resize(p_);
     yr_.resize(m_);
-    v1r_.resize(p_);
-    v2r_.resize(p_);
-    z1r_.resize(p_);
-    z2r_.resize(p_);
-    s1r_.resize(p_);
-    s2r_.resize(p_);
+    v_t_r_.resize(p_);
+    v_in_r_.resize(p_);
+    z_t_r_.resize(p_);
+    z_in_r_.resize(p_);
+    s_t_r_.resize(p_);
+    s_in_r_.resize(p_);
     rf1_.resize(n_);
     rf2_.resize(p_);
     rf3_.resize(m_);
     rf4_.resize(p_);
     rf5_.resize(p_);
-    d1r_.resize(p_);
-    d2r_.resize(p_);
+    d_t_r_.resize(p_);
+    d_in_r_.resize(p_);
     einvr_.resize(p_);
     lamr_.resize(p_);
     wr_.resize(p_);
@@ -904,8 +904,8 @@ class Solver {
     dxr_.resize(n_);
     dtr_.resize(p_);
     dyr_.resize(m_);
-    dv1r_.resize(p_);
-    dv2r_.resize(p_);
+    dv_t_r_.resize(p_);
+    dv_in_r_.resize(p_);
     llt_r_ = Eigen::LLT<MatrixXd, Eigen::Lower>(n_);
     relax_ready_ = true;
   }
@@ -929,9 +929,9 @@ class Solver {
       }
       iter++;
 
-      // Eliminate (t, v1, v2) onto x; see relax_factor.
-      d1r_ = z1r_.cwiseQuotient(s1r_);
-      d2r_ = z2r_.cwiseQuotient(s2r_);
+      // Eliminate (t, v_t, v_in) onto x; see relax_factor.
+      d_t_r_ = z_t_r_.cwiseQuotient(s_t_r_);
+      d_in_r_ = z_in_r_.cwiseQuotient(s_in_r_);
       bool ok = relax_factor(rho, delta);
       while (!ok && retries < settings.max_factor_retries) {
         rho *= 100;
@@ -945,8 +945,8 @@ class Solver {
       }
       retries = 0;
 
-      wr_ = d1r_.cwiseProduct(rf4_) + d2r_.cwiseProduct(rf5_) - rf2_;
-      pvr_ = d2r_.cwiseProduct(rf5_ - einvr_.cwiseProduct(wr_));
+      wr_ = d_t_r_.cwiseProduct(rf4_) + d_in_r_.cwiseProduct(rf5_) - rf2_;
+      pvr_ = d_in_r_.cwiseProduct(rf5_ - einvr_.cwiseProduct(wr_));
       rhs_x_ = -rf1_;
       rhs_x_.noalias() -= G_.transpose() * pvr_;
       if (m_ > 0) {
@@ -954,24 +954,24 @@ class Solver {
       }
       dxr_ = llt_r_.solve(rhs_x_);
       Gdx_.noalias() = G_ * dxr_;
-      dtr_ = einvr_.cwiseProduct(d2r_.cwiseProduct(Gdx_) + wr_);
+      dtr_ = einvr_.cwiseProduct(d_in_r_.cwiseProduct(Gdx_) + wr_);
       if (m_ > 0) {
         dyr_.noalias() = A_ * dxr_;
         dyr_ += rf3_;
         dyr_ /= delta;
       }
       for (Eigen::Index i = 0; i < p_; ++i) {
-        dv1r_[i] = (rf4_[i] - dtr_[i]) / retraction_dcomp(v1r_[i], kappa_s);
-        dv2r_[i] = (rf5_[i] + Gdx_[i] - dtr_[i]) /
-                   retraction_dcomp(v2r_[i], kappa_s);
+        dv_t_r_[i] = (rf4_[i] - dtr_[i]) / retraction_dcomp(v_t_r_[i], kappa_s);
+        dv_in_r_[i] = (rf5_[i] + Gdx_[i] - dtr_[i]) /
+                   retraction_dcomp(v_in_r_[i], kappa_s);
       }
 
       const double merit_prev = relax_merit_;
       xr_ += dxr_;
       tr_ += dtr_;
       if (m_ > 0) yr_ += dyr_;
-      v1r_ += dv1r_;
-      v2r_ += dv2r_;
+      v_t_r_ += dv_t_r_;
+      v_in_r_ += dv_in_r_;
       double alpha = 1.0;
       double res_new = relax_residual(kappa_s);
       for (int bt = 0;
@@ -982,8 +982,8 @@ class Solver {
         xr_ -= alpha * dxr_;
         tr_ -= alpha * dtr_;
         if (m_ > 0) yr_ -= alpha * dyr_;
-        v1r_ -= alpha * dv1r_;
-        v2r_ -= alpha * dv2r_;
+        v_t_r_ -= alpha * dv_t_r_;
+        v_in_r_ -= alpha * dv_in_r_;
         res_new = relax_residual(kappa_s);
       }
       res = res_new;
@@ -1016,13 +1016,13 @@ class Solver {
   // (x-stationarity, t-stationarity, eq, t >= 0, Gx - h <= t).
   double relax_residual(double kappa_s) {
     for (Eigen::Index i = 0; i < p_; ++i) {
-      z1r_[i] = retraction(v1r_[i], kappa_s);
-      s1r_[i] = retraction(-v1r_[i], kappa_s);
-      z2r_[i] = retraction(v2r_[i], kappa_s);
-      s2r_[i] = retraction(-v2r_[i], kappa_s);
+      z_t_r_[i] = retraction(v_t_r_[i], kappa_s);
+      s_t_r_[i] = retraction(-v_t_r_[i], kappa_s);
+      z_in_r_[i] = retraction(v_in_r_[i], kappa_s);
+      s_in_r_[i] = retraction(-v_in_r_[i], kappa_s);
     }
     wQx_.noalias() = Q_ * xr_;
-    wGtz_.noalias() = G_.transpose() * z2r_;
+    wGtz_.noalias() = G_.transpose() * z_in_r_;
     rf1_ = wQx_ + q_ + wGtz_;
     if (m_ > 0) {
       wAty_.noalias() = A_.transpose() * yr_;
@@ -1030,10 +1030,10 @@ class Solver {
       wAx_.noalias() = A_ * xr_;
       rf3_ = wAx_ - b_;
     }
-    rf2_ = penalty_ - z1r_ - z2r_;
+    rf2_ = penalty_ - z_t_r_ - z_in_r_;
     wGx_.noalias() = G_ * xr_;
-    rf4_ = s1r_ - tr_;
-    rf5_ = s2r_ + wGx_ - h_ - tr_;
+    rf4_ = s_t_r_ - tr_;
+    rf5_ = s_in_r_ + wGx_ - h_ - tr_;
     relax_dual_res_ =
         std::max(inf_us(rf1_, inv_cdx_), inf_us(rf2_, z_us_));
     relax_primal_res_ =
@@ -1053,12 +1053,12 @@ class Solver {
     int flips = 0;
     for (Eigen::Index i = 0; i < p_; ++i) {
       const RowRetraction rr = row_retraction(i, wGx_[i] - h_[i]);
-      if ((rr.v1 > 0) != (v1r_[i] > 0) &&
-          std::abs(rr.v1 * v1r_[i]) > corner2) {
+      if ((rr.v_t > 0) != (v_t_r_[i] > 0) &&
+          std::abs(rr.v_t * v_t_r_[i]) > corner2) {
         flips++;
       }
-      if ((rr.v2 > 0) != (v2r_[i] > 0) &&
-          std::abs(rr.v2 * v2r_[i]) > corner2) {
+      if ((rr.v_in > 0) != (v_in_r_[i] > 0) &&
+          std::abs(rr.v_in * v_in_r_[i]) > corner2) {
         flips++;
       }
     }
@@ -1073,15 +1073,15 @@ class Solver {
     for (Eigen::Index i = 0; i < p_; ++i) {
       const RowRetraction rr = row_retraction(i, wGx_[i] - h_[i]);
       tr_[i] = rr.t;
-      v1r_[i] = rr.v1;
-      v2r_[i] = rr.v2;
+      v_t_r_[i] = rr.v_t;
+      v_in_r_[i] = rr.v_in;
     }
   }
 
-  // Reduced Newton matrix after eliminating (t, v1, v2).
+  // Reduced Newton matrix after eliminating (t, v_t, v_in).
   bool relax_factor(double rho, double delta) {
-    einvr_ = ((d1r_ + d2r_).array() + rho).cwiseInverse();
-    lamr_ = d2r_.array() * (d1r_.array() + rho) * einvr_.array();
+    einvr_ = ((d_t_r_ + d_in_r_).array() + rho).cwiseInverse();
+    lamr_ = d_in_r_.array() * (d_t_r_.array() + rho) * einvr_.array();
     GS_.noalias() = lamr_.cwiseSqrt().asDiagonal() * G_;
     K_.triangularView<Eigen::Lower>() = Q_;
     K_.diagonal().array() += rho;
@@ -1098,8 +1098,8 @@ class Solver {
     sol_.x = xr_.cwiseProduct(dx_s_);
     sol_.t = tr_.cwiseProduct(inv_di_);
     sol_.y = yr_.cwiseProduct(y_us_);
-    sol_.z = z2r_.cwiseProduct(z_us_);
-    sol_.z_t = z1r_.cwiseProduct(z_us_);
+    sol_.z = z_in_r_.cwiseProduct(z_us_);
+    sol_.z_t = z_t_r_.cwiseProduct(z_us_);
     sol_.status = status;
     sol_.converged = status == Status::kSolved ? 1 : 0;
     sol_.iters = iters;
@@ -1109,7 +1109,7 @@ class Solver {
     wQx_.noalias() = Q_ * xr_;
     const double xQx = xr_.dot(wQx_);
     sol_.primal_obj = (0.5 * xQx + q_.dot(xr_) + penalty_.dot(tr_)) / c_s_;
-    double dual_obj = (-0.5 * xQx - h_.dot(z2r_)) / c_s_;
+    double dual_obj = (-0.5 * xQx - h_.dot(z_in_r_)) / c_s_;
     if (m_ > 0) dual_obj -= b_.dot(yr_) / c_s_;
     sol_.primal_res = relax_primal_res_;
     sol_.dual_res = relax_dual_res_;
@@ -1124,10 +1124,10 @@ class Solver {
     return std::max(r + mu_in_ * (z_[i] - penalty_[i]), 0.0);
   }
 
-  // Retraction coordinates (t, v1, v2) of row i from the solve() iterate
+  // Retraction coordinates (t, v_t, v_in) of row i from the solve() iterate
   // (v = z - s).
   struct RowRetraction {
-    double t, v1, v2;
+    double t, v_t, v_in;
   };
   RowRetraction row_retraction(Eigen::Index i, double r) const {
     const double t = elastic_slack(i, r);
@@ -1312,11 +1312,11 @@ class Solver {
   std::vector<double> bp_;
 
   // relax() workspace and warm-start state.
-  VectorXd xr_, tr_, yr_, v1r_, v2r_;
-  VectorXd z1r_, z2r_, s1r_, s2r_;
+  VectorXd xr_, tr_, yr_, v_t_r_, v_in_r_;
+  VectorXd z_t_r_, z_in_r_, s_t_r_, s_in_r_;
   VectorXd rf1_, rf2_, rf3_, rf4_, rf5_;
-  VectorXd d1r_, d2r_, einvr_, lamr_, wr_, pvr_;
-  VectorXd dxr_, dtr_, dyr_, dv1r_, dv2r_;
+  VectorXd d_t_r_, d_in_r_, einvr_, lamr_, wr_, pvr_;
+  VectorXd dxr_, dtr_, dyr_, dv_t_r_, dv_in_r_;
   Eigen::LLT<MatrixXd, Eigen::Lower> llt_r_;
   double relax_primal_res_ = 0, relax_dual_res_ = 0;
   double relax_merit_ = 0;

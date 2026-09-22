@@ -250,8 +250,8 @@ def _outer(a, b):
 # See also: kkt_vjp.hpp (c++ version) and _vjp_torch in torch.py
 def _kkt_bwd(res, ct):
     """Implicit differentiation of the elastic KKT conditions."""
-    Q, A, G, h, x, t, y, z1, z2 = res
-    xb, tb, yb, z1b, z2b, _ = ct
+    Q, A, G, h, x, t, y, z_t, z = res
+    xb, tb, yb, z_tb, zb, _ = ct
     n = Q.shape[-1]
     m = A.shape[-2]
 
@@ -261,18 +261,14 @@ def _kkt_bwd(res, ct):
     mv = lambda M, v: jnp.einsum("...ij,...j->...i", M, v)
 
     D = mv(G, x) - t - h
-    E = D - z2 * t / z1
+    E = D - z * t / z_t
 
-    # Rescaled rhs for the symmetrized transpose solve.
-    r1, r2, r3 = xb, tb, yb
-    r4 = -z1 * z1b
-    r5 = z2 * z2b
+    # Eliminating the t, z_t, z rows reduces the adjoint system to (x, y).
+    rt = -z_t * z_tb + t * tb
+    rh = z * zb + z * rt / z_t
+    rhs_x = xb - mv(Gt, rh / E)
 
-    r5t = r5 + z2 * (r4 + t * r2) / z1
-    rhs_x = r1 - mv(Gt, r5t / E)
-
-    # (n+m) saddle system for (v1, v3).
-    H = Qs + jnp.einsum("...ji,...j,...jk->...ik", G, -z2 / E, G)
+    H = Qs + jnp.einsum("...ji,...j,...jk->...ik", G, -z / E, G)
     KKT = jnp.concatenate(
         [
             jnp.concatenate([H, At], axis=-1),
@@ -280,21 +276,20 @@ def _kkt_bwd(res, ct):
         ],
         axis=-2,
     )
-    sol = jnp.linalg.solve(KKT, jnp.concatenate([rhs_x, r3], axis=-1))
-    v1 = sol[..., :n]
-    v3 = sol[..., n:]
+    vxy = jnp.linalg.solve(KKT, jnp.concatenate([rhs_x, yb], axis=-1))
+    vx = vxy[..., :n]
+    vy = vxy[..., n:]
 
-    v5 = (r5t - z2 * mv(G, v1)) / E
-    # u = D_r v: u1 = v1, u2 = v2, u3 = v3, u5 = v5/z2 (u4 unused).
-    v2 = (r4 + t * r2 + t * v5) / z1
+    vh = (rh - z * mv(G, vx)) / E
+    vpen = (rt + t * vh) / z_t
 
-    qb = -v1
-    penalty_b = -v2
-    bb = v3
-    hb = v5  # = z2 * u5
-    Qb = -0.5 * (_outer(v1, x) + _outer(x, v1))
-    Ab = -(_outer(y, v1) + _outer(v3, x))
-    Gb = -(_outer(z2, v1) + _outer(v5, x))
+    qb = -vx
+    penalty_b = -vpen
+    bb = vy
+    hb = vh
+    Qb = -0.5 * (_outer(vx, x) + _outer(x, vx))
+    Ab = -(_outer(y, vx) + _outer(vy, x))
+    Gb = -(_outer(z, vx) + _outer(vh, x))
     return Qb, qb, Ab, bb, Gb, hb, penalty_b
 
 
@@ -373,8 +368,8 @@ def _solve_fwd(
         target_kappa,
         method,
     )
-    x, t, y, z1, z2, xr, tr, yr, z1r, z2r, info = out
-    return (x, t, y, z1, z2, info), (Q, A, G, h, xr, tr, yr, z1r, z2r)
+    x, t, y, z_t, z, xr, tr, yr, z_t_r, z_r, info = out
+    return (x, t, y, z_t, z, info), (Q, A, G, h, xr, tr, yr, z_t_r, z_r)
 
 
 def _solve_bwd(eps_abs, max_iter, ruiz, vmap_method, target_kappa, method, res, ct):

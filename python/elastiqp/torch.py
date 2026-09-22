@@ -205,9 +205,9 @@ def _(Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, target_kappa, method):
 
 def _setup_context(ctx, inputs, output):
     Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, target_kappa, method = inputs
-    xr, tr, yr, z1r, z2r = output[5:10]
+    xr, tr, yr, z_t_r, z_r = output[5:10]
     # Differentiate at the kappa-relaxed point (the tight block is the value).
-    ctx.save_for_backward(Q, A, G, h, xr, tr, yr, z1r, z2r)
+    ctx.save_for_backward(Q, A, G, h, xr, tr, yr, z_t_r, z_r)
     ctx.target_kappa = target_kappa
     ctx.method = method
 
@@ -223,8 +223,8 @@ def _vjp_impl(
     xr: torch.Tensor,
     tr: torch.Tensor,
     yr: torch.Tensor,
-    z1r: torch.Tensor,
-    z2r: torch.Tensor,
+    z_t_r: torch.Tensor,
+    z_r: torch.Tensor,
     ct_x: torch.Tensor,
     ct_t: torch.Tensor,
     ct_y: torch.Tensor,
@@ -249,8 +249,8 @@ def _vjp_impl(
             _np(xr),
             _np(tr),
             _np(yr),
-            _np(z1r),
-            _np(z2r),
+            _np(z_t_r),
+            _np(z_r),
             _np(ct_x),
             _np(ct_t),
             _np(ct_y),
@@ -264,7 +264,7 @@ def _vjp_impl(
     ctf = [flat(c, (c.shape[-1],)) for c in (ct_x, ct_t, ct_y, ct_z_t, ct_z)]
     Qf, Af, Gf, hf = flat(Q, (n, n)), flat(A, (m, n)), flat(G, (p, n)), flat(h, (p,))
     xf, tf, yf = flat(xr, (n,)), flat(tr, (p,)), flat(yr, (m,))
-    z1f, z2f = flat(z1r, (p,)), flat(z2r, (p,))
+    z_tf, zf = flat(z_t_r, (p,)), flat(z_r, (p,))
     dims = ((n, n), (n,), (m, n), (m,), (p, n), (p,), (p,))
     out = [np.empty((nb,) + d) for d in dims]
     for i in range(nb):
@@ -276,8 +276,8 @@ def _vjp_impl(
             xf[i],
             tf[i],
             yf[i],
-            z1f[i],
-            z2f[i],
+            z_tf[i],
+            zf[i],
             ctf[0][i],
             ctf[1][i],
             ctf[2][i],
@@ -295,7 +295,7 @@ _kkt_vjp = torch.library.custom_op(
 
 
 @_kkt_vjp.register_fake
-def _(Q, A, G, h, xr, tr, yr, z1r, z2r, ct_x, ct_t, ct_y, ct_z_t, ct_z):
+def _(Q, A, G, h, xr, tr, yr, z_t_r, z_r, ct_x, ct_t, ct_y, ct_z_t, ct_z):
     batch = Q.shape[:-2]
     n, m, p = Q.shape[-1], A.shape[-2], G.shape[-2]
     dims = ((n, n), (n,), (m, n), (m,), (p, n), (p,), (p,))
@@ -373,19 +373,18 @@ class _Solve(torch.autograd.Function):
         return _vmap_rule(_Solve.apply, info, in_dims, *args)
 
 
-def _vjp_torch(Q, A, G, h, x, t, y, z1, z2, ct_x, ct_t, ct_y, ct_z_t, ct_z):
+def _vjp_torch(Q, A, G, h, x, t, y, z_t, z, ct_x, ct_t, ct_y, ct_z_t, ct_z):
     """KKT VJP in torch ops, for the torch.func transforms.
 
-    Port of _kkt_bwd in python/elastiqp/jax.py (see its docstring for the
-    derivation; include/elastiqp/kkt_vjp.hpp is the C++ mirror used on the
-    plain autograd path). Same argument convention as _vjp_impl: size-0
-    cotangents mean zero. tests/test_torch.py pins this against the C++
-    path.
+    Port of _kkt_bwd in python/elastiqp/jax.py; include/elastiqp/kkt_vjp.hpp
+    is the C++ mirror used on the plain autograd path. Same argument
+    convention as _vjp_impl: size-0 cotangents mean zero. tests/test_torch.py
+    pins this against the C++ path.
     """
     n, m, p = Q.shape[-1], A.shape[-2], G.shape[-2]
     fill = lambda c, d: c if c.shape[-1] == d else Q.new_zeros(Q.shape[:-2] + (d,))
     xb, tb, yb = fill(ct_x, n), fill(ct_t, p), fill(ct_y, m)
-    z1b, z2b = fill(ct_z_t, p), fill(ct_z, p)
+    z_tb, zb = fill(ct_z_t, p), fill(ct_z, p)
 
     Qs = 0.5 * (Q + Q.transpose(-1, -2))
     Gt = G.transpose(-1, -2)
@@ -393,16 +392,14 @@ def _vjp_torch(Q, A, G, h, x, t, y, z1, z2, ct_x, ct_t, ct_y, ct_z_t, ct_z):
     mv = lambda M, v: (M @ v.unsqueeze(-1)).squeeze(-1)
     outer = lambda a, c: a.unsqueeze(-1) * c.unsqueeze(-2)
 
-    D = mv(G, x) - t - h  # = -s2 <= 0
-    E = D - z2 * t / z1  # < 0 at any interior point
+    D = mv(G, x) - t - h  # = -s_in <= 0
+    E = D - z * t / z_t  # < 0 at any interior point
 
-    r1, r2, r3 = xb, tb, yb
-    r4 = -z1 * z1b
-    r5 = z2 * z2b
-    r5t = r5 + z2 * (r4 + t * r2) / z1
-    rhs_x = r1 - mv(Gt, r5t / E)
+    rt = -z_t * z_tb + t * tb
+    rh = z * zb + z * rt / z_t
+    rhs_x = xb - mv(Gt, rh / E)
 
-    H = Qs + Gt @ ((-z2 / E).unsqueeze(-1) * G)
+    H = Qs + Gt @ ((-z / E).unsqueeze(-1) * G)
     KKT = torch.cat(
         [
             torch.cat([H, At], dim=-1),
@@ -410,17 +407,17 @@ def _vjp_torch(Q, A, G, h, x, t, y, z1, z2, ct_x, ct_t, ct_y, ct_z_t, ct_z):
         ],
         dim=-2,
     )
-    sol = torch.linalg.solve(KKT, torch.cat([rhs_x, r3], dim=-1))
-    v1 = sol[..., :n]
-    v3 = sol[..., n:]
+    vxy = torch.linalg.solve(KKT, torch.cat([rhs_x, yb], dim=-1))
+    vx = vxy[..., :n]
+    vy = vxy[..., n:]
 
-    v5 = (r5t - z2 * mv(G, v1)) / E
-    v2 = (r4 + t * r2 + t * v5) / z1
+    vh = (rh - z * mv(G, vx)) / E
+    vpen = (rt + t * vh) / z_t
 
-    Qb = -0.5 * (outer(v1, x) + outer(x, v1))
-    Ab = -(outer(y, v1) + outer(v3, x))
-    Gb = -(outer(z2, v1) + outer(v5, x))
-    return Qb, -v1, Ab, v3, Gb, v5, -v2
+    Qb = -0.5 * (outer(vx, x) + outer(x, vx))
+    Ab = -(outer(y, vx) + outer(vy, x))
+    Gb = -(outer(z, vx) + outer(vh, x))
+    return Qb, -vx, Ab, vy, Gb, vh, -vpen
 
 
 # --- public API --------------------------------------------------------------
