@@ -1,42 +1,17 @@
-// XLA FFI for ElastiQP
+// XLA FFI handlers for ElastiQP. Every call builds a fresh solver (XLA
+// assumes purity), so warm starting is an explicit argument.
 //
-// Signature:
+//   ElastiqpSolve:     (Q, q, A, b, G, h, penalty)
+//                        -> (x, t, y, z_t, z, xr, tr, yr, z_t_r, z_r, info)
+//   ElastiqpSolveWarm: (Q, q, A, b, G, h, penalty, x0, y0, z0)
+//                        -> (x, t, y, z_t, z, info)
 //
-//   (Q, q, A, b, G, h, penalty)
-//       -> (x, t, y, z_t, z, xr, tr, yr, z_t_r, z_r, info)
-//
-// `method` selects the backend: 0 = active set (elastiqp::das), 1 = PDAL,
-// 2 = interior point. `ruiz` (0/1) enables equilibration. `max_iter` is the
-// backend's outer budget (active-set iterations / BCL rounds / IPM
-// iterations).
-//
-// info = [converged, iters, relax_converged]; converged/iters describe the
-// tight solve, relax_converged the kappa relaxation (== converged when no
-// relaxation runs).
-//
-// All buffers are float64. Equality constraints are optional: pass A
-// with 0 rows and b with 0 entries for the inequality-only form.
-//
-// The (xr, ...) block is the kappa-relaxed central point used for smoothed
-// implicit differentiation (see qpax): when target_kappa > 0, we re-solve
-// from the optimum to the point satisfying the same KKT conditions with
-// complementarity s.z = kappa (via the log-barrier retraction), and the
-// Python wrapper differentiates there while still returning the tight
-// solution as the value. When target_kappa <= 0 the relaxed block is a
-// copy of the tight solution. Only the PDAL and IPM backends have relax();
-// with method = 0 and target_kappa > 0 the handler returns an error.
-//
-// Every call constructs a fresh solver, since JAX/XLA expect functional
-// purity. Warm starting is therefore explicit: the second handler,
-//
-//   (Q, q, A, b, G, h, penalty, x0, y0, z0) -> (x, t, y, z_t, z, info)
-//
-// seeds the fresh solver from a user-frame point (x0, y0, z0), typically
-// the previous tick's solution carried through the JAX program as state.
-// This keeps the iterate warm start of each backend (DAS reads its working
-// set off z0; PDAL / IPM start their iterates there) but not the
-// factorization cache a persistent solver would reuse. No relaxation, no
-// gradients.
+// method: 0 = das, 1 = pdal, 2 = ipm. max_iter is the backend's outer budget.
+// The *r block is the kappa-relaxed point the Python wrappers differentiate
+// at; it copies the tight solution when target_kappa <= 0, and das cannot
+// relax. info = [converged, iters, relax_converged], without the last entry
+// for the warm handler. A has 0 rows and b 0 entries when there are no
+// equalities.
 
 #include <algorithm>
 #include <cstdint>
@@ -84,7 +59,6 @@ void apply_options(elastiqp::ipm::Solver& solver, double eps_abs,
   solver.settings.ruiz = ruiz != 0;
 }
 
-// Seed a freshly set-up solver from a user-frame (x0, y0, z0).
 template <typename SolverT>
 void apply_warm_start(SolverT& solver, const VectorXd& x0, const VectorXd& y0,
                       const VectorXd& z0) {
@@ -95,9 +69,7 @@ void apply_warm_start(SolverT& solver, const VectorXd& x0, const VectorXd& y0,
   }
 }
 
-// Fresh solver per call: XLA assumes FFI calls are pure. Returns the tight
-// solution and, when kappa > 0, the relaxed point. With x0 != nullptr the
-// solve is seeded from (x0, y0, z0).
+// x0 != nullptr seeds the solve from (x0, y0, z0).
 template <typename SolverT>
 void run_solver(double eps_abs, int64_t max_iter, int64_t ruiz,
                 double target_kappa, int64_t n, int64_t m, int64_t p,
@@ -116,11 +88,7 @@ void run_solver(double eps_abs, int64_t max_iter, int64_t ruiz,
                      VectorXd(MapVector(y0, m)), VectorXd(MapVector(z0, p)));
   }
   sol = solver.solve();
-  // The relax tolerance is decoupled from eps_abs: the VJP linearizes at
-  // the relaxed point, so gradient accuracy is set by THIS residual, and
-  // the Newton corrector buys digits cheaply. min() keeps an explicitly
-  // tight eps_abs tightening the gradients too, without a loose forward
-  // tolerance loosening them.
+  // Gradient accuracy is set by the relax residual, so cap it at 1e-6.
   if constexpr (std::is_same_v<SolverT, elastiqp::das::Solver>) {
     rsol = sol;
   } else {
@@ -130,7 +98,6 @@ void run_solver(double eps_abs, int64_t max_iter, int64_t ruiz,
   }
 }
 
-// Backend dispatch shared by both handlers.
 ffi::Error dispatch(int64_t method, double eps_abs, int64_t max_iter,
                     int64_t ruiz, double target_kappa, int64_t n, int64_t m,
                     int64_t p, const double* Q, const double* q,
@@ -208,7 +175,6 @@ ffi::Error ElastiqpSolveImpl(
   return ffi::Error::Success();
 }
 
-// Warm-started solve: no relaxation block, info = [converged, iters].
 ffi::Error ElastiqpSolveWarmImpl(
     double eps_abs, int64_t max_iter, int64_t ruiz, int64_t method,
     ffi::Buffer<ffi::F64> Q, ffi::Buffer<ffi::F64> q, ffi::Buffer<ffi::F64> A,
