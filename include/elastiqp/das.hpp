@@ -19,39 +19,41 @@ namespace elastiqp::das {
 struct Settings {
   double eps_abs = 1e-6;
   double eps_rel = 0.0;
-  double sing_tol =
-      3.7e-11;  // working-set LDL^T pivot below this = dependent row
-  double zero_tol = 1e-11;  // min/max Cholesky pivot ratio accepted for Q_s
-                            // before adding a prox shift
-  double eps_prox = 1e-6;   // initial prox shift (x max|diag Q_s|) when Q_s is
-                            // not PD; 0 disables
-  double eta_prox =
-      0.0;  // outer-loop tolerance on eps*|x - xc|_inf; 0 -> eps_abs
-  double prox_relaxation = 1.5;  // over-relaxation of the prox center when the
-                                 // working set stopped changing; <=1 disables
-  int prox_escalations =
-      3;  // max 100x prox-shift increases after an inner numerical failure
-  int max_iter = 10000;  // inner active-set iterations per outer iteration
+  // Working-set LDL^T pivot below this = dependent row.
+  double sing_tol = 3.7e-11;
+  // Min/max Cholesky pivot ratio accepted for Q_s before adding a prox shift.
+  double zero_tol = 1e-11;
+  // Initial prox shift (x max|diag Q_s|) when Q_s is not PD; 0 disables.
+  double eps_prox = 1e-6;
+  // Outer-loop tolerance on eps*|x - xc|_inf; 0 -> eps_abs.
+  double eta_prox = 0.0;
+  // Over-relaxation of the prox center when the working set stopped changing;
+  // <=1 disables.
+  double prox_relaxation = 1.5;
+  // Max 100x prox-shift increases after an inner numerical failure.
+  int prox_escalations = 3;
+  // Inner active-set iterations per outer iteration.
+  int max_iter = 10000;
   int max_outer = 1000;
   bool warm_start = true;
-  bool reuse_factorization = true;  // keep the Cholesky of Q_s across solves
-                                    // when only rows/vectors changed
+  // Keep the Cholesky of Q_s across solves when only rows/vectors changed.
+  bool reuse_factorization = true;
 
   bool ruiz = true;
   int ruiz_max_iter = 10;
   double ruiz_tol = 1e-3;
-  double ruiz_refresh_ratio =
-      4.0;  // re-equilibrate when scaling drift exceeds this; 0 = never
+  // Re-equilibrate when scaling drift exceeds this; 0 = never.
+  double ruiz_refresh_ratio = 4.0;
 
-  bool check_eq_consistency =
-      true;  // return kInfeasible early on inconsistent equalities
+  // Return kInfeasible early on inconsistent equalities.
+  bool check_eq_consistency = true;
 
-  double progress_tol = 1e-14;  // absolute dual-objective increase counted as
-                                // progress by the cycle guard
-  int cycle_tol =
-      10;  // stalled iterations after a removal before repair / kNumerics
-  double refactor_tol =
-      1e-9;  // at optimality, refactor once if the smallest pivot is below this
+  // Absolute dual-objective increase counted as progress by the cycle guard.
+  double progress_tol = 1e-14;
+  // Stalled iterations after a removal before repair / kNumerics.
+  int cycle_tol = 10;
+  // At optimality, refactor once if the smallest pivot is below this.
+  double refactor_tol = 1e-9;
 
   double prox_tol() const { return eta_prox > 0 ? eta_prox : eps_abs; }
 };
@@ -786,8 +788,9 @@ class Solver {
   }
 
   Status ldp(int& iters) {
-    int singular_sign = 0;  // +1: new row came from inactive (lam rising from
-                            // 0); -1: from saturated (falling from hi)
+    // +1: new row came from inactive (lam rising from 0); -1: from saturated
+    // (falling from hi).
+    int singular_sign = 0;
     const int k0 = static_cast<int>(W_.size());
     if (k0 > 0 && D_[k0 - 1] <= settings.sing_tol) singular_sign = 1;
     double best_dual = -std::numeric_limits<double>::infinity();
