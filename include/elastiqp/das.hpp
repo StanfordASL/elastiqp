@@ -1,3 +1,5 @@
+// Elastic dual active-set backend, based on DAQP
+
 #pragma once
 
 #include <Eigen/Cholesky>
@@ -42,7 +44,6 @@ struct Settings {
   double prox_tol() const { return eta_prox > 0 ? eta_prox : eps_abs; }
 };
 
-// Dual active-set solver for the elastic QP
 class Solver {
  public:
   Settings settings;

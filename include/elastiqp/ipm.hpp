@@ -1,3 +1,5 @@
+// Elastic proximal interior-point backend, based on PIQP
+
 #pragma once
 
 #include <Eigen/Cholesky>
@@ -13,8 +15,6 @@
 
 #include "elastiqp/common.hpp"
 
-// Proximal interior-point backend after PIQP, with the elastic condensation
-// of the paper's appendix. Also the test oracle for the other backends.
 namespace elastiqp::ipm {
 
 struct Settings {

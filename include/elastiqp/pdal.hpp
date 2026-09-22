@@ -1,3 +1,5 @@
+// Elastic primal-dual augmented Lagrangian backend, based on ProxQP
+
 #pragma once
 
 #include <Eigen/Cholesky>
