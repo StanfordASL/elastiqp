@@ -1,5 +1,4 @@
-// nanobind bindings for ElastiQP: the three backends (active set, PDAL,
-// interior point) behind one module, sharing Status and Solution.
+// nanobind bindings for ElastiQP, compiled as elastiqp._core.
 
 #include <nanobind/eigen/dense.h>
 #include <nanobind/nanobind.h>
@@ -32,10 +31,7 @@ Method parse_method(const std::string& method) {
                               method + "'");
 }
 
-// Per-backend mapping of the generic one-shot options (eps_abs, max_iter,
-// ruiz) onto the backend's own settings. max_iter counts the backend's
-// outer budget: BCL rounds (PDAL), interior-point iterations (IPM),
-// active-set iterations (DAS).
+// max_iter is the backend's outer budget.
 inline void apply_options(elastiqp::das::Settings& s, std::optional<double> eps,
                           std::optional<int> max_iter, std::optional<bool> ruiz) {
   if (eps) s.eps_abs = *eps;
@@ -81,8 +77,7 @@ Solution solve_with(const Eigen::MatrixXd& Q, const Eigen::VectorXd& q,
   return solver.solve();
 }
 
-// Settings_t helper: the backends name their settings type `Settings` in
-// their own namespace; give solve_with a uniform way to reach it.
+// Lets solve_with reach each backend's Settings type uniformly.
 struct DAS : elastiqp::das::Solver { using Settings_t = elastiqp::das::Settings; };
 struct PDAL : elastiqp::pdal::Solver { using Settings_t = elastiqp::pdal::Settings; };
 struct IPM : elastiqp::ipm::Solver { using Settings_t = elastiqp::ipm::Settings; };
@@ -157,8 +152,6 @@ void def_update(nb::class_<SolverT>& cls) {
       "Update a subset of the problem data between solves");
 }
 
-// Shared setup() overloads (vector and scalar penalty), the set_* updates,
-// and the accessors every backend has.
 template <typename SolverT>
 void def_common(nb::class_<SolverT>& cls) {
   cls.def(nb::init<>())
@@ -217,7 +210,6 @@ void def_common(nb::class_<SolverT>& cls) {
   def_update(cls);
 }
 
-// relax() for the backends that have it (PDAL, IPM).
 template <typename SolverT>
 void def_relax(nb::class_<SolverT>& cls, int default_max_iter) {
   cls.def(
@@ -234,7 +226,6 @@ void def_relax(nb::class_<SolverT>& cls, int default_max_iter) {
 
 }  // namespace
 
-// Compiled as elastiqp._core
 NB_MODULE(_core, m) {
   m.doc() =
       "ElastiQP: an elastic QP solver with per-constraint L1 slack "
@@ -587,15 +578,9 @@ NB_MODULE(_core, m) {
       solve_doc);
 
   // --- differentiation primitives (used by elastiqp.torch) -----------------
-  //
-  // Mirror of the JAX FFI handler (bindings/jax_ffi.cc): one cold solve, plus
-  // the kappa-relaxed central point when target_kappa > 0, in a single call
-  // so an autograd framework pays one crossing per solve. Returns the tuple
+
+  // Same contract as ElastiqpSolve in jax_ffi.cc:
   //   (x, t, y, z_t, z, xr, tr, yr, z_t_r, z_r, info)
-  // with info = [converged, iters, relax_converged] as float64. method is
-  // 'das', 'pdal' or 'ipm'; the relaxed block is only computed for pdal /
-  // ipm (the active-set backend has no relax(); with target_kappa > 0 it
-  // raises), otherwise it is a copy of the tight solution.
   m.def(
       "_solve_relaxed",
       [](const Eigen::MatrixXd& Q, const Eigen::VectorXd& q,
@@ -611,8 +596,7 @@ NB_MODULE(_core, m) {
               "use method='pdal' or 'ipm' for gradients");
         }
         Solution sol, rsol;
-        // Same relax tolerance rule as the JAX FFI: decoupled from eps_abs,
-        // since the VJP's accuracy is set by this residual.
+        // Gradient accuracy is set by the relax residual, so cap it at 1e-6.
         const double rtol = std::min(eps_abs, 1e-6);
         if (mth == Method::kDAS) {
           elastiqp::das::Solver solver;
@@ -645,11 +629,7 @@ NB_MODULE(_core, m) {
       nb::arg("max_iter"), nb::arg("ruiz"), nb::arg("target_kappa"),
       nb::arg("method") = "pdal");
 
-  // Reverse-mode implicit differentiation of the elastic KKT system at a
-  // relaxed point (include/elastiqp/kkt_vjp.hpp). Pass the relaxed block of
-  // _solve_relaxed as (x, t, y, z_t, z) and the loss cotangents; empty
-  // cotangent vectors are treated as zero. Returns
-  //   (Q_bar, q_bar, A_bar, b_bar, G_bar, h_bar, penalty_bar).
+  // KktVjp at the relaxed block of _solve_relaxed; empty cotangents are zero.
   m.def(
       "_kkt_vjp",
       [](const Eigen::MatrixXd& Q, const Eigen::MatrixXd& A,
