@@ -107,7 +107,7 @@ class Solver {
 
     ztilde_.resize(p_);
     t_.resize(p_);
-    s2_.resize(p_);
+    s_in_.resize(p_);
     r_.resize(p_);
     dzs_.resize(p_);
     jump_res_prev_.resize(p_);
@@ -1167,13 +1167,13 @@ class Solver {
     double in_res = 0.0;
     for (Eigen::Index i = 0; i < p_; ++i) {
       t_[i] = elastic_slack(i, r_[i]);
-      s2_[i] = std::max(t_[i] - r_[i], 0.0);
+      s_in_[i] = std::max(t_[i] - r_[i], 0.0);
       in_res = std::max(in_res, (r_[i] - t_[i]) * inv_di_[i]);
     }
     in_res = std::max(in_res, 0.0);
     double primal_rel_norm = std::max(
         {inf_us(wGx_ - t_, inv_di_), inf_us(h_, inv_di_),
-         inf_us(s2_, inv_di_), inf_us(t_, inv_di_)});
+         inf_us(s_in_, inv_di_), inf_us(t_, inv_di_)});
     double eq_res = 0.0;
     if (m_ > 0) {
       wAx_.noalias() = A_ * x_;
@@ -1303,7 +1303,7 @@ class Solver {
 
   // Inner-loop workspace.
   VectorXd ztilde_;
-  VectorXd t_, s2_, r_, dzs_;
+  VectorXd t_, s_in_, r_, dzs_;
   VectorXd jump_res_prev_, jump_res_cur_;
   VectorXd verr_, dyrhs_, rhs_x_, dx_, dy_, dz_, Qdx_, Adx_, Gdx_;
   VectorXd wQx_, wGtz_, wGtd_, wAty_, wAx_, wGx_;

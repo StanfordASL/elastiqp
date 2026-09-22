@@ -77,40 +77,40 @@ class Solver {
     x_.resize(n_);
     t_.resize(p_);
     y_.resize(m_);
-    s1_.resize(p_);
-    s2_.resize(p_);
-    z1_.resize(p_);
-    z2_.resize(p_);
+    s_t_.resize(p_);
+    s_in_.resize(p_);
+    z_t_.resize(p_);
+    z_in_.resize(p_);
     xi_x_.resize(n_);
     xi_t_.resize(p_);
     nu_y_.resize(m_);
-    nu1_.resize(p_);
-    nu2_.resize(p_);
+    nu_t_.resize(p_);
+    nu_in_.resize(p_);
 
     rnr_x_.resize(n_);
     rnr_t_.resize(p_);
     rnr_y_.resize(m_);
-    rnr_z1_.resize(p_);
-    rnr_z2_.resize(p_);
+    rnr_z_t_.resize(p_);
+    rnr_z_in_.resize(p_);
     res_x_.resize(n_);
     res_t_.resize(p_);
     res_y_.resize(m_);
-    res_z1_.resize(p_);
-    res_z2_.resize(p_);
-    res_s1_.resize(p_);
-    res_s2_.resize(p_);
+    res_z_t_.resize(p_);
+    res_z_in_.resize(p_);
+    res_s_t_.resize(p_);
+    res_s_in_.resize(p_);
 
-    w1_.resize(p_);
-    w2_.resize(p_);
-    w1_inv_.resize(p_);
-    w2_inv_.resize(p_);
+    w_t_.resize(p_);
+    w_in_.resize(p_);
+    w_t_inv_.resize(p_);
+    w_in_inv_.resize(p_);
     d_inv_.resize(p_);
     lambda_.resize(p_);
     GS_.resize(p_, n_);
     K_.resize(n_, n_);
     llt_ = Eigen::LLT<MatrixXd, Eigen::Lower>(n_);
-    rb1_.resize(p_);
-    rb2_.resize(p_);
+    rb_t_.resize(p_);
+    rb_in_.resize(p_);
     wv_.resize(p_);
     pv_.resize(p_);
     rhs_x_.resize(n_);
@@ -118,12 +118,12 @@ class Solver {
     dx_.resize(n_);
     dt_.resize(p_);
     dy_.resize(m_);
-    ds1_.resize(p_);
-    ds2_.resize(p_);
-    dz1_.resize(p_);
-    dz2_.resize(p_);
+    ds_t_.resize(p_);
+    ds_in_.resize(p_);
+    dz_t_.resize(p_);
+    dz_in_.resize(p_);
     wQx_.resize(n_);
-    wGtz2_.resize(n_);
+    wGtz_in_.resize(n_);
     wGxt_.resize(p_);
     wAty_.resize(n_);
     wAx_.resize(m_);
@@ -240,10 +240,10 @@ class Solver {
         x_.setZero();
         t_.setZero();
         y_.setZero();
-        s1_.setOnes();
-        s2_.setOnes();
-        z1_.setOnes();
-        z2_.setOnes();
+        s_t_.setOnes();
+        s_in_.setOnes();
+        z_t_.setOnes();
+        z_in_.setOnes();
       }
       if (p_ > 0) {
         update_residuals_nr();
@@ -287,8 +287,8 @@ class Solver {
 
     xi_x_ = x_;
     xi_t_ = t_;
-    nu1_ = z1_;
-    nu2_ = z2_;
+    nu_t_ = z_t_;
+    nu_in_ = z_in_;
     if (m_ > 0) nu_y_ = y_;
 
     update_residuals_nr();
@@ -315,8 +315,8 @@ class Solver {
         bool boundary_shifted = false;
         const double eps = std::numeric_limits<double>::epsilon();
         for (Eigen::Index i = 0; i < p_; ++i) {
-          if (z1_[i] < eps) { z1_[i] += eps; boundary_shifted = true; }
-          if (z2_[i] < eps) { z2_[i] += eps; boundary_shifted = true; }
+          if (z_t_[i] < eps) { z_t_[i] += eps; boundary_shifted = true; }
+          if (z_in_[i] < eps) { z_in_[i] += eps; boundary_shifted = true; }
         }
         if (boundary_shifted) mu_ = calculate_mu();
       }
@@ -357,25 +357,25 @@ class Solver {
       if (regularization_changed) update_residuals_r();
 
       // Predictor step.
-      res_s1_ = -s1_.cwiseProduct(z1_);
-      res_s2_ = -s2_.cwiseProduct(z2_);
-      kkt_solve(res_x_, res_y_, res_t_, res_z1_, res_z2_, res_s1_, res_s2_);
+      res_s_t_ = -s_t_.cwiseProduct(z_t_);
+      res_s_in_ = -s_in_.cwiseProduct(z_in_);
+      kkt_solve(res_x_, res_y_, res_t_, res_z_t_, res_z_in_, res_s_t_, res_s_in_);
 
       double alpha_s, alpha_z;
       calculate_step(alpha_s, alpha_z);
       alpha_s *= settings.tau;
       alpha_z *= settings.tau;
 
-      double sigma = ((s1_ + alpha_s * ds1_).dot(z1_ + alpha_z * dz1_) +
-                      (s2_ + alpha_s * ds2_).dot(z2_ + alpha_z * dz2_)) /
+      double sigma = ((s_t_ + alpha_s * ds_t_).dot(z_t_ + alpha_z * dz_t_) +
+                      (s_in_ + alpha_s * ds_in_).dot(z_in_ + alpha_z * dz_in_)) /
                      (mu_ * static_cast<double>(2 * p_));
       sigma = std::max(0.0, std::min(1.0, sigma));
       sigma = sigma * sigma * sigma;
 
       // Mehrotra corrector with centering sigma.
-      res_s1_.array() += -ds1_.array() * dz1_.array() + sigma * mu_;
-      res_s2_.array() += -ds2_.array() * dz2_.array() + sigma * mu_;
-      kkt_solve(res_x_, res_y_, res_t_, res_z1_, res_z2_, res_s1_, res_s2_);
+      res_s_t_.array() += -ds_t_.array() * dz_t_.array() + sigma * mu_;
+      res_s_in_.array() += -ds_in_.array() * dz_in_.array() + sigma * mu_;
+      kkt_solve(res_x_, res_y_, res_t_, res_z_t_, res_z_in_, res_s_t_, res_s_in_);
 
       calculate_step(alpha_s, alpha_z);
       const double primal_step = alpha_s * settings.tau;
@@ -383,11 +383,11 @@ class Solver {
 
       x_ += primal_step * dx_;
       t_ += primal_step * dt_;
-      s1_ += primal_step * ds1_;
-      s2_ += primal_step * ds2_;
+      s_t_ += primal_step * ds_t_;
+      s_in_ += primal_step * ds_in_;
       if (m_ > 0) y_ += dual_step * dy_;
-      z1_ += dual_step * dz1_;
-      z2_ += dual_step * dz2_;
+      z_t_ += dual_step * dz_t_;
+      z_in_ += dual_step * dz_in_;
 
       const double mu_prev = mu_;
       mu_ = calculate_mu();
@@ -396,11 +396,11 @@ class Solver {
       update_residuals_nr();
 #ifdef ELASTIQP_IPM_DEBUG
       std::printf("it %3d pres %.2e dres %.2e gap %.2e mu %.2e rho %.1e delta %.1e lim %.1e "
-                  "a_p %.2e a_d %.2e sigma %.2e |x| %.2e |t| %.2e |z2| %.2e |z1| %.2e nopu %d nodu %d\n",
+                  "a_p %.2e a_d %.2e sigma %.2e |x| %.2e |t| %.2e |z_in| %.2e |z_t| %.2e nopu %d nodu %d\n",
                   iter, primal_res_, dual_res_, duality_gap_, mu_, rho_, delta_, reg_limit_,
                   primal_step, dual_step, sigma, x_.lpNorm<Eigen::Infinity>(),
-                  t_.lpNorm<Eigen::Infinity>(), z2_.lpNorm<Eigen::Infinity>(),
-                  z1_.lpNorm<Eigen::Infinity>(), no_primal_update_, no_dual_update_);
+                  t_.lpNorm<Eigen::Infinity>(), z_in_.lpNorm<Eigen::Infinity>(),
+                  z_t_.lpNorm<Eigen::Infinity>(), no_primal_update_, no_dual_update_);
 #endif
 
       // Move each prox center only when its residual improved; otherwise
@@ -426,8 +426,8 @@ class Solver {
           (delta_ == settings.reg_finetune_lower_limit &&
            primal_prox_inf_ < settings.infeasibility_threshold)) {
         if (m_ > 0) nu_y_ = y_;
-        nu1_ = z1_;
-        nu2_ = z2_;
+        nu_t_ = z_t_;
+        nu_in_ = z_in_;
         delta_ = std::max(reg_limit_, (1.0 - mu_rate) * delta_);
       } else {
         no_dual_update_++;
@@ -453,8 +453,8 @@ class Solver {
       update_residuals_nr();
       double comp_res = 0;
       for (Eigen::Index i = 0; i < p_; ++i) {
-        comp_res = std::max(comp_res, std::abs(s1_[i] * z1_[i] - kappa_s));
-        comp_res = std::max(comp_res, std::abs(s2_[i] * z2_[i] - kappa_s));
+        comp_res = std::max(comp_res, std::abs(s_t_[i] * z_t_[i] - kappa_s));
+        comp_res = std::max(comp_res, std::abs(s_in_[i] * z_in_[i] - kappa_s));
       }
       comp_res /= c_s_;
       if (std::max({primal_res_, dual_res_, comp_res}) < tol) {
@@ -466,8 +466,8 @@ class Solver {
       // Prox center at the current iterate: regularization without bias.
       xi_x_ = x_;
       xi_t_ = t_;
-      nu1_ = z1_;
-      nu2_ = z2_;
+      nu_t_ = z_t_;
+      nu_in_ = z_in_;
       if (m_ > 0) nu_y_ = y_;
       update_residuals_r();
 
@@ -490,9 +490,9 @@ class Solver {
         break;
       }
 
-      res_s1_.array() = kappa_s - (s1_.array() * z1_.array());
-      res_s2_.array() = kappa_s - (s2_.array() * z2_.array());
-      kkt_solve(res_x_, res_y_, res_t_, res_z1_, res_z2_, res_s1_, res_s2_);
+      res_s_t_.array() = kappa_s - (s_t_.array() * z_t_.array());
+      res_s_in_.array() = kappa_s - (s_in_.array() * z_in_.array());
+      kkt_solve(res_x_, res_y_, res_t_, res_z_t_, res_z_in_, res_s_t_, res_s_in_);
 
       double alpha_s, alpha_z;
       calculate_step(alpha_s, alpha_z);
@@ -501,11 +501,11 @@ class Solver {
 
       x_ += primal_step * dx_;
       t_ += primal_step * dt_;
-      s1_ += primal_step * ds1_;
-      s2_ += primal_step * ds2_;
+      s_t_ += primal_step * ds_t_;
+      s_in_ += primal_step * ds_in_;
       if (m_ > 0) y_ += dual_step * dy_;
-      z1_ += dual_step * dz1_;
-      z2_ += dual_step * dz2_;
+      z_t_ += dual_step * dz_t_;
+      z_in_ += dual_step * dz_in_;
     }
 
     update_residuals_nr();
@@ -584,19 +584,19 @@ class Solver {
       x_ = x;
       t_ = t;
       if (m_ > 0) y_ = y;
-      s1_ = s_t;
-      s2_ = s_ineq;
-      z1_ = z_t;
-      z2_ = z;
+      s_t_ = s_t;
+      s_in_ = s_ineq;
+      z_t_ = z_t;
+      z_in_ = z;
       return;
     }
     x_ = x.cwiseQuotient(dx_s_);
     t_ = t.cwiseProduct(di_s_);
     if (m_ > 0) y_ = c_s_ * y.cwiseQuotient(de_s_);
-    s1_ = s_t.cwiseProduct(di_s_);
-    s2_ = s_ineq.cwiseProduct(di_s_);
-    z1_ = c_s_ * z_t.cwiseQuotient(di_s_);
-    z2_ = c_s_ * z.cwiseQuotient(di_s_);
+    s_t_ = s_t.cwiseProduct(di_s_);
+    s_in_ = s_ineq.cwiseProduct(di_s_);
+    z_t_ = c_s_ * z_t.cwiseQuotient(di_s_);
+    z_in_ = c_s_ * z.cwiseQuotient(di_s_);
   }
 
   const Solution& solve_no_inequalities() {
@@ -619,13 +619,13 @@ class Solver {
 
   // Diagonal scalings for eliminating the t-block (see kkt_solve).
   void update_scalings() {
-    w1_ = s1_.cwiseQuotient(z1_).array() + delta_;
-    w2_ = s2_.cwiseQuotient(z2_).array() + delta_;
-    w1_inv_ = w1_.cwiseInverse();
-    w2_inv_ = w2_.cwiseInverse();
-    d_inv_ = (w1_inv_ + w2_inv_).array() + rho_;
+    w_t_ = s_t_.cwiseQuotient(z_t_).array() + delta_;
+    w_in_ = s_in_.cwiseQuotient(z_in_).array() + delta_;
+    w_t_inv_ = w_t_.cwiseInverse();
+    w_in_inv_ = w_in_.cwiseInverse();
+    d_inv_ = (w_t_inv_ + w_in_inv_).array() + rho_;
     d_inv_ = d_inv_.cwiseInverse();
-    lambda_ = (w1_inv_.array() + rho_) * w2_inv_.array() * d_inv_.array();
+    lambda_ = (w_t_inv_.array() + rho_) * w_in_inv_.array() * d_inv_.array();
   }
 
   // Condensed KKT: K = Q + rho I + A'A/delta + G' diag(lambda) G.
@@ -646,10 +646,10 @@ class Solver {
   void kkt_solve(const VectorXd& v_x, const VectorXd& v_y, const VectorXd& v_t,
                  const VectorXd& v_z1, const VectorXd& v_z2,
                  const VectorXd& v_s1, const VectorXd& v_s2) {
-    rb1_ = v_z1 - v_s1.cwiseQuotient(z1_);
-    rb2_ = v_z2 - v_s2.cwiseQuotient(z2_);
-    wv_ = v_t - w1_inv_.cwiseProduct(rb1_) - w2_inv_.cwiseProduct(rb2_);
-    pv_ = w2_inv_.cwiseProduct(d_inv_.cwiseProduct(wv_) + rb2_);
+    rb_t_ = v_z1 - v_s1.cwiseQuotient(z_t_);
+    rb_in_ = v_z2 - v_s2.cwiseQuotient(z_in_);
+    wv_ = v_t - w_t_inv_.cwiseProduct(rb_t_) - w_in_inv_.cwiseProduct(rb_in_);
+    pv_ = w_in_inv_.cwiseProduct(d_inv_.cwiseProduct(wv_) + rb_in_);
     rhs_x_.noalias() = G_.transpose() * pv_;
     rhs_x_ += v_x;
     if (m_ > 0) {
@@ -662,15 +662,15 @@ class Solver {
       dy_ /= delta_;
     }
     Gdx_.noalias() = G_ * dx_;
-    dt_ = d_inv_.cwiseProduct(wv_ + w2_inv_.cwiseProduct(Gdx_));
-    dz2_ = w2_inv_.cwiseProduct(Gdx_ - dt_ - rb2_);
-    dz1_ = -w1_inv_.cwiseProduct(rb1_ + dt_);
-    ds1_ = (v_s1 - s1_.cwiseProduct(dz1_)).cwiseQuotient(z1_);
-    ds2_ = (v_s2 - s2_.cwiseProduct(dz2_)).cwiseQuotient(z2_);
+    dt_ = d_inv_.cwiseProduct(wv_ + w_in_inv_.cwiseProduct(Gdx_));
+    dz_in_ = w_in_inv_.cwiseProduct(Gdx_ - dt_ - rb_in_);
+    dz_t_ = -w_t_inv_.cwiseProduct(rb_t_ + dt_);
+    ds_t_ = (v_s1 - s_t_.cwiseProduct(dz_t_)).cwiseQuotient(z_t_);
+    ds_in_ = (v_s2 - s_in_.cwiseProduct(dz_in_)).cwiseQuotient(z_in_);
   }
 
   double calculate_mu() const {
-    return (s1_.dot(z1_) + s2_.dot(z2_)) / static_cast<double>(2 * p_);
+    return (s_t_.dot(z_t_) + s_in_.dot(z_in_)) / static_cast<double>(2 * p_);
   }
 
   // Largest step keeping slacks and duals nonnegative.
@@ -678,10 +678,10 @@ class Solver {
     alpha_s = 1.0;
     alpha_z = 1.0;
     for (Eigen::Index i = 0; i < p_; ++i) {
-      if (ds1_[i] < 0) alpha_s = std::min(alpha_s, -s1_[i] / ds1_[i]);
-      if (ds2_[i] < 0) alpha_s = std::min(alpha_s, -s2_[i] / ds2_[i]);
-      if (dz1_[i] < 0) alpha_z = std::min(alpha_z, -z1_[i] / dz1_[i]);
-      if (dz2_[i] < 0) alpha_z = std::min(alpha_z, -z2_[i] / dz2_[i]);
+      if (ds_t_[i] < 0) alpha_s = std::min(alpha_s, -s_t_[i] / ds_t_[i]);
+      if (ds_in_[i] < 0) alpha_s = std::min(alpha_s, -s_in_[i] / ds_in_[i]);
+      if (dz_t_[i] < 0) alpha_z = std::min(alpha_z, -z_t_[i] / dz_t_[i]);
+      if (dz_in_[i] < 0) alpha_z = std::min(alpha_z, -z_in_[i] / dz_in_[i]);
     }
   }
 
@@ -696,29 +696,29 @@ class Solver {
     };
 
     wQx_.noalias() = Q_ * x_;
-    wGtz2_.noalias() = G_.transpose() * z2_;
-    rnr_x_ = -wQx_ - q_ - wGtz2_;
+    wGtz_in_.noalias() = G_.transpose() * z_in_;
+    rnr_x_ = -wQx_ - q_ - wGtz_in_;
     double aty_norm = 0;
     if (m_ > 0) {
       wAty_.noalias() = A_.transpose() * y_;
       rnr_x_ -= wAty_;
       aty_norm = inf_us(wAty_, inv_cdx_);
     }
-    rnr_t_ = z1_ + z2_;
+    rnr_t_ = z_t_ + z_in_;
     const double z12_norm = inf_us(rnr_t_, z_us_);
     rnr_t_ -= penalty_;
     double dual_rel_norm = std::max(
         {inf_us(wQx_, inv_cdx_), inf_us(q_, inv_cdx_),
-         inf_us(wGtz2_, inv_cdx_), aty_norm, z12_norm,
+         inf_us(wGtz_in_, inv_cdx_), aty_norm, z12_norm,
          inf_us(penalty_, z_us_)});
 
     wGxt_.noalias() = G_ * x_;
     wGxt_ -= t_;
-    rnr_z1_ = t_ - s1_;
-    rnr_z2_ = h_ - wGxt_ - s2_;
+    rnr_z_t_ = t_ - s_t_;
+    rnr_z_in_ = h_ - wGxt_ - s_in_;
     double primal_rel_norm = std::max(
-        {inf_us(wGxt_, inv_di_), inf_us(h_, inv_di_), inf_us(s2_, inv_di_),
-         inf_us(t_, inv_di_), inf_us(s1_, inv_di_)});
+        {inf_us(wGxt_, inv_di_), inf_us(h_, inv_di_), inf_us(s_in_, inv_di_),
+         inf_us(t_, inv_di_), inf_us(s_t_, inv_di_)});
     double eq_res_norm = 0;
     if (m_ > 0) {
       wAx_.noalias() = A_ * x_;
@@ -730,10 +730,10 @@ class Solver {
 
     const double xQx = x_.dot(wQx_);
     primal_obj_ = (0.5 * xQx + q_.dot(x_) + penalty_.dot(t_)) / c_s_;
-    double dual_obj = (-0.5 * xQx - h_.dot(z2_)) / c_s_;
+    double dual_obj = (-0.5 * xQx - h_.dot(z_in_)) / c_s_;
     double gap_rel_norm =
         std::max({std::abs(xQx), std::abs(q_.dot(x_)),
-                  std::abs(penalty_.dot(t_)), std::abs(h_.dot(z2_))}) /
+                  std::abs(penalty_.dot(t_)), std::abs(h_.dot(z_in_))}) /
         c_s_;
     if (m_ > 0) {
       const double by = b_.dot(y_);
@@ -743,8 +743,8 @@ class Solver {
     duality_gap_ = std::abs(primal_obj_ - dual_obj);
     duality_gap_rel_ = duality_gap_ / std::max(1.0, gap_rel_norm);
 
-    primal_res_ = std::max({inf_us(rnr_z1_, inv_di_),
-                            inf_us(rnr_z2_, inv_di_), eq_res_norm});
+    primal_res_ = std::max({inf_us(rnr_z_t_, inv_di_),
+                            inf_us(rnr_z_in_, inv_di_), eq_res_norm});
     primal_res_rel_ = primal_res_ / std::max(1.0, primal_rel_norm);
     dual_res_ = std::max(inf_us(rnr_x_, inv_cdx_), inf_us(rnr_t_, z_us_));
     dual_res_rel_ = dual_res_ / std::max(1.0, dual_rel_norm);
@@ -754,11 +754,11 @@ class Solver {
   void update_residuals_r() {
     res_x_ = rnr_x_ - rho_ * (x_ - xi_x_);
     res_t_ = rnr_t_ - rho_ * (t_ - xi_t_);
-    res_z1_ = rnr_z1_ - delta_ * (nu1_ - z1_);
-    res_z2_ = rnr_z2_ - delta_ * (nu2_ - z2_);
+    res_z_t_ = rnr_z_t_ - delta_ * (nu_t_ - z_t_);
+    res_z_in_ = rnr_z_in_ - delta_ * (nu_in_ - z_in_);
     primal_prox_inf_ =
-        delta_ * std::max((nu1_ - z1_).lpNorm<Eigen::Infinity>(),
-                          (nu2_ - z2_).lpNorm<Eigen::Infinity>());
+        delta_ * std::max((nu_t_ - z_t_).lpNorm<Eigen::Infinity>(),
+                          (nu_in_ - z_in_).lpNorm<Eigen::Infinity>());
     if (m_ > 0) {
       res_y_ = rnr_y_ - delta_ * (nu_y_ - y_);
       primal_prox_inf_ =
@@ -775,10 +775,10 @@ class Solver {
     x_.setZero();
     t_.setZero();
     y_.setZero();
-    s1_.setOnes();
-    s2_.setOnes();
-    z1_.setOnes();
-    z2_.setOnes();
+    s_t_.setOnes();
+    s_in_.setOnes();
+    z_t_.setOnes();
+    z_in_.setOnes();
 
     update_scalings();
     while (!factor()) {
@@ -798,29 +798,29 @@ class Solver {
     x_ = dx_;
     t_ = dt_;
     if (m_ > 0) y_ = dy_;
-    z1_ = dz1_;
-    z2_ = dz2_;
-    s1_ = ds1_;
-    s2_ = ds2_;
+    z_t_ = dz_t_;
+    z_in_ = dz_in_;
+    s_t_ = ds_t_;
+    s_in_ = ds_in_;
 
     const double delta_s =
-        std::max(0.0, std::max(-s1_.minCoeff(), -s2_.minCoeff()));
+        std::max(0.0, std::max(-s_t_.minCoeff(), -s_in_.minCoeff()));
     const double delta_z =
-        std::max(0.0, std::max(-z1_.minCoeff(), -z2_.minCoeff()));
-    s1_.array() += delta_s;
-    s2_.array() += delta_s;
-    z1_.array() += delta_z;
-    z2_.array() += delta_z;
+        std::max(0.0, std::max(-z_t_.minCoeff(), -z_in_.minCoeff()));
+    s_t_.array() += delta_s;
+    s_in_.array() += delta_s;
+    z_t_.array() += delta_z;
+    z_in_.array() += delta_z;
 
     // Project each (s, z) pair onto the central path at mu_init.
     const double mu_init = std::max(calculate_mu(), 1e-10);
     for (Eigen::Index i = 0; i < p_; ++i) {
-      double c = z1_[i] - delta_z;
-      z1_[i] = 0.5 * (c + std::sqrt(c * c + 4 * mu_init));
-      s1_[i] = z1_[i] - c;
-      c = z2_[i] - delta_z;
-      z2_[i] = 0.5 * (c + std::sqrt(c * c + 4 * mu_init));
-      s2_[i] = z2_[i] - c;
+      double c = z_t_[i] - delta_z;
+      z_t_[i] = 0.5 * (c + std::sqrt(c * c + 4 * mu_init));
+      s_t_[i] = z_t_[i] - c;
+      c = z_in_[i] - delta_z;
+      z_in_[i] = 0.5 * (c + std::sqrt(c * c + 4 * mu_init));
+      s_in_[i] = z_in_[i] - c;
     }
     return true;
   }
@@ -833,10 +833,10 @@ class Solver {
         std::min(std::max(settings.warm_start_fraction * r,
                           settings.warm_start_min_floor),
                  settings.warm_start_max_floor);
-    s1_ = s1_.cwiseMax(f);
-    s2_ = s2_.cwiseMax(f);
-    z1_ = z1_.cwiseMax(f);
-    z2_ = z2_.cwiseMax(f);
+    s_t_ = s_t_.cwiseMax(f);
+    s_in_ = s_in_.cwiseMax(f);
+    z_t_ = z_t_.cwiseMax(f);
+    z_in_ = z_in_.cwiseMax(f);
   }
 
   // Unscale to the user frame; kNumerics disables warm start, kInfeasible
@@ -845,8 +845,8 @@ class Solver {
     sol_.x = x_.cwiseProduct(dx_s_);
     sol_.t = t_.cwiseProduct(inv_di_);
     sol_.y = y_.cwiseProduct(y_us_);
-    sol_.z = z2_.cwiseProduct(z_us_);
-    sol_.z_t = z1_.cwiseProduct(z_us_);
+    sol_.z = z_in_.cwiseProduct(z_us_);
+    sol_.z_t = z_t_.cwiseProduct(z_us_);
     sol_.status = status;
     sol_.converged = status == Status::kSolved ? 1 : 0;
     sol_.iters = iters;
@@ -869,8 +869,8 @@ class Solver {
   VectorXd q_, b_, h_, penalty_;
   MatrixXd AtA_;  // Lower triangle only.
 
-  // Iterates: (s1, z1) for t >= 0, (s2, z2) for Gx - t <= h.
-  VectorXd x_, t_, y_, s1_, s2_, z1_, z2_;
+  // Iterates.
+  VectorXd x_, t_, y_, s_t_, s_in_, z_t_, z_in_;
   bool have_warm_ = false;
   bool explicit_warm_ = false;
 
@@ -885,15 +885,15 @@ class Solver {
   VectorXd y_us_, z_us_;
 
   // Prox centers.
-  VectorXd xi_x_, xi_t_, nu_y_, nu1_, nu2_;
+  VectorXd xi_x_, xi_t_, nu_y_, nu_t_, nu_in_;
 
   double rho_ = 0, delta_ = 0, reg_limit_ = 0, mu_ = 0;
   int factor_retries_ = 0, no_primal_update_ = 0, no_dual_update_ = 0;
 
   // Negated KKT residuals: rnr_ without prox terms, res_ with.
-  VectorXd rnr_x_, rnr_t_, rnr_y_, rnr_z1_, rnr_z2_;
-  VectorXd res_x_, res_t_, res_y_, res_z1_, res_z2_;
-  VectorXd res_s1_, res_s2_;
+  VectorXd rnr_x_, rnr_t_, rnr_y_, rnr_z_t_, rnr_z_in_;
+  VectorXd res_x_, res_t_, res_y_, res_z_t_, res_z_in_;
+  VectorXd res_s_t_, res_s_in_;
   double primal_res_ = 0, dual_res_ = 0;
   double prev_primal_res_ = 0, prev_dual_res_ = 0;
   double primal_res_rel_ = 0, dual_res_rel_ = 0;
@@ -901,12 +901,12 @@ class Solver {
   double primal_prox_inf_ = 0, dual_prox_inf_ = 0;
 
   // KKT workspace.
-  VectorXd w1_, w2_, w1_inv_, w2_inv_, d_inv_, lambda_;
+  VectorXd w_t_, w_in_, w_t_inv_, w_in_inv_, d_inv_, lambda_;
   MatrixXd GS_, K_;
   Eigen::LLT<MatrixXd, Eigen::Lower> llt_;
-  VectorXd rb1_, rb2_, wv_, pv_, rhs_x_, Gdx_;
-  VectorXd dx_, dt_, dy_, ds1_, ds2_, dz1_, dz2_;
-  VectorXd wQx_, wGtz2_, wGxt_, wAty_, wAx_;
+  VectorXd rb_t_, rb_in_, wv_, pv_, rhs_x_, Gdx_;
+  VectorXd dx_, dt_, dy_, ds_t_, ds_in_, dz_t_, dz_in_;
+  VectorXd wQx_, wGtz_in_, wGxt_, wAty_, wAx_;
   VectorXd zero_p_;
 
   Solution sol_;
