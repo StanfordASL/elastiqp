@@ -102,8 +102,8 @@ Recomputed Recompute(const MatrixXd& Q, const VectorXd& q, const MatrixXd& A,
   Recomputed r;
   const VectorXd Qx = Q * s.x;
   r.primal_obj = 0.5 * s.x.dot(Qx) + q.dot(s.x) + penalty.dot(s.t);
-  r.dual_obj = -0.5 * s.x.dot(Qx) - h.dot(s.z) -
-               (b.size() > 0 ? b.dot(s.y) : 0.0);
+  r.dual_obj =
+      -0.5 * s.x.dot(Qx) - h.dot(s.z) - (b.size() > 0 ? b.dot(s.y) : 0.0);
   VectorXd stat = Qx + q + G.transpose() * s.z;
   if (b.size() > 0) stat += A.transpose() * s.y;
   r.dual_res = InfNorm(stat);
@@ -129,9 +129,12 @@ void DriftSuite() {
   std::mt19937 rng(7);
   const double kappa = 1e-4;
   char name[96];
-  const auto L = [&](const char* cell) { return Label<Solver>(name, sizeof name, cell); };
+  const auto L = [&](const char* cell) {
+    return Label<Solver>(name, sizeof name, cell);
+  };
 
-  std::printf("[%s] Ruiz: column drift (x = D x') through auto refresh\n", B::name);
+  std::printf("[%s] Ruiz: column drift (x = D x') through auto refresh\n",
+              B::name);
   {
     // D grows geometrically to 10^[-2, 2] over the ticks, so the column
     // factors drift past the refresh ratio several times. The invariance
@@ -179,18 +182,17 @@ void DriftSuite() {
       warm_iters += ws.iters;
       cold_iters += cs.iters;
       // Invariance in the base frame: D x' = x_0, duals unchanged
-      worst_dx = std::max(
-          {worst_dx, RelDiff(s0.x, dk.cwiseProduct(ws.x)),
-           RelDiff(s0.z, ws.z), RelDiff(s0.y, ws.y)});
-      worst_kkt = std::max(
-          worst_kkt, problem_gen::ElasticKKTResidual(
-                         qs.Q, qs.q, qs.A, qs.b, qs.G, qs.h, penalty, ws.x,
-                         ws.t, ws.y, ws.z_t, ws.z));
+      worst_dx = std::max({worst_dx, RelDiff(s0.x, dk.cwiseProduct(ws.x)),
+                           RelDiff(s0.z, ws.z), RelDiff(s0.y, ws.y)});
+      worst_kkt =
+          std::max(worst_kkt, problem_gen::ElasticKKTResidual(
+                                  qs.Q, qs.q, qs.A, qs.b, qs.G, qs.h, penalty,
+                                  ws.x, ws.t, ws.y, ws.z_t, ws.z));
     }
-    std::printf("  refreshes=%d/%d worst_drift_after=%.2f | iters warm=%d "
-                "cold=%d | worst_kkt=%9.2e\n",
-                refreshes, ticks, worst_drift, warm_iters, cold_iters,
-                worst_kkt);
+    std::printf(
+        "  refreshes=%d/%d worst_drift_after=%.2f | iters warm=%d "
+        "cold=%d | worst_kkt=%9.2e\n",
+        refreshes, ticks, worst_drift, warm_iters, cold_iters, worst_kkt);
     Check(L("column refresh fires and settles"),
           refreshes >= 2 && refreshes < ticks &&
               worst_drift <= warm.settings.ruiz_refresh_ratio,
@@ -198,11 +200,13 @@ void DriftSuite() {
     Check(L("D x' = x_0, duals invariant"),
           all_conv && worst_dx < 1e-5 && worst_kkt < 1e-5, worst_dx, "|dx|");
     if constexpr (B::has_relax) {
-      Check(L("relax matches fresh setup"), worst_rdx < 1e-4, worst_rdx, "|dx|");
+      Check(L("relax matches fresh setup"), worst_rdx < 1e-4, worst_rdx,
+            "|dx|");
     }
   }
 
-  std::printf("[%s] Ruiz: objective scale (alpha Q, alpha q, alpha w)\n", B::name);
+  std::printf("[%s] Ruiz: objective scale (alpha Q, alpha q, alpha w)\n",
+              B::name);
   {
     // Scaling the whole objective by alpha leaves x unchanged and scales
     // every dual by alpha. alpha = 1e5 pushes the scaled Q columns past the
@@ -232,8 +236,8 @@ void DriftSuite() {
       refreshes += Refreshed(warm, pre);
       Solver cold;
       cold.settings = Tight<Solver>();
-      cold.setup(alpha_total * qp.Q, alpha_total * qp.q, qp.A, qp.b, qp.G,
-                 qp.h, alpha_total * penalty);
+      cold.setup(alpha_total * qp.Q, alpha_total * qp.q, qp.A, qp.b, qp.G, qp.h,
+                 alpha_total * penalty);
       const auto cs = cold.solve();
       ok &= ws.converged == 1 && cs.converged == 1 &&
             warm.scaling_drift() <= warm.settings.ruiz_refresh_ratio;
@@ -248,15 +252,16 @@ void DriftSuite() {
         wr_iters = wr.iters;
         cr_iters = cr.iters;
       }
-      worst = std::max({worst, RelDiff(s0.x, ws.x),
-                        RelDiff(alpha_total * s0.z, ws.z),
-                        RelDiff(alpha_total * s0.y, ws.y),
-                        std::abs(ws.primal_obj - alpha_total * s0.primal_obj) /
-                            std::max(1.0, std::abs(alpha_total * s0.primal_obj))});
-      std::printf("  alpha=%8.1e drift_after=%.2f iters=%d (cold %d) relax "
-                  "iters=%d (cold %d)\n",
-                  alpha_total, warm.scaling_drift(), ws.iters, cs.iters,
-                  wr_iters, cr_iters);
+      worst = std::max(
+          {worst, RelDiff(s0.x, ws.x), RelDiff(alpha_total * s0.z, ws.z),
+           RelDiff(alpha_total * s0.y, ws.y),
+           std::abs(ws.primal_obj - alpha_total * s0.primal_obj) /
+               std::max(1.0, std::abs(alpha_total * s0.primal_obj))});
+      std::printf(
+          "  alpha=%8.1e drift_after=%.2f iters=%d (cold %d) relax "
+          "iters=%d (cold %d)\n",
+          alpha_total, warm.scaling_drift(), ws.iters, cs.iters, wr_iters,
+          cr_iters);
     }
     Check(L("refresh fires on objective scale"), refreshes >= 1, refreshes,
           "refreshes");
@@ -267,7 +272,8 @@ void DriftSuite() {
     }
   }
 
-  std::printf("[%s] Ruiz: 200 ticks of oscillating row + column scales\n", B::name);
+  std::printf("[%s] Ruiz: 200 ticks of oscillating row + column scales\n",
+              B::name);
   {
     // Rows (a fifth of G and A) swing over 3 decades with period 40 and
     // columns (a third) over 2 decades with period 60, plus q noise. The
@@ -290,9 +296,12 @@ void DriftSuite() {
       const double phase = 2.0 * 3.14159265358979323846 * k;
       VectorXd rs = VectorXd::Ones(p), es = VectorXd::Ones(m),
                cs = VectorXd::Ones(n);
-      for (int i = 0; i < p; i += 5) rs[i] = std::pow(10.0, 1.5 * std::sin(phase / period));
-      for (int i = 0; i < m; i += 4) es[i] = std::pow(10.0, 1.5 * std::sin(phase / period));
-      for (int j = 0; j < n; j += 3) cs[j] = std::pow(10.0, 1.0 * std::sin(phase / (1.5 * period)));
+      for (int i = 0; i < p; i += 5)
+        rs[i] = std::pow(10.0, 1.5 * std::sin(phase / period));
+      for (int i = 0; i < m; i += 4)
+        es[i] = std::pow(10.0, 1.5 * std::sin(phase / period));
+      for (int j = 0; j < n; j += 3)
+        cs[j] = std::pow(10.0, 1.0 * std::sin(phase / (1.5 * period)));
       for (int i = 0; i < n; ++i) q[i] += 0.01 * dist(rng);
       const MatrixXd Q = cs.asDiagonal() * qp0.Q * cs.asDiagonal();
       const VectorXd qs = q.cwiseProduct(cs);
@@ -316,15 +325,13 @@ void DriftSuite() {
       if (k > 0 && k < period) first_period += ws.iters;
       if (k >= ticks - period) last_period += ws.iters;
       if (k > 0) worst_tick = std::max(worst_tick, ws.iters);
-      worst_kkt = std::max(
-          worst_kkt, problem_gen::ElasticKKTResidual(
-                         Q, qs, A, b, G, h, penalty, ws.x, ws.t, ws.y, ws.z_t,
-                         ws.z));
+      worst_kkt = std::max(worst_kkt, problem_gen::ElasticKKTResidual(
+                                          Q, qs, A, b, G, h, penalty, ws.x,
+                                          ws.t, ws.y, ws.z_t, ws.z));
       worst_obj = std::max(
-          worst_obj,
-          std::abs(ws.primal_obj - problem_gen::ElasticObjective(
-                                       Q, qs, G, h, penalty, ws.x)) /
-              std::max(1.0, std::abs(ws.primal_obj)));
+          worst_obj, std::abs(ws.primal_obj - problem_gen::ElasticObjective(
+                                                  Q, qs, G, h, penalty, ws.x)) /
+                         std::max(1.0, std::abs(ws.primal_obj)));
       if (k % 10 == 9) {
         Solver cold;
         cold.settings = Tight<Solver>();
@@ -335,10 +342,11 @@ void DriftSuite() {
         ++cold_checks;
       }
     }
-    std::printf("  refreshes=%d/%d worst_drift_after=%.2f | iters first "
-                "period=%d last period=%d worst tick=%d | worst_kkt=%9.2e\n",
-                refreshes, ticks, worst_drift, first_period, last_period,
-                worst_tick, worst_kkt);
+    std::printf(
+        "  refreshes=%d/%d worst_drift_after=%.2f | iters first "
+        "period=%d last period=%d worst tick=%d | worst_kkt=%9.2e\n",
+        refreshes, ticks, worst_drift, first_period, last_period, worst_tick,
+        worst_kkt);
     Check(L("refresh stays sparse and settles"),
           refreshes >= 4 && refreshes <= ticks / 3 &&
               worst_drift <= warm.settings.ruiz_refresh_ratio,
@@ -347,8 +355,8 @@ void DriftSuite() {
           all_conv && cold_checks == ticks / 10 && worst_dx < 1e-5 &&
               worst_kkt < 1e-5,
           worst_dx, "|dx|");
-    Check(L("no long-horizon degradation"),
-          last_period <= 3 * first_period / 2, last_period, "iters");
+    Check(L("no long-horizon degradation"), last_period <= 3 * first_period / 2,
+          last_period, "iters");
     Check(L("reported objective in user frame"), worst_obj < 1e-6, worst_obj,
           "rel");
   }
@@ -383,8 +391,8 @@ void DriftSuite() {
     std::printf("  row x1e7: refreshed=%d drift after %.2f iters=%d\n",
                 fired_big, solver.scaling_drift(), s1.iters);
     Check(L("row x1e7 refresh reaches O(1)"),
-          fired_big && solver.scaling_drift() < 1.5 &&
-              s0.converged == 1 && s1.converged == 1 && dx1 < 1e-5,
+          fired_big && solver.scaling_drift() < 1.5 && s0.converged == 1 &&
+              s1.converged == 1 && dx1 < 1e-5,
           dx1, "|dx|");
 
     // A different row decays to the noise floor (constraint and rhs both
@@ -410,12 +418,12 @@ void DriftSuite() {
     std::printf("  row -> noise: refreshed=%d iters=%d\n", fired_noise,
                 s2.iters);
     Check(L("noise row ignored by drift, solved"),
-          !fired_noise && s2.converged == 1 && ref.converged == 1 &&
-              dx2 < 1e-5,
+          !fired_noise && s2.converged == 1 && ref.converged == 1 && dx2 < 1e-5,
           dx2, "|dx|");
   }
 
-  std::printf("[%s] Ruiz: equality-infeasibility gate across a refresh\n", B::name);
+  std::printf("[%s] Ruiz: equality-infeasibility gate across a refresh\n",
+              B::name);
   {
     // The certificate is computed on unscaled (A, b): it must fire through a
     // drift-triggered refresh, report a frame-independent bound, and leave
@@ -463,7 +471,6 @@ void DriftSuite() {
               again.iters <= good.iters && on.eq_infeasibility() < 1e-10,
           again.iters, "iters");
   }
-
 }
 
 // Cell (4): every backend
@@ -473,7 +480,9 @@ void FieldsSuite() {
   std::mt19937 rng(11);
   const double kappa = 1e-4;
   char name[96];
-  const auto L = [&](const char* cell) { return Label<Solver>(name, sizeof name, cell); };
+  const auto L = [&](const char* cell) {
+    return Label<Solver>(name, sizeof name, cell);
+  };
   std::printf("[%s] Ruiz: reported fields are in the user's frame\n", B::name);
   {
     // Badly row- and column-scaled problem; every reported scalar must
@@ -508,10 +517,11 @@ void FieldsSuite() {
         obj_scale;
     const double res_err = std::max(std::abs(son.primal_res - rc.primal_res),
                                     std::abs(son.dual_res - rc.dual_res));
-    std::printf("  ruiz on: iters=%d obj=%.6f pri=%.1e dua=%.1e gap=%.1e | "
-                "off: iters=%d conv=%d obj=%.6f\n",
-                son.iters, son.primal_obj, son.primal_res, son.dual_res,
-                son.duality_gap, soff.iters, soff.converged, soff.primal_obj);
+    std::printf(
+        "  ruiz on: iters=%d obj=%.6f pri=%.1e dua=%.1e gap=%.1e | "
+        "off: iters=%d conv=%d obj=%.6f\n",
+        son.iters, son.primal_obj, son.primal_res, son.dual_res,
+        son.duality_gap, soff.iters, soff.converged, soff.primal_obj);
     Check(L("objective and gap match recomputation"),
           son.converged == 1 && obj_err < 1e-9 && gap_err < 1e-7, obj_err,
           "rel");
@@ -546,13 +556,13 @@ void FieldsSuite() {
     Check(L("eps_rel-only termination under ruiz"),
           srel.converged == 1 && rdx < 1e-4, rdx, "|dx|");
   }
-
 }
 
 // Cells (5), (8): PDAL only
 void PdalSuite() {
   std::mt19937 rng(13);
-  std::printf("[pdal] Ruiz: refresh with no warm iterate / pending warm start\n");
+  std::printf(
+      "[pdal] Ruiz: refresh with no warm iterate / pending warm start\n");
   {
     const int n = 16, m = 4, p = 60;
     const QPData qp = problem_gen::InfeasibleEq(rng, n, m, p, p / 4);
@@ -563,8 +573,8 @@ void PdalSuite() {
     const MatrixXd G = rs.asDiagonal() * qp.G;
     const VectorXd h = qp.h.cwiseProduct(rs);
     const VectorXd pen = penalty.cwiseQuotient(rs);
-    const auto ref = SolveWith<pdal::Solver>(qp.Q, qp.q, qp.A, qp.b, qp.G,
-                                             qp.h, penalty);
+    const auto ref =
+        SolveWith<pdal::Solver>(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
 
     // Drift before the first solve: the iterates are uninitialized
     pdal::Solver fresh;
@@ -573,7 +583,8 @@ void PdalSuite() {
     fresh.set_G(G);
     fresh.set_h(h);
     fresh.set_penalty(pen);
-    const bool fired = fresh.scaling_drift() > fresh.settings.ruiz_refresh_ratio;
+    const bool fired =
+        fresh.scaling_drift() > fresh.settings.ruiz_refresh_ratio;
     const auto s1 = fresh.solve();
     const double dx1 = RelDiff(ref.x, s1.x);
     Check("first solve after drift", fired && s1.converged == 1 && dx1 < 1e-5,
@@ -644,7 +655,6 @@ void PdalSuite() {
     Check("ruiz=false after setup() keeps scaling",
           early.scaling_drift() > 1.01, early.scaling_drift(), "drift");
   }
-
 }
 
 }  // namespace

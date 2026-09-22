@@ -53,9 +53,8 @@ struct StrictSol {
 };
 
 StrictSol SolveStrictRef(const QPData& qp, double penalty = 1e6) {
-  const elastiqp::Solution s =
-      IpmRef(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h,
-             VectorXd::Constant(qp.h.size(), penalty));
+  const elastiqp::Solution s = IpmRef(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h,
+                                      VectorXd::Constant(qp.h.size(), penalty));
   StrictSol r;
   r.converged = s.converged == 1 && (s.t.size() == 0 || s.t.maxCoeff() < 1e-8);
   r.x = s.x;
@@ -64,8 +63,8 @@ StrictSol SolveStrictRef(const QPData& qp, double penalty = 1e6) {
 }
 
 double Kkt(const QPData& qp, const VectorXd& w, const elastiqp::Solution& s) {
-  return problem_gen::ElasticKKTResidual(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h,
-                                         w, s.x, s.t, s.y, s.z_t, s.z);
+  return problem_gen::ElasticKKTResidual(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, w,
+                                         s.x, s.t, s.y, s.z_t, s.z);
 }
 double Kkt(const MatrixXd& Q, const VectorXd& q, const MatrixXd& A,
            const VectorXd& b, const MatrixXd& G, const VectorXd& h,
@@ -79,14 +78,16 @@ void GenericSuite() {
   using B = Backend<Solver>;
   std::mt19937 rng(42);  // same instances for every backend
   char name[96];
-  const auto L = [&](const char* cell) { return Label<Solver>(name, sizeof name, cell); };
+  const auto L = [&](const char* cell) {
+    return Label<Solver>(name, sizeof name, cell);
+  };
   char cell[64];
 
   std::printf("[%s] feasible => matches strict QP, t ~ 0\n", B::name);
   for (auto [n, p] : {std::pair{10, 12}, {14, 100}, {58, 500}}) {
     const QPData qp = problem_gen::Feasible(rng, n, p);
-    const auto sol = SolveWith<Solver>(qp.Q, qp.q, qp.G, qp.h,
-                                       VectorXd::Constant(p, 1e3));
+    const auto sol =
+        SolveWith<Solver>(qp.Q, qp.q, qp.G, qp.h, VectorXd::Constant(p, 1e3));
     const StrictSol ref = SolveStrictRef(qp);
     const double dx = InfNorm(sol.x - ref.x);
     std::snprintf(cell, sizeof cell, "n=%d p=%d", n, p);
@@ -165,8 +166,7 @@ void GenericSuite() {
 
   std::printf("[%s] equalities hold when inequalities are infeasible\n",
               B::name);
-  for (auto [n, m, p] :
-       {std::tuple{14, 4, 100}, {30, 8, 200}, {58, 15, 400}}) {
+  for (auto [n, m, p] : {std::tuple{14, 4, 100}, {30, 8, 200}, {58, 15, 400}}) {
     const QPData qp = problem_gen::InfeasibleEq(rng, n, m, p, p / 4);
     const VectorXd w = VectorXd::Constant(p, 10.0);
     const auto sol = SolveWith<Solver>(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, w);
@@ -174,8 +174,7 @@ void GenericSuite() {
     const double dx = InfNorm(sol.x - ref.x);
     const double eq_res = InfNorm(qp.A * sol.x - qp.b);
     const double kkt = Kkt(qp, w, sol);
-    std::snprintf(cell, sizeof cell, "n=%d m=%d p=%d eq=%.1e", n, m, p,
-                  eq_res);
+    std::snprintf(cell, sizeof cell, "n=%d m=%d p=%d eq=%.1e", n, m, p, eq_res);
     Check(L(cell),
           sol.converged == 1 && ref.converged == 1 && dx < 1e-5 &&
               eq_res < 1e-6 && kkt < 1e-6 && MaxT(sol) > 0.1,
@@ -286,8 +285,8 @@ void GenericSuite() {
     VectorXd rl(nl + ml);
     rl << -big.q, big.b;
     const VectorXd xyl = Kl.partialPivLu().solve(rl);
-    const double dxl = InfNorm(large.x - xyl.head(nl)) /
-                       std::max(1.0, InfNorm(xyl.head(nl)));
+    const double dxl =
+        InfNorm(large.x - xyl.head(nl)) / std::max(1.0, InfNorm(xyl.head(nl)));
     std::printf("  n=%d m=%d p=0: %.1f ms, iters=%d\n", nl, ml, ms,
                 large.iters);
     Check(L("n=1500 m=750 p=0 matches LU"), large.converged == 1 && dxl < 1e-8,
@@ -353,10 +352,10 @@ void GenericSuite() {
 
     solver.set_b(bc);
     const auto good2 = solver.solve();
-    Check(L("warm start survives transient bad tick"),
-          good2.status == elastiqp::Status::kSolved &&
-              good2.iters <= good.iters,
-          static_cast<double>(good2.iters), "iters");
+    Check(
+        L("warm start survives transient bad tick"),
+        good2.status == elastiqp::Status::kSolved && good2.iters <= good.iters,
+        static_cast<double>(good2.iters), "iters");
 
     // Certificate is computed on unscaled data: gate must fire under Ruiz.
     Solver rz;
@@ -364,8 +363,8 @@ void GenericSuite() {
     rz.setup(qp.Q, qp.q, Ai, bi, qp.G, qp.h, w);
     const auto rzfail = rz.solve();
     Check(L("gate fires with ruiz on"),
-          rzfail.status == elastiqp::Status::kInfeasible &&
-              rzfail.iters == 0 && rz.eq_infeasibility() > 0.1,
+          rzfail.status == elastiqp::Status::kInfeasible && rzfail.iters == 0 &&
+              rz.eq_infeasibility() > 0.1,
           rz.eq_infeasibility(), "eq_infeas");
 
     // p = 0 path shares the gate.
@@ -454,8 +453,8 @@ void GenericSuite() {
       warm_iters += ws.iters;
       cold_iters += cs.iters;
       worst_dx = std::max(worst_dx, InfNorm(ws.x - cs.x));
-      worst_kkt = std::max(
-          worst_kkt, Kkt(qp0.Q, q, qp0.A, qp0.b, qp0.G, h, w, ws));
+      worst_kkt =
+          std::max(worst_kkt, Kkt(qp0.Q, q, qp0.A, qp0.b, qp0.G, h, w, ws));
     }
     std::printf("  cold iters=%d warm iters=%d worst_kkt=%9.2e\n", cold_iters,
                 warm_iters, worst_kkt);
@@ -467,14 +466,14 @@ void GenericSuite() {
 
   std::printf("[%s] warm chain along a drifting trajectory (drift_traj)\n",
               B::name);
-  for (const auto st : {drift_traj::Structure::kFeas,
-                        drift_traj::Structure::kInfeas,
-                        drift_traj::Structure::kDegen}) {
+  for (const auto st :
+       {drift_traj::Structure::kFeas, drift_traj::Structure::kInfeas,
+        drift_traj::Structure::kDegen}) {
     const drift_traj::Size sz{16, 4, 80};
     const int ticks = 30;
-    const drift_traj::Trajectory traj = drift_traj::MakeTrajectory(
-        sz, st, 10.0, 1e-3, drift_traj::Drift::kQHG,
-        100u + static_cast<unsigned>(st), ticks);
+    const drift_traj::Trajectory traj =
+        drift_traj::MakeTrajectory(sz, st, 10.0, 1e-3, drift_traj::Drift::kQHG,
+                                   100u + static_cast<unsigned>(st), ticks);
     Solver warm;
     warm.settings = B::Tight();
     warm.setup(traj.base.Q, traj.q[0], traj.base.A, traj.b[0], traj.G[0],
@@ -488,16 +487,16 @@ void GenericSuite() {
       warm.set_b(traj.b[k]);
       warm.set_G(traj.G[k]);
       const auto& ws = warm.solve();
-      const auto cs = SolveWith<Solver>(traj.base.Q, traj.q[k], traj.base.A,
-                                        traj.b[k], traj.G[k], traj.h[k],
-                                        traj.penalty);
+      const auto cs =
+          SolveWith<Solver>(traj.base.Q, traj.q[k], traj.base.A, traj.b[k],
+                            traj.G[k], traj.h[k], traj.penalty);
       all_conv &= ws.converged == 1 && cs.converged == 1;
       warm_iters += ws.iters;
       cold_iters += cs.iters;
       worst_dx = std::max(worst_dx, InfNorm(ws.x - cs.x));
-      worst_kkt = std::max(
-          worst_kkt, Kkt(traj.base.Q, traj.q[k], traj.base.A, traj.b[k],
-                         traj.G[k], traj.h[k], traj.penalty, ws));
+      worst_kkt = std::max(worst_kkt,
+                           Kkt(traj.base.Q, traj.q[k], traj.base.A, traj.b[k],
+                               traj.G[k], traj.h[k], traj.penalty, ws));
     }
     std::snprintf(cell, sizeof cell, "%s qhG drift: cold=%d warm=%d",
                   drift_traj::Name(st), cold_iters, warm_iters);
@@ -526,8 +525,8 @@ void GenericSuite() {
     // moves. The reference is the well-scaled problem's solution.
     const int n = 20, m = 5, p = 80;
     const QPData qp = problem_gen::InfeasibleEq(rng, n, m, p, p / 4);
-    const auto ref = IpmRef(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h,
-                            VectorXd::Constant(p, 10.0));
+    const auto ref =
+        IpmRef(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, VectorXd::Constant(p, 10.0));
     std::uniform_real_distribution<double> unif(-4.0, 4.0);
     MatrixXd Gs = qp.G, As = qp.A;
     VectorXd hs = qp.h, bs = qp.b, ws(p);
@@ -634,8 +633,8 @@ void GenericSuite() {
               MaxT(lo) > 1e-6,
           dx_lo, "|dx|");
     // Numerically extreme penalty: same recovery, well conditioned.
-    const auto huge = SolveWith<Solver>(qp.Q, qp.q, qp.G, qp.h,
-                                        VectorXd::Constant(p, 1e8));
+    const auto huge =
+        SolveWith<Solver>(qp.Q, qp.q, qp.G, qp.h, VectorXd::Constant(p, 1e8));
     const double dx_huge = InfNorm(huge.x - ref.x);
     Check(L("penalty = 1e8: still exact recovery"),
           huge.converged == 1 && dx_huge < 1e-5 && MaxT(huge) <= B::slack_tol,
@@ -678,7 +677,8 @@ void GenericSuite() {
       for (int i = 0; i < p; ++i) pen[i] = std::pow(10.0, unif(rng));
       warm.set_penalty(pen);
       const auto& ws = warm.solve();
-      const auto cs = SolveWith<Solver>(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, pen);
+      const auto cs =
+          SolveWith<Solver>(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, pen);
       all_ok &= ws.converged == 1 && cs.converged == 1 &&
                 ws.z.minCoeff() >= 0.0 &&
                 (ws.z - pen).maxCoeff() <= B::invariant_tol;
@@ -744,12 +744,12 @@ void GenericSuite() {
                        (sol.z - w).maxCoeff() <= B::invariant_tol &&
                        sol.t.minCoeff() >= -B::invariant_tol;
     const double e_obj =
-        std::abs(sol.primal_obj -
-                 problem_gen::ElasticObjective(qp.Q, qp.q, qp.G, qp.h, w, sol.x));
+        std::abs(sol.primal_obj - problem_gen::ElasticObjective(
+                                      qp.Q, qp.q, qp.G, qp.h, w, sol.x));
     const double tol = std::max(B::invariant_tol, 1e-8);
     Check(L("z_t+z==w, t==[r]+, box, obj"),
-          sol.converged == 1 && e_w <= B::invariant_tol && e_t < tol &&
-              boxed && e_obj < 1e-7,
+          sol.converged == 1 && e_w <= B::invariant_tol && e_t < tol && boxed &&
+              e_obj < 1e-7,
           std::max({e_w, e_t, e_obj}), "inv");
     int n_act = 0, n_sat = 0;
     elastiqp::count_row_states(sol.t, sol.z, 1e-6, n_act, n_sat);
@@ -768,8 +768,8 @@ void GenericSuite() {
     const auto full = SolveWith<Solver>(qp.Q, qp.q, qp.G, qp.h, pen);
     const MatrixXd Gr = qp.G.bottomRows(p - k_zero);
     const VectorXd hr = qp.h.tail(p - k_zero);
-    const auto reduced = IpmRef(qp.Q, qp.q, MatrixXd(0, n), VectorXd(0), Gr,
-                                hr, VectorXd::Constant(p - k_zero, 10.0));
+    const auto reduced = IpmRef(qp.Q, qp.q, MatrixXd(0, n), VectorXd(0), Gr, hr,
+                                VectorXd::Constant(p - k_zero, 10.0));
     const double dx = InfNorm(full.x - reduced.x);
     Check(L("5 free rows"),
           full.converged == 1 && reduced.converged == 1 && dx < 1e-5, dx,
@@ -792,8 +792,8 @@ void GenericSuite() {
     pen2.head(k_dup).setConstant(5.0);
     pen2.tail(k_dup).setConstant(5.0);
     const auto dup = SolveWith<Solver>(qp.Q, qp.q, G2, h2, pen2);
-    const auto ref = IpmRef(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h,
-                            VectorXd::Constant(p, 10.0));
+    const auto ref =
+        IpmRef(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, VectorXd::Constant(p, 10.0));
     const double dx = InfNorm(dup.x - ref.x);
     Check(L("split-penalty duplicates match original"),
           dup.converged == 1 && ref.converged == 1 && dx < 1e-5, dx, "|dx|");
@@ -819,10 +819,10 @@ void GenericSuite() {
     }
     typename B::Settings on = B::Tight();
     on.ruiz = true;
-    const auto sol = SolveWith<Solver>(qp.Q, qp.q, G2, h2,
-                                       VectorXd::Constant(p + k_noise, 10.0), on);
-    const auto ref = IpmRef(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h,
-                            VectorXd::Constant(p, 10.0));
+    const auto sol = SolveWith<Solver>(
+        qp.Q, qp.q, G2, h2, VectorXd::Constant(p + k_noise, 10.0), on);
+    const auto ref =
+        IpmRef(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, VectorXd::Constant(p, 10.0));
     const double dx = InfNorm(sol.x - ref.x);
     std::printf("  iters=%d\n", sol.iters);
     Check(L("6 noise rows at 1e-13"),
@@ -888,12 +888,12 @@ void CrossCheckSuite() {
       qp.h = h;
       w = wb;
     }
-    const auto a = SolveWith<elastiqp::das::Solver>(qp.Q, qp.q, qp.A, qp.b, qp.G,
-                                                   qp.h, w);
+    const auto a =
+        SolveWith<elastiqp::das::Solver>(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, w);
     const auto pd = SolveWith<elastiqp::pdal::Solver>(qp.Q, qp.q, qp.A, qp.b,
                                                       qp.G, qp.h, w);
-    const auto ip = SolveWith<elastiqp::ipm::Solver>(qp.Q, qp.q, qp.A, qp.b,
-                                                     qp.G, qp.h, w);
+    const auto ip =
+        SolveWith<elastiqp::ipm::Solver>(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, w);
     fails += a.converged != 1 || pd.converged != 1 || ip.converged != 1;
     const double obj_scale = std::max(1.0, std::abs(ip.primal_obj));
     worst_dx = std::max({worst_dx, InfNorm(a.x - pd.x), InfNorm(a.x - ip.x),
@@ -904,7 +904,8 @@ void CrossCheckSuite() {
     if (a.n_active + m < n) {  // unique duals (independent active rows)
       worst_dz = std::max({worst_dz, InfNorm(a.z - pd.z), InfNorm(a.z - ip.z)});
       if (m > 0) {
-        worst_dy = std::max({worst_dy, InfNorm(a.y - pd.y), InfNorm(a.y - ip.y)});
+        worst_dy =
+            std::max({worst_dy, InfNorm(a.y - pd.y), InfNorm(a.y - ip.y)});
       }
     }
     ++cells;

@@ -62,7 +62,8 @@ int main() {
   h464 << 5.3894716545331169, -5.4329140545125938, 5.017615727279078;
 
   // Ground truth for the release tick (a cold solve never stalls here).
-  const elastiqp::Solution ref = elastiqp::pdal::Solve(Q, q464, G464, h464, penalty);
+  const elastiqp::Solution ref =
+      elastiqp::pdal::Solve(Q, q464, G464, h464, penalty);
   Check("cold reference converges", ref.converged == 1, ref.iters, "iters");
 
   // The warm chain at shipped defaults.
@@ -78,8 +79,7 @@ int main() {
   s.set_G(G464);
   s.set_h(h464);
   const elastiqp::Solution rel = s.solve();
-  Check("release tick converges warm", rel.converged == 1, rel.iters,
-        "iters");
+  Check("release tick converges warm", rel.converged == 1, rel.iters, "iters");
   Check("release tick iters bounded", rel.iters <= 50, rel.iters, "iters");
   const double xerr = (rel.x - ref.x).lpNorm<Eigen::Infinity>();
   Check("release x matches cold", xerr <= 1e-3, xerr, "err");

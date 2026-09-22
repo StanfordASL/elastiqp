@@ -22,11 +22,16 @@ enum class Status {
 
 inline const char* status_name(Status s) {
   switch (s) {
-    case Status::kUnsolved: return "unsolved";
-    case Status::kSolved: return "solved";
-    case Status::kMaxIter: return "max_iter";
-    case Status::kNumerics: return "numerics";
-    case Status::kInfeasible: return "infeasible";
+    case Status::kUnsolved:
+      return "unsolved";
+    case Status::kSolved:
+      return "solved";
+    case Status::kMaxIter:
+      return "max_iter";
+    case Status::kNumerics:
+      return "numerics";
+    case Status::kInfeasible:
+      return "infeasible";
   }
   return "?";
 }
@@ -176,13 +181,13 @@ inline bool RangeSpaceEqualityQP(const MatrixXd& Q, const VectorXd& q,
   for (int it = 0; it < max_refine; ++it) {
     rd.noalias() = Q * xs;
     rd += q;
-    double scale = std::max({1.0, rd.lpNorm<Eigen::Infinity>(),
-                             q.lpNorm<Eigen::Infinity>()});
+    double scale = std::max(
+        {1.0, rd.lpNorm<Eigen::Infinity>(), q.lpNorm<Eigen::Infinity>()});
     if (m > 0) {
       rd.noalias() += A.transpose() * ys;
       rp.noalias() = A * xs;
-      scale = std::max({scale, rp.lpNorm<Eigen::Infinity>(),
-                        b.lpNorm<Eigen::Infinity>()});
+      scale = std::max(
+          {scale, rp.lpNorm<Eigen::Infinity>(), b.lpNorm<Eigen::Infinity>()});
       rp -= b;
     }
     const double res = std::max(rd.lpNorm<Eigen::Infinity>(),
@@ -242,17 +247,15 @@ struct EqualityKKTStats {
 };
 
 // Residuals for the no-inequality shortcut.
-inline EqualityKKTStats ComputeEqualityKKT(const MatrixXd& Q,
-                                           const VectorXd& q,
-                                           const MatrixXd& A,
-                                           const VectorXd& b,
+inline EqualityKKTStats ComputeEqualityKKT(const MatrixXd& Q, const VectorXd& q,
+                                           const MatrixXd& A, const VectorXd& b,
                                            const VectorXd& x,
                                            const VectorXd& y) {
   EqualityKKTStats st;
   const VectorXd Qx = Q * x;
   VectorXd dual = Qx + q;
-  double dual_rel_norm = std::max(Qx.lpNorm<Eigen::Infinity>(),
-                                  q.lpNorm<Eigen::Infinity>());
+  double dual_rel_norm =
+      std::max(Qx.lpNorm<Eigen::Infinity>(), q.lpNorm<Eigen::Infinity>());
   double by = 0.0;
   if (b.size() > 0) {
     const VectorXd Aty = A.transpose() * y;

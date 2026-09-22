@@ -109,8 +109,7 @@ inline double ElasticKKTResidual(const MatrixXd& Q, const VectorXd& q,
   VectorXd stat = Q * x + q + G.transpose() * z;
   if (b.size() > 0) stat += A.transpose() * y;
   double res = stat.lpNorm<Eigen::Infinity>();
-  if (b.size() > 0)
-    res = std::max(res, (A * x - b).lpNorm<Eigen::Infinity>());
+  if (b.size() > 0) res = std::max(res, (A * x - b).lpNorm<Eigen::Infinity>());
   res = std::max(res, (penalty - z_t - z).lpNorm<Eigen::Infinity>());
   const VectorXd viol = G * x - t - h;  // <= 0 at feasibility
   res = std::max(res, viol.cwiseMax(0.0).maxCoeff());

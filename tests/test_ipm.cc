@@ -113,15 +113,15 @@ int main() {
                               prev.z.cwiseMax(f));
       }
       const auto& ws = solver.solve();
-      const auto cs = SolveWith<ipm::Solver>(qp0.Q, q, qp0.A, b, qp0.G, h,
-                                             penalty);
+      const auto cs =
+          SolveWith<ipm::Solver>(qp0.Q, q, qp0.A, b, qp0.G, h, penalty);
       all_conv &= ws.converged == 1 && cs.converged == 1;
       explicit_iters += ws.iters;
       cold_iters += cs.iters;
       worst_dx = std::max(worst_dx, InfNorm(ws.x - cs.x));
       worst_eq = std::max(worst_eq, InfNorm(qp0.A * ws.x - b));
-      worst_kkt = std::max(worst_kkt,
-                           Kkt(qp0.Q, q, qp0.A, b, qp0.G, h, penalty, ws));
+      worst_kkt =
+          std::max(worst_kkt, Kkt(qp0.Q, q, qp0.A, b, qp0.G, h, penalty, ws));
     }
     std::printf("  cold iters=%d explicit iters=%d worst_eq=%9.2e kkt=%9.2e\n",
                 cold_iters, explicit_iters, worst_eq, worst_kkt);
@@ -139,8 +139,8 @@ int main() {
     const int n = 20, m = 5, p = 80;
     const QPData qp = problem_gen::InfeasibleEq(rng, n, m, p, p / 4);
     const VectorXd penalty = VectorXd::Constant(p, 10.0);
-    const auto pd = SolveWith<pdal::Solver>(qp.Q, qp.q, qp.A, qp.b, qp.G,
-                                            qp.h, penalty);
+    const auto pd =
+        SolveWith<pdal::Solver>(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
     ipm::Solver solver;
     solver.settings = Tight();
     solver.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
@@ -255,14 +255,15 @@ int main() {
     off.ruiz = false;
     const auto son =
         SolveWith<ipm::Solver>(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty, on);
-    const auto soff = SolveWith<ipm::Solver>(qp.Q, qp.q, qp.A, qp.b, qp.G,
-                                             qp.h, penalty, off);
+    const auto soff = SolveWith<ipm::Solver>(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h,
+                                             penalty, off);
     const double dx = InfNorm(son.x - soff.x);
     const double dobj = std::abs(son.primal_obj - soff.primal_obj) /
                         std::max(1.0, std::abs(soff.primal_obj));
-    std::printf("  ruiz on iters=%d off iters=%d |dx|=%.1e dobj=%.1e pri=%.1e "
-                "dua=%.1e\n",
-                son.iters, soff.iters, dx, dobj, son.primal_res, son.dual_res);
+    std::printf(
+        "  ruiz on iters=%d off iters=%d |dx|=%.1e dobj=%.1e pri=%.1e "
+        "dua=%.1e\n",
+        son.iters, soff.iters, dx, dobj, son.primal_res, son.dual_res);
     Check("x and objective agree",
           son.converged == 1 && soff.converged == 1 && dx < 1e-5 && dobj < 1e-7,
           dx, "|dx|");

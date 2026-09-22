@@ -258,9 +258,9 @@ class Solver {
       tr_ = tr_.cwiseProduct(di);
       for (Eigen::Index i = 0; i < p_; ++i) {
         v_t_r_[i] = zf[i] * retraction(v_t_r_[i], relax_kappa_s_) -
-                  di[i] * retraction(-v_t_r_[i], relax_kappa_s_);
+                    di[i] * retraction(-v_t_r_[i], relax_kappa_s_);
         v_in_r_[i] = zf[i] * retraction(v_in_r_[i], relax_kappa_s_) -
-                  di[i] * retraction(-v_in_r_[i], relax_kappa_s_);
+                     di[i] * retraction(-v_in_r_[i], relax_kappa_s_);
       }
       relax_kappa_s_ *= gamma;
     }
@@ -277,9 +277,9 @@ class Solver {
   }
 
   // Seed the next solve from user-frame (x, y, z); 0 keeps the default rho/mu.
-  void set_warm_start(const VectorXd& x, const VectorXd& y,
-                      const VectorXd& z, double rho = 0.0,
-                      double mu_eq = 0.0, double mu_in = 0.0) {
+  void set_warm_start(const VectorXd& x, const VectorXd& y, const VectorXd& z,
+                      double rho = 0.0, double mu_eq = 0.0,
+                      double mu_in = 0.0) {
     x_ = ruiz_ ? VectorXd(x.cwiseQuotient(dx_s_)) : x;
     if (m_ > 0) y_ = ruiz_ ? VectorXd(c_s_ * y.cwiseQuotient(de_s_)) : y;
     z_ = ruiz_ ? VectorXd(c_s_ * z.cwiseQuotient(di_s_)) : z;
@@ -553,8 +553,8 @@ class Solver {
   }
 
   const Solution& solve_no_inequalities() {
-    SolveEqualityQP(Q_, q_, A_, b_, settings.rho, eq_cert_.rank_deficient(),
-                    x_, y_);
+    SolveEqualityQP(Q_, q_, A_, b_, settings.rho, eq_cert_.rank_deficient(), x_,
+                    y_);
     const EqualityKKTStats st = ComputeEqualityKKT(Q_, q_, A_, b_, x_, y_);
     primal_res_ = st.primal_res;
     primal_res_rel_ = st.primal_res_rel;
@@ -563,10 +563,9 @@ class Solver {
     primal_obj_ = st.primal_obj;
     duality_gap_ = st.duality_gap;
     duality_gap_rel_ = st.duality_gap_rel;
-    const bool ok = st.converged(settings.eps_abs, settings.eps_rel,
-                                 settings.check_duality_gap,
-                                 settings.eps_duality_gap_abs,
-                                 settings.eps_duality_gap_rel);
+    const bool ok = st.converged(
+        settings.eps_abs, settings.eps_rel, settings.check_duality_gap,
+        settings.eps_duality_gap_abs, settings.eps_duality_gap_rel);
     return finish(ok ? Status::kSolved : Status::kNumerics);
   }
 
@@ -611,9 +610,7 @@ class Solver {
   }
 
   // Shrink mu_in to mu_new and mu_eq by the same ratio.
-  void shrink_mu(double mu_new) {
-    set_mu(mu_new, mu_eq_ * (mu_new / mu_in_));
-  }
+  void shrink_mu(double mu_new) { set_mu(mu_new, mu_eq_ * (mu_new / mu_in_)); }
 
   // mu at which the shallowest satisfied row with an oversized dual
   // (r < 0, z > 0) releases to 0.
@@ -823,8 +820,7 @@ class Solver {
     }
     llt_.compute(K_);
     ++factor_count_;
-    return llt_.info() == Eigen::Success &&
-           std::isfinite(K_.diagonal().sum());
+    return llt_.info() == Eigen::Success && std::isfinite(K_.diagonal().sum());
   }
 
   // Rank-one updates when few rows flipped; otherwise refactor, escalating rho
@@ -839,10 +835,9 @@ class Solver {
       }
       if (flip_idx_.empty()) return true;
 
-      const Eigen::Index max_flips =
-          settings.incremental_update_max_flips > 0
-              ? settings.incremental_update_max_flips
-              : std::max<Eigen::Index>(1, n_ / 3);
+      const Eigen::Index max_flips = settings.incremental_update_max_flips > 0
+                                         ? settings.incremental_update_max_flips
+                                         : std::max<Eigen::Index>(1, n_ / 3);
       if (settings.incremental_updates &&
           static_cast<Eigen::Index>(flip_idx_.size()) <= max_flips &&
           updates_since_factor_ + static_cast<int>(flip_idx_.size()) <=
@@ -965,7 +960,7 @@ class Solver {
       for (Eigen::Index i = 0; i < p_; ++i) {
         dv_t_r_[i] = (rf4_[i] - dtr_[i]) / retraction_dcomp(v_t_r_[i], kappa_s);
         dv_in_r_[i] = (rf5_[i] + Gdx_[i] - dtr_[i]) /
-                   retraction_dcomp(v_in_r_[i], kappa_s);
+                      retraction_dcomp(v_in_r_[i], kappa_s);
       }
 
       const double merit_prev = relax_merit_;
@@ -976,9 +971,8 @@ class Solver {
       v_in_r_ += dv_in_r_;
       double alpha = 1.0;
       double res_new = relax_residual(kappa_s);
-      for (int bt = 0;
-           bt < 12 && !(std::isfinite(relax_merit_) &&
-                        relax_merit_ <= merit_prev);
+      for (int bt = 0; bt < 12 && !(std::isfinite(relax_merit_) &&
+                                    relax_merit_ <= merit_prev);
            ++bt) {
         alpha *= 0.5;
         xr_ -= alpha * dxr_;
@@ -1036,11 +1030,9 @@ class Solver {
     wGx_.noalias() = G_ * xr_;
     rf4_ = s_t_r_ - tr_;
     rf5_ = s_in_r_ + wGx_ - h_ - tr_;
-    relax_dual_res_ =
-        std::max(inf_us(rf1_, inv_cdx_), inf_us(rf2_, z_us_));
-    relax_primal_res_ =
-        std::max({inf_us(rf4_, inv_di_), inf_us(rf5_, inv_di_),
-                  m_ > 0 ? inf_us(rf3_, inv_de_) : 0.0});
+    relax_dual_res_ = std::max(inf_us(rf1_, inv_cdx_), inf_us(rf2_, z_us_));
+    relax_primal_res_ = std::max({inf_us(rf4_, inv_di_), inf_us(rf5_, inv_di_),
+                                  m_ > 0 ? inf_us(rf3_, inv_de_) : 0.0});
     relax_merit_ = ssq_us(rf1_, inv_cdx_) + ssq_us(rf2_, z_us_) +
                    ssq_us(rf4_, inv_di_) + ssq_us(rf5_, inv_di_) +
                    (m_ > 0 ? ssq_us(rf3_, inv_de_) : 0.0);
@@ -1162,8 +1154,7 @@ class Solver {
     dual_res_ = inf_us(verr_, inv_cdx_);
     const double dual_rel_norm =
         std::max({inf_us(wQx_, inv_cdx_), inf_us(q_, inv_cdx_),
-                  inf_us(wGtz_, inv_cdx_), aty_norm,
-                  inf_us(penalty_, z_us_)});
+                  inf_us(wGtz_, inv_cdx_), aty_norm, inf_us(penalty_, z_us_)});
     dual_res_rel_ = dual_res_ / std::max(1.0, dual_rel_norm);
 
     double in_res = 0.0;
@@ -1173,9 +1164,9 @@ class Solver {
       in_res = std::max(in_res, (r_[i] - t_[i]) * inv_di_[i]);
     }
     in_res = std::max(in_res, 0.0);
-    double primal_rel_norm = std::max(
-        {inf_us(wGx_ - t_, inv_di_), inf_us(h_, inv_di_),
-         inf_us(s_in_, inv_di_), inf_us(t_, inv_di_)});
+    double primal_rel_norm =
+        std::max({inf_us(wGx_ - t_, inv_di_), inf_us(h_, inv_di_),
+                  inf_us(s_in_, inv_di_), inf_us(t_, inv_di_)});
     double eq_res = 0.0;
     if (m_ > 0) {
       wAx_.noalias() = A_ * x_;
@@ -1207,8 +1198,7 @@ class Solver {
   bool residuals_ok() const {
     return (primal_res_ < settings.eps_abs ||
             primal_res_rel_ < settings.eps_rel) &&
-           (dual_res_ < settings.eps_abs ||
-            dual_res_rel_ < settings.eps_rel);
+           (dual_res_ < settings.eps_abs || dual_res_rel_ < settings.eps_rel);
   }
   bool gap_ok() const {
     return duality_gap_ < settings.eps_duality_gap_abs ||
@@ -1287,9 +1277,7 @@ class Solver {
   RowState state(Eigen::Index i) const {
     return state_[static_cast<size_t>(i)];
   }
-  bool is_active(Eigen::Index i) const {
-    return state(i) == RowState::kActive;
-  }
+  bool is_active(Eigen::Index i) const { return state(i) == RowState::kActive; }
   bool f_active(Eigen::Index i) const {
     return f_active_[static_cast<size_t>(i)];
   }
@@ -1329,34 +1317,32 @@ class Solver {
   Solution sol_;
 };
 
-inline Solution Solve(
-    const MatrixXd& Q, const VectorXd& q, const MatrixXd& A, const VectorXd& b,
-    const MatrixXd& G, const VectorXd& h, const VectorXd& penalty,
-    const Settings& settings = {}) {
+inline Solution Solve(const MatrixXd& Q, const VectorXd& q, const MatrixXd& A,
+                      const VectorXd& b, const MatrixXd& G, const VectorXd& h,
+                      const VectorXd& penalty, const Settings& settings = {}) {
   Solver solver;
   solver.settings = settings;
   solver.setup(Q, q, A, b, G, h, penalty);
   return solver.solve();
 }
 
-inline Solution Solve(
-    const MatrixXd& Q, const VectorXd& q, const MatrixXd& A, const VectorXd& b,
-    const MatrixXd& G, const VectorXd& h, double penalty,
-    const Settings& settings = {}) {
+inline Solution Solve(const MatrixXd& Q, const VectorXd& q, const MatrixXd& A,
+                      const VectorXd& b, const MatrixXd& G, const VectorXd& h,
+                      double penalty, const Settings& settings = {}) {
   return Solve(Q, q, A, b, G, h, VectorXd::Constant(h.size(), penalty),
                settings);
 }
 
-inline Solution Solve(
-    const MatrixXd& Q, const VectorXd& q, const MatrixXd& G, const VectorXd& h,
-    const VectorXd& penalty, const Settings& settings = {}) {
+inline Solution Solve(const MatrixXd& Q, const VectorXd& q, const MatrixXd& G,
+                      const VectorXd& h, const VectorXd& penalty,
+                      const Settings& settings = {}) {
   return Solve(Q, q, MatrixXd(0, q.size()), VectorXd(0), G, h, penalty,
                settings);
 }
 
-inline Solution Solve(
-    const MatrixXd& Q, const VectorXd& q, const MatrixXd& G, const VectorXd& h,
-    double penalty, const Settings& settings = {}) {
+inline Solution Solve(const MatrixXd& Q, const VectorXd& q, const MatrixXd& G,
+                      const VectorXd& h, double penalty,
+                      const Settings& settings = {}) {
   return Solve(Q, q, G, h, VectorXd::Constant(h.size(), penalty), settings);
 }
 

@@ -194,8 +194,8 @@ class Solver {
   // interior floor); rho/delta of 0 keep the current values.
   void set_warm_start(const VectorXd& x, const VectorXd& t, const VectorXd& y,
                       const VectorXd& s_t, const VectorXd& s_ineq,
-                      const VectorXd& z_t, const VectorXd& z,
-                      double rho = 0.0, double delta = 0.0) {
+                      const VectorXd& z_t, const VectorXd& z, double rho = 0.0,
+                      double delta = 0.0) {
     scale_iterate(x, t, y, s_t, s_ineq, z_t, z);
     rho_ = rho > 0 ? rho : (rho_ > 0 ? rho_ : settings.rho_init);
     delta_ = delta > 0 ? delta : (delta_ > 0 ? delta_ : settings.delta_init);
@@ -251,12 +251,14 @@ class Solver {
         wQx_.noalias() = Q_ * x_;
         wAty_.noalias() = A_.transpose() * y_;
         wAx_.noalias() = A_ * x_;
-        dual_res_ = (wQx_ + q_ + wAty_).cwiseProduct(inv_cdx_)
+        dual_res_ = (wQx_ + q_ + wAty_)
+                        .cwiseProduct(inv_cdx_)
                         .lpNorm<Eigen::Infinity>();
-        primal_res_ = (wAx_ - b_).cwiseProduct(inv_de_).lpNorm<Eigen::Infinity>();
+        primal_res_ =
+            (wAx_ - b_).cwiseProduct(inv_de_).lpNorm<Eigen::Infinity>();
         primal_obj_ = (0.5 * x_.dot(wQx_) + q_.dot(x_)) / c_s_;
-        duality_gap_ = std::abs(primal_obj_ -
-                                (-0.5 * x_.dot(wQx_) - b_.dot(y_)) / c_s_);
+        duality_gap_ =
+            std::abs(primal_obj_ - (-0.5 * x_.dot(wQx_) - b_.dot(y_)) / c_s_);
       }
       return finish(Status::kInfeasible, 0);
     }
@@ -315,8 +317,14 @@ class Solver {
         bool boundary_shifted = false;
         const double eps = std::numeric_limits<double>::epsilon();
         for (Eigen::Index i = 0; i < p_; ++i) {
-          if (z_t_[i] < eps) { z_t_[i] += eps; boundary_shifted = true; }
-          if (z_in_[i] < eps) { z_in_[i] += eps; boundary_shifted = true; }
+          if (z_t_[i] < eps) {
+            z_t_[i] += eps;
+            boundary_shifted = true;
+          }
+          if (z_in_[i] < eps) {
+            z_in_[i] += eps;
+            boundary_shifted = true;
+          }
         }
         if (boundary_shifted) mu_ = calculate_mu();
       }
@@ -359,23 +367,26 @@ class Solver {
       // Predictor step.
       res_s_t_ = -s_t_.cwiseProduct(z_t_);
       res_s_in_ = -s_in_.cwiseProduct(z_in_);
-      kkt_solve(res_x_, res_y_, res_t_, res_z_t_, res_z_in_, res_s_t_, res_s_in_);
+      kkt_solve(res_x_, res_y_, res_t_, res_z_t_, res_z_in_, res_s_t_,
+                res_s_in_);
 
       double alpha_s, alpha_z;
       calculate_step(alpha_s, alpha_z);
       alpha_s *= settings.tau;
       alpha_z *= settings.tau;
 
-      double sigma = ((s_t_ + alpha_s * ds_t_).dot(z_t_ + alpha_z * dz_t_) +
-                      (s_in_ + alpha_s * ds_in_).dot(z_in_ + alpha_z * dz_in_)) /
-                     (mu_ * static_cast<double>(2 * p_));
+      double sigma =
+          ((s_t_ + alpha_s * ds_t_).dot(z_t_ + alpha_z * dz_t_) +
+           (s_in_ + alpha_s * ds_in_).dot(z_in_ + alpha_z * dz_in_)) /
+          (mu_ * static_cast<double>(2 * p_));
       sigma = std::max(0.0, std::min(1.0, sigma));
       sigma = sigma * sigma * sigma;
 
       // Mehrotra corrector with centering sigma.
       res_s_t_.array() += -ds_t_.array() * dz_t_.array() + sigma * mu_;
       res_s_in_.array() += -ds_in_.array() * dz_in_.array() + sigma * mu_;
-      kkt_solve(res_x_, res_y_, res_t_, res_z_t_, res_z_in_, res_s_t_, res_s_in_);
+      kkt_solve(res_x_, res_y_, res_t_, res_z_t_, res_z_in_, res_s_t_,
+                res_s_in_);
 
       calculate_step(alpha_s, alpha_z);
       const double primal_step = alpha_s * settings.tau;
@@ -395,19 +406,22 @@ class Solver {
 
       update_residuals_nr();
 #ifdef ELASTIQP_IPM_DEBUG
-      std::printf("it %3d pres %.2e dres %.2e gap %.2e mu %.2e rho %.1e delta %.1e lim %.1e "
-                  "a_p %.2e a_d %.2e sigma %.2e |x| %.2e |t| %.2e |z_in| %.2e |z_t| %.2e nopu %d nodu %d\n",
-                  iter, primal_res_, dual_res_, duality_gap_, mu_, rho_, delta_, reg_limit_,
-                  primal_step, dual_step, sigma, x_.lpNorm<Eigen::Infinity>(),
-                  t_.lpNorm<Eigen::Infinity>(), z_in_.lpNorm<Eigen::Infinity>(),
-                  z_t_.lpNorm<Eigen::Infinity>(), no_primal_update_, no_dual_update_);
+      std::printf(
+          "it %3d pres %.2e dres %.2e gap %.2e mu %.2e rho %.1e delta %.1e lim "
+          "%.1e "
+          "a_p %.2e a_d %.2e sigma %.2e |x| %.2e |t| %.2e |z_in| %.2e |z_t| "
+          "%.2e nopu %d nodu %d\n",
+          iter, primal_res_, dual_res_, duality_gap_, mu_, rho_, delta_,
+          reg_limit_, primal_step, dual_step, sigma,
+          x_.lpNorm<Eigen::Infinity>(), t_.lpNorm<Eigen::Infinity>(),
+          z_in_.lpNorm<Eigen::Infinity>(), z_t_.lpNorm<Eigen::Infinity>(),
+          no_primal_update_, no_dual_update_);
 #endif
 
       // Move each prox center only when its residual improved; otherwise
       // count a stall.
       if (dual_res_ < 0.95 * prev_dual_res_ ||
-          (dual_res_ < settings.eps_abs ||
-           dual_res_rel_ < settings.eps_rel) ||
+          (dual_res_ < settings.eps_abs || dual_res_rel_ < settings.eps_rel) ||
           (rho_ == settings.reg_finetune_lower_limit &&
            dual_prox_inf_ < settings.infeasibility_threshold)) {
         xi_x_ = x_;
@@ -492,7 +506,8 @@ class Solver {
 
       res_s_t_.array() = kappa_s - (s_t_.array() * z_t_.array());
       res_s_in_.array() = kappa_s - (s_in_.array() * z_in_.array());
-      kkt_solve(res_x_, res_y_, res_t_, res_z_t_, res_z_in_, res_s_t_, res_s_in_);
+      kkt_solve(res_x_, res_y_, res_t_, res_z_t_, res_z_in_, res_s_t_,
+                res_s_in_);
 
       double alpha_s, alpha_z;
       calculate_step(alpha_s, alpha_z);
@@ -610,10 +625,9 @@ class Solver {
     primal_obj_ = st.primal_obj;
     duality_gap_ = st.duality_gap;
     duality_gap_rel_ = st.duality_gap_rel;
-    const bool ok = st.converged(settings.eps_abs, settings.eps_rel,
-                                 settings.check_duality_gap,
-                                 settings.eps_duality_gap_abs,
-                                 settings.eps_duality_gap_rel);
+    const bool ok = st.converged(
+        settings.eps_abs, settings.eps_rel, settings.check_duality_gap,
+        settings.eps_duality_gap_abs, settings.eps_duality_gap_rel);
     return finish(ok ? Status::kSolved : Status::kNumerics, 0);
   }
 
@@ -638,8 +652,7 @@ class Solver {
     }
     K_.selfadjointView<Eigen::Lower>().rankUpdate(GS_.transpose());
     llt_.compute(K_);
-    return llt_.info() == Eigen::Success &&
-           std::isfinite(K_.diagonal().sum());
+    return llt_.info() == Eigen::Success && std::isfinite(K_.diagonal().sum());
   }
 
   // Solve the regularized KKT system, eliminating (s, z, t, y) onto x.
@@ -707,10 +720,10 @@ class Solver {
     rnr_t_ = z_t_ + z_in_;
     const double z12_norm = inf_us(rnr_t_, z_us_);
     rnr_t_ -= penalty_;
-    double dual_rel_norm = std::max(
-        {inf_us(wQx_, inv_cdx_), inf_us(q_, inv_cdx_),
-         inf_us(wGtz_in_, inv_cdx_), aty_norm, z12_norm,
-         inf_us(penalty_, z_us_)});
+    double dual_rel_norm =
+        std::max({inf_us(wQx_, inv_cdx_), inf_us(q_, inv_cdx_),
+                  inf_us(wGtz_in_, inv_cdx_), aty_norm, z12_norm,
+                  inf_us(penalty_, z_us_)});
 
     wGxt_.noalias() = G_ * x_;
     wGxt_ -= t_;
@@ -743,8 +756,8 @@ class Solver {
     duality_gap_ = std::abs(primal_obj_ - dual_obj);
     duality_gap_rel_ = duality_gap_ / std::max(1.0, gap_rel_norm);
 
-    primal_res_ = std::max({inf_us(rnr_z_t_, inv_di_),
-                            inf_us(rnr_z_in_, inv_di_), eq_res_norm});
+    primal_res_ = std::max(
+        {inf_us(rnr_z_t_, inv_di_), inf_us(rnr_z_in_, inv_di_), eq_res_norm});
     primal_res_rel_ = primal_res_ / std::max(1.0, primal_rel_norm);
     dual_res_ = std::max(inf_us(rnr_x_, inv_cdx_), inf_us(rnr_t_, z_us_));
     dual_res_rel_ = dual_res_ / std::max(1.0, dual_rel_norm);
@@ -761,9 +774,8 @@ class Solver {
                           (nu_in_ - z_in_).lpNorm<Eigen::Infinity>());
     if (m_ > 0) {
       res_y_ = rnr_y_ - delta_ * (nu_y_ - y_);
-      primal_prox_inf_ =
-          std::max(primal_prox_inf_,
-                   delta_ * (nu_y_ - y_).lpNorm<Eigen::Infinity>());
+      primal_prox_inf_ = std::max(
+          primal_prox_inf_, delta_ * (nu_y_ - y_).lpNorm<Eigen::Infinity>());
     }
     dual_prox_inf_ = rho_ * std::max((x_ - xi_x_).lpNorm<Eigen::Infinity>(),
                                      (t_ - xi_t_).lpNorm<Eigen::Infinity>());
@@ -829,10 +841,9 @@ class Solver {
   void init_warm() {
     update_residuals_nr();
     const double r = std::max(primal_res_, dual_res_);
-    const double f =
-        std::min(std::max(settings.warm_start_fraction * r,
-                          settings.warm_start_min_floor),
-                 settings.warm_start_max_floor);
+    const double f = std::min(std::max(settings.warm_start_fraction * r,
+                                       settings.warm_start_min_floor),
+                              settings.warm_start_max_floor);
     s_t_ = s_t_.cwiseMax(f);
     s_in_ = s_in_.cwiseMax(f);
     z_t_ = z_t_.cwiseMax(f);
@@ -912,36 +923,33 @@ class Solver {
   Solution sol_;
 };
 
-inline Solution Solve(
-    const MatrixXd& Q, const VectorXd& q, const MatrixXd& A, const VectorXd& b,
-    const MatrixXd& G, const VectorXd& h, const VectorXd& penalty,
-    const Settings& settings = {}) {
+inline Solution Solve(const MatrixXd& Q, const VectorXd& q, const MatrixXd& A,
+                      const VectorXd& b, const MatrixXd& G, const VectorXd& h,
+                      const VectorXd& penalty, const Settings& settings = {}) {
   Solver solver;
   solver.settings = settings;
   solver.setup(Q, q, A, b, G, h, penalty);
   return solver.solve();
 }
 
-inline Solution Solve(
-    const MatrixXd& Q, const VectorXd& q, const MatrixXd& A, const VectorXd& b,
-    const MatrixXd& G, const VectorXd& h, double penalty,
-    const Settings& settings = {}) {
+inline Solution Solve(const MatrixXd& Q, const VectorXd& q, const MatrixXd& A,
+                      const VectorXd& b, const MatrixXd& G, const VectorXd& h,
+                      double penalty, const Settings& settings = {}) {
   return Solve(Q, q, A, b, G, h, VectorXd::Constant(h.size(), penalty),
-                  settings);
+               settings);
 }
 
-inline Solution Solve(
-    const MatrixXd& Q, const VectorXd& q, const MatrixXd& G, const VectorXd& h,
-    const VectorXd& penalty, const Settings& settings = {}) {
+inline Solution Solve(const MatrixXd& Q, const VectorXd& q, const MatrixXd& G,
+                      const VectorXd& h, const VectorXd& penalty,
+                      const Settings& settings = {}) {
   return Solve(Q, q, MatrixXd(0, q.size()), VectorXd(0), G, h, penalty,
-                  settings);
+               settings);
 }
 
-inline Solution Solve(
-    const MatrixXd& Q, const VectorXd& q, const MatrixXd& G, const VectorXd& h,
-    double penalty, const Settings& settings = {}) {
-  return Solve(Q, q, G, h, VectorXd::Constant(h.size(), penalty),
-                  settings);
+inline Solution Solve(const MatrixXd& Q, const VectorXd& q, const MatrixXd& G,
+                      const VectorXd& h, double penalty,
+                      const Settings& settings = {}) {
+  return Solve(Q, q, G, h, VectorXd::Constant(h.size(), penalty), settings);
 }
 
 }  // namespace elastiqp::ipm

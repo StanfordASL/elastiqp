@@ -27,19 +27,22 @@ Method parse_method(const std::string& method) {
   if (method == "das") return Method::kDAS;
   if (method == "pdal") return Method::kPDAL;
   if (method == "ipm") return Method::kIPM;
-  throw std::invalid_argument("method must be one of 'das', 'pdal', 'ipm', got '" +
-                              method + "'");
+  throw std::invalid_argument(
+      "method must be one of 'das', 'pdal', 'ipm', got '" + method + "'");
 }
 
 // max_iter is the backend's outer budget.
 inline void apply_options(elastiqp::das::Settings& s, std::optional<double> eps,
-                          std::optional<int> max_iter, std::optional<bool> ruiz) {
+                          std::optional<int> max_iter,
+                          std::optional<bool> ruiz) {
   if (eps) s.eps_abs = *eps;
   if (max_iter) s.max_iter = *max_iter;
   if (ruiz) s.ruiz = *ruiz;
 }
-inline void apply_options(elastiqp::pdal::Settings& s, std::optional<double> eps,
-                          std::optional<int> max_iter, std::optional<bool> ruiz) {
+inline void apply_options(elastiqp::pdal::Settings& s,
+                          std::optional<double> eps,
+                          std::optional<int> max_iter,
+                          std::optional<bool> ruiz) {
   if (eps) {
     s.eps_abs = *eps;
     s.eps_duality_gap_abs = *eps;
@@ -48,7 +51,8 @@ inline void apply_options(elastiqp::pdal::Settings& s, std::optional<double> eps
   if (ruiz) s.ruiz = *ruiz;
 }
 inline void apply_options(elastiqp::ipm::Settings& s, std::optional<double> eps,
-                          std::optional<int> max_iter, std::optional<bool> ruiz) {
+                          std::optional<int> max_iter,
+                          std::optional<bool> ruiz) {
   if (eps) {
     s.eps_abs = *eps;
     s.eps_duality_gap_abs = *eps;
@@ -78,9 +82,15 @@ Solution solve_with(const Eigen::MatrixXd& Q, const Eigen::VectorXd& q,
 }
 
 // Lets solve_with reach each backend's Settings type uniformly.
-struct DAS : elastiqp::das::Solver { using Settings_t = elastiqp::das::Settings; };
-struct PDAL : elastiqp::pdal::Solver { using Settings_t = elastiqp::pdal::Settings; };
-struct IPM : elastiqp::ipm::Solver { using Settings_t = elastiqp::ipm::Settings; };
+struct DAS : elastiqp::das::Solver {
+  using Settings_t = elastiqp::das::Settings;
+};
+struct PDAL : elastiqp::pdal::Solver {
+  using Settings_t = elastiqp::pdal::Settings;
+};
+struct IPM : elastiqp::ipm::Solver {
+  using Settings_t = elastiqp::ipm::Settings;
+};
 
 template <typename SolverT>
 void def_update(nb::class_<SolverT>& cls) {
@@ -114,9 +124,9 @@ void def_update(nb::class_<SolverT>& cls) {
         auto check_vec = [](const char* name, const Eigen::VectorXd& v,
                             Eigen::Index size) {
           if (v.size() != size) {
-            throw std::invalid_argument(
-                std::string(name) + " must have size " + std::to_string(size) +
-                ", got " + std::to_string(v.size()));
+            throw std::invalid_argument(std::string(name) + " must have size " +
+                                        std::to_string(size) + ", got " +
+                                        std::to_string(v.size()));
           }
         };
         if (Q) check_mat("Q", *Q, n, n);
@@ -178,8 +188,8 @@ void def_common(nb::class_<SolverT>& cls) {
       .def(
           "setup",
           [](SolverT& s, const Eigen::MatrixXd& Q, const Eigen::VectorXd& q,
-             const Eigen::MatrixXd& G, const Eigen::VectorXd& h,
-             double penalty, const std::optional<Eigen::MatrixXd>& A,
+             const Eigen::MatrixXd& G, const Eigen::VectorXd& h, double penalty,
+             const std::optional<Eigen::MatrixXd>& A,
              const std::optional<Eigen::VectorXd>& b) {
             if (A.has_value() != b.has_value()) {
               throw std::invalid_argument("A and b must be provided together");
@@ -231,7 +241,8 @@ NB_MODULE(_core, m) {
       "equalities. Backends das (default), pdal and ipm are submodules, "
       "each with its own Settings and Solver.";
   auto das = m.def_submodule("das", "Dual active-set backend (default)");
-  auto pdal = m.def_submodule("pdal", "Primal-dual augmented Lagrangian backend");
+  auto pdal =
+      m.def_submodule("pdal", "Primal-dual augmented Lagrangian backend");
   auto ipm = m.def_submodule("ipm", "Proximal interior-point backend");
 
   nb::enum_<Status>(m, "Status")
@@ -243,20 +254,23 @@ NB_MODULE(_core, m) {
 
   nb::class_<Solution>(m, "Solution")
       .def_prop_ro("x", [](const Solution& s) { return s.x; })
-      .def_prop_ro("t", [](const Solution& s) { return s.t; },
-                   "Elastic slacks, max(G x - h, 0)")
-      .def_prop_ro("y", [](const Solution& s) { return s.y; },
-                   "Equality duals (empty without A, b)")
-      .def_prop_ro("z", [](const Solution& s) { return s.z; },
-                   "Inequality duals, in [0, penalty]")
-      .def_prop_ro("z_t", [](const Solution& s) { return s.z_t; },
-                   "Duals of t >= 0; equals penalty - z except at a relax() "
-                   "point")
+      .def_prop_ro(
+          "t", [](const Solution& s) { return s.t; },
+          "Elastic slacks, max(G x - h, 0)")
+      .def_prop_ro(
+          "y", [](const Solution& s) { return s.y; },
+          "Equality duals (empty without A, b)")
+      .def_prop_ro(
+          "z", [](const Solution& s) { return s.z; },
+          "Inequality duals, in [0, penalty]")
+      .def_prop_ro(
+          "z_t", [](const Solution& s) { return s.z_t; },
+          "Duals of t >= 0; equals penalty - z except at a relax() "
+          "point")
       .def_ro("status", &Solution::status)
       .def_ro("converged", &Solution::converged,
               "1 iff status == Status.Solved")
-      .def_ro("iters", &Solution::iters,
-              "Inner iterations")
+      .def_ro("iters", &Solution::iters, "Inner iterations")
       .def_ro("outer_iters", &Solution::outer_iters,
               "BCL rounds (pdal), proximal rounds (das), 0 (ipm)")
       .def_ro("n_active", &Solution::n_active,
@@ -300,13 +314,12 @@ NB_MODULE(_core, m) {
         .value("Saturated", Sv::RowState::kSaturated)
         .value("Equality", Sv::RowState::kEquality)
         .value("Dropped", Sv::RowState::kDropped);
-    auto cls = nb::class_<Sv>(das, "Solver",
-                              "Dual active-set backend (default)");
+    auto cls =
+        nb::class_<Sv>(das, "Solver", "Dual active-set backend (default)");
     def_common(cls);
     cls.def("row_state", &Sv::row_state, nb::arg("i"),
             "RowState of inequality row i")
-        .def("proximal", &Sv::proximal,
-             "True if Q is proximally shifted")
+        .def("proximal", &Sv::proximal, "True if Q is proximally shifted")
         .def("prox_eps", &Sv::prox_eps, "Proximal shift added to Q (0 if none)")
         .def("scaling_drift", &Sv::scaling_drift,
              "Largest factor a scaled row/column max-norm has drifted from 1")
@@ -337,7 +350,8 @@ NB_MODULE(_core, m) {
         .def_rw("max_factor_retries", &S::max_factor_retries)
         .def_rw("incremental_updates", &S::incremental_updates)
         .def_rw("incremental_update_budget", &S::incremental_update_budget)
-        .def_rw("incremental_update_max_flips", &S::incremental_update_max_flips)
+        .def_rw("incremental_update_max_flips",
+                &S::incremental_update_max_flips)
         .def_rw("check_eq_consistency", &S::check_eq_consistency)
         .def_rw("warm_start", &S::warm_start)
         .def_rw("max_outer_iter", &S::max_outer_iter)
@@ -372,8 +386,9 @@ NB_MODULE(_core, m) {
     auto cls = nb::class_<Sv>(pdal, "Solver",
                               "Primal-dual augmented Lagrangian backend");
     def_common(cls);
-    cls.def("solution", [](const Sv& s) -> Solution { return s.solution(); },
-            "Result of the last solve() or relax()")
+    cls.def(
+           "solution", [](const Sv& s) -> Solution { return s.solution(); },
+           "Result of the last solve() or relax()")
         .def("factorizations", &Sv::factorizations,
              "KKT factorizations in the last solve()")
         .def("cold_resets", &Sv::cold_resets,
@@ -440,32 +455,35 @@ NB_MODULE(_core, m) {
     auto cls = nb::class_<Sv>(ipm, "Solver", "Proximal interior-point backend");
     def_common(cls);
     def_relax(cls, 30);
-    cls.def("solution", [](const Sv& s) -> Solution { return s.solution(); },
-            "Result of the last solve() or relax()")
+    cls.def(
+           "solution", [](const Sv& s) -> Solution { return s.solution(); },
+           "Result of the last solve() or relax()")
         .def(
-           "set_warm_start",
-           [](Sv& s, const Eigen::VectorXd& x, const Eigen::VectorXd& t,
-              const Eigen::VectorXd& y, const Eigen::VectorXd& s_t,
-              const Eigen::VectorXd& s_ineq, const Eigen::VectorXd& z_t,
-              const Eigen::VectorXd& z, double rho, double delta) {
-             s.set_warm_start(x, t, y, s_t, s_ineq, z_t, z, rho, delta);
-           },
-           nb::arg("x"), nb::arg("t"), nb::arg("y"), nb::arg("s_t"),
-           nb::arg("s_ineq"), nb::arg("z_t"), nb::arg("z"), nb::kw_only(),
-           nb::arg("rho") = 0.0, nb::arg("delta") = 0.0,
-           "Seed the next solve() with a strictly interior iterate, used as "
-           "given.")
-        .def("warm_start_from",
-             [](Sv& s, const Solution& sol) { s.warm_start_from(sol); },
-             nb::arg("solution"),
-             "Seed the next solve() from a Solution; slacks are rebuilt and "
-             "floored off the boundary.")
-        .def("warm_start_from",
-             [](Sv& s, const Eigen::VectorXd& x, const Eigen::VectorXd& y,
-                const Eigen::VectorXd& z) { s.warm_start_from(x, y, z); },
-             nb::arg("x"), nb::arg("y"), nb::arg("z"),
-             "Seed the next solve() from a user-frame (x, y, z); slacks are "
-             "rebuilt and floored off the boundary.");
+            "set_warm_start",
+            [](Sv& s, const Eigen::VectorXd& x, const Eigen::VectorXd& t,
+               const Eigen::VectorXd& y, const Eigen::VectorXd& s_t,
+               const Eigen::VectorXd& s_ineq, const Eigen::VectorXd& z_t,
+               const Eigen::VectorXd& z, double rho, double delta) {
+              s.set_warm_start(x, t, y, s_t, s_ineq, z_t, z, rho, delta);
+            },
+            nb::arg("x"), nb::arg("t"), nb::arg("y"), nb::arg("s_t"),
+            nb::arg("s_ineq"), nb::arg("z_t"), nb::arg("z"), nb::kw_only(),
+            nb::arg("rho") = 0.0, nb::arg("delta") = 0.0,
+            "Seed the next solve() with a strictly interior iterate, used as "
+            "given.")
+        .def(
+            "warm_start_from",
+            [](Sv& s, const Solution& sol) { s.warm_start_from(sol); },
+            nb::arg("solution"),
+            "Seed the next solve() from a Solution; slacks are rebuilt and "
+            "floored off the boundary.")
+        .def(
+            "warm_start_from",
+            [](Sv& s, const Eigen::VectorXd& x, const Eigen::VectorXd& y,
+               const Eigen::VectorXd& z) { s.warm_start_from(x, y, z); },
+            nb::arg("x"), nb::arg("y"), nb::arg("z"),
+            "Seed the next solve() from a user-frame (x, y, z); slacks are "
+            "rebuilt and floored off the boundary.");
   }
 
   // --- one-shot solve ------------------------------------------------------
@@ -484,16 +502,16 @@ NB_MODULE(_core, m) {
       using S = decltype(default_settings);
       if (settings.is_none()) return default_settings;
       if (!nb::isinstance<S>(settings)) {
-        throw std::invalid_argument(
-            "settings does not match method='" + method + "'");
+        throw std::invalid_argument("settings does not match method='" +
+                                    method + "'");
       }
       return nb::cast<S>(settings);
     };
     switch (parse_method(method)) {
       case Method::kDAS:
         return solve_with<DAS>(Q, q, A, b, G, h, penalty,
-                              pick(elastiqp::das::Settings{}), eps_abs,
-                              max_iter, ruiz);
+                               pick(elastiqp::das::Settings{}), eps_abs,
+                               max_iter, ruiz);
       case Method::kPDAL:
         return solve_with<PDAL>(Q, q, A, b, G, h, penalty,
                                 pick(elastiqp::pdal::Settings{}), eps_abs,
@@ -602,9 +620,8 @@ NB_MODULE(_core, m) {
                                Eigen::VectorXd(info));
       },
       nb::arg("Q"), nb::arg("q"), nb::arg("A"), nb::arg("b"), nb::arg("G"),
-      nb::arg("h"), nb::arg("penalty"), nb::arg("eps_abs"),
-      nb::arg("max_iter"), nb::arg("ruiz"), nb::arg("target_kappa"),
-      nb::arg("method") = "pdal");
+      nb::arg("h"), nb::arg("penalty"), nb::arg("eps_abs"), nb::arg("max_iter"),
+      nb::arg("ruiz"), nb::arg("target_kappa"), nb::arg("method") = "pdal");
 
   // KktVjp at the relaxed block of _solve_relaxed; empty cotangents are zero.
   m.def(
@@ -627,7 +644,6 @@ NB_MODULE(_core, m) {
         return std::make_tuple(g.Q, g.q, g.A, g.b, g.G, g.h, g.penalty);
       },
       nb::arg("Q"), nb::arg("A"), nb::arg("G"), nb::arg("h"), nb::arg("x"),
-      nb::arg("t"), nb::arg("y"), nb::arg("z_t"), nb::arg("z"),
-      nb::arg("ct_x"), nb::arg("ct_t"), nb::arg("ct_y"), nb::arg("ct_z_t"),
-      nb::arg("ct_z"));
+      nb::arg("t"), nb::arg("y"), nb::arg("z_t"), nb::arg("z"), nb::arg("ct_x"),
+      nb::arg("ct_t"), nb::arg("ct_y"), nb::arg("ct_z_t"), nb::arg("ct_z"));
 }

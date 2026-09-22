@@ -51,8 +51,8 @@ void RunCell(Structure st, Size sz, const VectorXd& penalty, double sigma,
   const unsigned seed = 91u * static_cast<unsigned>(sz.n) +
                         static_cast<unsigned>(sz.p) +
                         7u * static_cast<unsigned>(st);
-  const Trajectory traj = drift_traj::MakeTrajectory(
-      sz, st, penalty, sigma, Drift::kQH, seed, kTicks);
+  const Trajectory traj = drift_traj::MakeTrajectory(sz, st, penalty, sigma,
+                                                     Drift::kQH, seed, kTicks);
 
   elastiqp::pdal::Solver s;  // shipped defaults; only eps/ruiz pinned
   s.settings.eps_abs = 1e-5;
@@ -88,15 +88,15 @@ void RunCell(Structure st, Size sz, const VectorXd& penalty, double sigma,
 
 int main() {
   std::printf("BCL creep regression: warm chain, qh drift\n");
-  RunCell(Structure::kFeas, {14, 0, 100}, VectorXd::Constant(100, 1e4),
-          1e-4, "feas uniform 1e4", 4000, 120);
-  RunCell(Structure::kDegen, {14, 0, 100}, VectorXd::Constant(100, 1e4),
-          1e-4, "degen uniform 1e4", 5000, 120);
+  RunCell(Structure::kFeas, {14, 0, 100}, VectorXd::Constant(100, 1e4), 1e-4,
+          "feas uniform 1e4", 4000, 120);
+  RunCell(Structure::kDegen, {14, 0, 100}, VectorXd::Constant(100, 1e4), 1e-4,
+          "degen uniform 1e4", 5000, 120);
 
   // Mixed penalties: 1 stiff row in 8 (see the header comment).
   VectorXd spike(200);
   for (int i = 0; i < 200; ++i) spike[i] = (i % 8 == 0) ? 1e4 : 10.0;
-  RunCell(Structure::kInfeas, {30, 8, 200}, spike, 1e-3,
-          "infeas spike 10/1e4", 3200, 80);
+  RunCell(Structure::kInfeas, {30, 8, 200}, spike, 1e-3, "infeas spike 10/1e4",
+          3200, 80);
   return g_all_ok ? 0 : 1;
 }

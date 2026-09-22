@@ -4,10 +4,9 @@
 // subset of the data.
 #pragma once
 
+#include <Eigen/Dense>
 #include <random>
 #include <vector>
-
-#include <Eigen/Dense>
 
 #include "problem_gen.hpp"
 
@@ -28,18 +27,26 @@ enum class Drift { kQ, kQQ, kQH, kQHG, kAll };
 
 inline const char* Name(Structure s) {
   switch (s) {
-    case Structure::kFeas: return "feas";
-    case Structure::kInfeas: return "infeas";
-    default: return "degen";
+    case Structure::kFeas:
+      return "feas";
+    case Structure::kInfeas:
+      return "infeas";
+    default:
+      return "degen";
   }
 }
 inline const char* Name(Drift d) {
   switch (d) {
-    case Drift::kQ: return "q";
-    case Drift::kQQ: return "qQ";
-    case Drift::kQH: return "qh";
-    case Drift::kQHG: return "qhG";
-    default: return "all";
+    case Drift::kQ:
+      return "q";
+    case Drift::kQQ:
+      return "qQ";
+    case Drift::kQH:
+      return "qh";
+    case Drift::kQHG:
+      return "qhG";
+    default:
+      return "all";
   }
 }
 inline bool DriftsHB(Drift d) {
@@ -63,9 +70,9 @@ struct Trajectory {
 
 // penalty may be per-row (mixed penalties); the scalar overload below
 // keeps the historical uniform-penalty call sites unchanged.
-inline Trajectory MakeTrajectory(Size sz, Structure st,
-                                 const VectorXd& penalty, double sigma,
-                                 Drift drift, unsigned seed, int ticks) {
+inline Trajectory MakeTrajectory(Size sz, Structure st, const VectorXd& penalty,
+                                 double sigma, Drift drift, unsigned seed,
+                                 int ticks) {
   std::mt19937 rng(seed);
   Trajectory traj;
   switch (st) {
@@ -73,8 +80,7 @@ inline Trajectory MakeTrajectory(Size sz, Structure st,
       traj.base = problem_gen::RandomFeasible(rng, sz.n, sz.m, sz.p);
       break;
     case Structure::kInfeas:
-      traj.base =
-          problem_gen::InfeasibleEq(rng, sz.n, sz.m, sz.p, sz.p / 4);
+      traj.base = problem_gen::InfeasibleEq(rng, sz.n, sz.m, sz.p, sz.p / 4);
       break;
     case Structure::kDegen: {
       traj.base = problem_gen::RandomFeasible(rng, sz.n, sz.m, sz.p);

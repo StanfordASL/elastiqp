@@ -93,9 +93,9 @@ void CheckVertexLp(const char* cell, const Lp& lp, double penalty,
                    double tol) {
   const int n = static_cast<int>(lp.q.size());
   const MatrixXd Q = MatrixXd::Zero(n, n);
-  const elastiqp::Solution sol = SolveWith<Solver>(
-      Q, lp.q, lp.A, lp.b, lp.G, lp.h,
-      VectorXd::Constant(lp.h.size(), penalty), settings);
+  const elastiqp::Solution sol =
+      SolveWith<Solver>(Q, lp.q, lp.A, lp.b, lp.G, lp.h,
+                        VectorXd::Constant(lp.h.size(), penalty), settings);
   const double dx = InfNorm(sol.x - lp.x_star);
   const double dz = InfNorm(sol.z - lp.z_star);
   const double viol = (lp.G * sol.x - lp.h).cwiseMax(0.0).maxCoeff();
@@ -156,8 +156,8 @@ void LpSuite() {
   std::mt19937 rng(7);
   CheckVertexLp<Solver>("n=5 p=20", MakeVertexLp(rng, 5, 0, 15), penalty, def,
                         1e-5);
-  CheckVertexLp<Solver>("n=20 p=80", MakeVertexLp(rng, 20, 0, 60), penalty,
-                        def, 1e-5);
+  CheckVertexLp<Solver>("n=20 p=80", MakeVertexLp(rng, 20, 0, 60), penalty, def,
+                        1e-5);
   CheckVertexLp<Solver>("n=50 p=200", MakeVertexLp(rng, 50, 0, 150), penalty,
                         def, 1e-5);
   CheckVertexLp<Solver>("n=20 m=5 p=60", MakeVertexLp(rng, 20, 5, 45), penalty,

@@ -121,8 +121,8 @@ void HardRows(std::mt19937& rng) {
   const elastiqp::Solution mix = das::Solve(c.Q, c.q, c.G, c.h, w_mix);
   const VectorXd r = c.G * mix.x - c.h;
   Check("hard vs elastic conflict: only the elastic row moves",
-        mix.converged == 1 && r[1] > 0.5 &&
-            r.head(1).maxCoeff() <= 1e-9 && r.tail(28).maxCoeff() <= 1e-9,
+        mix.converged == 1 && r[1] > 0.5 && r.head(1).maxCoeff() <= 1e-9 &&
+            r.tail(28).maxCoeff() <= 1e-9,
         r[1], "viol");
 }
 
@@ -153,12 +153,14 @@ void ScaledCase(std::mt19937& rng) {
         das::Solve(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, w, st);
     const double obj =
         problem_gen::ElasticObjective(qp.Q, qp.q, qp.G, qp.h, w, s.x);
-    const double rel = std::abs(obj - obj_ref) / std::max(1.0, std::abs(obj_ref));
+    const double rel =
+        std::abs(obj - obj_ref) / std::max(1.0, std::abs(obj_ref));
     const double xerr = InfNorm(S.cwiseProduct(s.x) - ref.x);
     if (ruiz == 0) {  // informational: the failure mode Ruiz exists for
-      std::printf("  [info] badly scaled, ruiz=0: status=%d it=%d obj rel "
-                  "err=%.1e x err=%.1e\n",
-                  static_cast<int>(s.status), s.iters, rel, xerr);
+      std::printf(
+          "  [info] badly scaled, ruiz=0: status=%d it=%d obj rel "
+          "err=%.1e x err=%.1e\n",
+          static_cast<int>(s.status), s.iters, rel, xerr);
       continue;
     }
     char name[96];
@@ -222,8 +224,9 @@ void DegenerateCase(std::mt19937& rng) {
   s.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, w);
   const elastiqp::Solution sol = s.solve();
   char name[96];
-  std::snprintf(name, sizeof(name), "duplicated rows: solved (it=%d, refactors=%d)",
-                sol.iters, s.refactors());
+  std::snprintf(name, sizeof(name),
+                "duplicated rows: solved (it=%d, refactors=%d)", sol.iters,
+                s.refactors());
   Check(name, sol.converged == 1, static_cast<int>(sol.status), "status");
   Check("duplicated rows: x matches", InfNorm(sol.x - ref.x) <= 1e-5,
         InfNorm(sol.x - ref.x), "err");
@@ -247,8 +250,8 @@ void ProxLoop(std::mt19937& rng) {
   s.setup(qp.Q, qp.q, qp.G, qp.h, 10.0);
   const elastiqp::Solution pd = s.solve();
   Check("positive definite Q: one proximal round, eps = 0",
-        pd.converged == 1 && pd.outer_iters == 1 && !s.proximal(),
-        s.prox_eps(), "eps");
+        pd.converged == 1 && pd.outer_iters == 1 && !s.proximal(), s.prox_eps(),
+        "eps");
   // Singular Q with constraints, bounded by a stiff box: proximal rounds.
   MatrixXd Gb(20 + 20, 10);
   VectorXd hb(40), wb(40);
@@ -383,13 +386,14 @@ void ReuseBench() {
       }
     }
   }
-  std::printf("  [reuse n=%d m=%d p=%d, %d/%d G rows change] reuse: %.1f "
-              "us/tick, %.1f rows re-solved/tick, %d refactors, %.1f it | "
-              "full: %.1f us/tick, %d refactors, %.1f it\n",
-              n, m, p, changing, p, us[0] / ticks,
-              static_cast<double>(rows_updated[0]) / ticks, refactors[0],
-              static_cast<double>(iters[0]) / ticks, us[1] / ticks,
-              refactors[1], static_cast<double>(iters[1]) / ticks);
+  std::printf(
+      "  [reuse n=%d m=%d p=%d, %d/%d G rows change] reuse: %.1f "
+      "us/tick, %.1f rows re-solved/tick, %d refactors, %.1f it | "
+      "full: %.1f us/tick, %d refactors, %.1f it\n",
+      n, m, p, changing, p, us[0] / ticks,
+      static_cast<double>(rows_updated[0]) / ticks, refactors[0],
+      static_cast<double>(iters[0]) / ticks, us[1] / ticks, refactors[1],
+      static_cast<double>(iters[1]) / ticks);
   Check("reuse: same x as full refactorization", xdiff <= 1e-7, xdiff, "err");
   Check("reuse: only the changed rows re-solved (after the first tick)",
         rows_updated[0] == (m + p) + changing * (ticks - 1),
@@ -519,17 +523,19 @@ void CreepCell(Structure st, Size sz, const VectorXd& penalty, double sigma,
     }
     xdiff_worst = std::max(xdiff_worst, InfNorm(s.x - es.x));
   }
-  std::printf("  [%s] as %.1f us/tick %.1f it/tick (cold tick %d, warm worst "
-              "%d, sat<=%d) | pdal %.1f us/tick %.1f it/tick (%d fails) | "
-              "max|x_as - x_pdal| %.1e\n",
-              label, d_us / ticks, static_cast<double>(total) / ticks,
-              cold_iters, warm_worst, sat_max, e_us / ticks,
-              static_cast<double>(e_total) / ticks, e_fails, xdiff_worst);
-  std::printf("  [%s] worst residuals: stat %.1e eq %.1e active|r| %.1e "
-              "inactive viol %.1e saturated slack %.1e (full KKT incl. "
-              "complementarity %.1e)\n",
-              label, res_stat, res_eq, res_active, res_inactive,
-              res_saturated, kkt_worst);
+  std::printf(
+      "  [%s] as %.1f us/tick %.1f it/tick (cold tick %d, warm worst "
+      "%d, sat<=%d) | pdal %.1f us/tick %.1f it/tick (%d fails) | "
+      "max|x_as - x_pdal| %.1e\n",
+      label, d_us / ticks, static_cast<double>(total) / ticks, cold_iters,
+      warm_worst, sat_max, e_us / ticks, static_cast<double>(e_total) / ticks,
+      e_fails, xdiff_worst);
+  std::printf(
+      "  [%s] worst residuals: stat %.1e eq %.1e active|r| %.1e "
+      "inactive viol %.1e saturated slack %.1e (full KKT incl. "
+      "complementarity %.1e)\n",
+      label, res_stat, res_eq, res_active, res_inactive, res_saturated,
+      kkt_worst);
   char name[96];
   std::snprintf(name, sizeof(name), "%s: all ticks solve", label);
   Check(name, fails == 0, fails, "fails");
@@ -552,10 +558,10 @@ void CreepCell(Structure st, Size sz, const VectorXd& penalty, double sigma,
 
 void CreepSuite() {
   std::printf("BCL creep cells, warm chain (qh drift)\n");
-  CreepCell(Structure::kFeas, {14, 0, 100}, VectorXd::Constant(100, 1e4),
-            1e-4, "feas uniform 1e4", 80);
-  CreepCell(Structure::kDegen, {14, 0, 100}, VectorXd::Constant(100, 1e4),
-            1e-4, "degen uniform 1e4", 160);
+  CreepCell(Structure::kFeas, {14, 0, 100}, VectorXd::Constant(100, 1e4), 1e-4,
+            "feas uniform 1e4", 80);
+  CreepCell(Structure::kDegen, {14, 0, 100}, VectorXd::Constant(100, 1e4), 1e-4,
+            "degen uniform 1e4", 160);
   VectorXd spike(200);
   for (int i = 0; i < 200; ++i) spike[i] = (i % 8 == 0) ? 1e4 : 10.0;
   CreepCell(Structure::kInfeas, {30, 8, 200}, spike, 1e-3,

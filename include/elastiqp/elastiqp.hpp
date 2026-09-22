@@ -5,8 +5,8 @@
 #include "elastiqp/common.hpp"
 #include "elastiqp/das.hpp"
 #include "elastiqp/ipm.hpp"
-#include "elastiqp/pdal.hpp"
 #include "elastiqp/kkt_vjp.hpp"
+#include "elastiqp/pdal.hpp"
 
 namespace elastiqp {
 

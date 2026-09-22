@@ -38,12 +38,14 @@ namespace pdal = elastiqp::pdal;
 static_assert(
     pdal::Settings{}.eps_abs == ipm::Settings{}.eps_abs &&
         pdal::Settings{}.eps_rel == ipm::Settings{}.eps_rel &&
-        pdal::Settings{}.check_duality_gap == ipm::Settings{}.check_duality_gap &&
+        pdal::Settings{}.check_duality_gap ==
+            ipm::Settings{}.check_duality_gap &&
         pdal::Settings{}.eps_duality_gap_abs ==
             ipm::Settings{}.eps_duality_gap_abs &&
         pdal::Settings{}.eps_duality_gap_rel ==
             ipm::Settings{}.eps_duality_gap_rel &&
-        pdal::Settings{}.max_factor_retries == ipm::Settings{}.max_factor_retries &&
+        pdal::Settings{}.max_factor_retries ==
+            ipm::Settings{}.max_factor_retries &&
         pdal::Settings{}.warm_start == ipm::Settings{}.warm_start &&
         pdal::Settings{}.check_eq_consistency ==
             ipm::Settings{}.check_eq_consistency &&
@@ -139,13 +141,11 @@ int main() {
       warm_iters += ws.iters;
       cold_iters += cs.iters;
       worst_dx = std::max(worst_dx, (ws.x - cs.x).lpNorm<Eigen::Infinity>());
-      worst_eq = std::max(
-          worst_eq, (qp0.A * ws.x - b).lpNorm<Eigen::Infinity>());
-      worst_kkt = std::max(
-          worst_kkt,
-          problem_gen::ElasticKKTResidual(qp0.Q, q, qp0.A, b, qp0.G, h,
-                                          penalty, ws.x, ws.t, ws.y, ws.z_t,
-                                          ws.z));
+      worst_eq =
+          std::max(worst_eq, (qp0.A * ws.x - b).lpNorm<Eigen::Infinity>());
+      worst_kkt = std::max(worst_kkt, problem_gen::ElasticKKTResidual(
+                                          qp0.Q, q, qp0.A, b, qp0.G, h, penalty,
+                                          ws.x, ws.t, ws.y, ws.z_t, ws.z));
     }
     std::printf(
         "  cold iters=%d warm iters=%d cold factors=%d warm factors=%d\n"
@@ -192,11 +192,9 @@ int main() {
       explicit_iters += ws.iters;
       cold_iters += cs.iters;
       worst_dx = std::max(worst_dx, (ws.x - cs.x).lpNorm<Eigen::Infinity>());
-      worst_kkt = std::max(
-          worst_kkt,
-          problem_gen::ElasticKKTResidual(qp0.Q, q, qp0.A, b, qp0.G, h,
-                                          penalty, ws.x, ws.t, ws.y, ws.z_t,
-                                          ws.z));
+      worst_kkt = std::max(worst_kkt, problem_gen::ElasticKKTResidual(
+                                          qp0.Q, q, qp0.A, b, qp0.G, h, penalty,
+                                          ws.x, ws.t, ws.y, ws.z_t, ws.z));
     }
     std::printf("  cold iters=%d explicit iters=%d worst_kkt=%9.2e\n",
                 cold_iters, explicit_iters, worst_kkt);
@@ -258,37 +256,35 @@ int main() {
       cold.setup(qp0.Q, q, A, b, G, h, penalty);
       const auto cs = cold.solve();
       const auto cr = cold.relax(kappa);
-      all_conv &= ws.converged == 1 && cs.converged == 1 &&
-                  wr.converged == 1 && cr.converged == 1;
+      all_conv &= ws.converged == 1 && cs.converged == 1 && wr.converged == 1 &&
+                  cr.converged == 1;
       warm_iters += ws.iters;
       cold_iters += cs.iters;
       relax_warm_iters += wr.iters;
       relax_cold_iters += cr.iters;
       worst_dx = std::max(worst_dx, (ws.x - cs.x).lpNorm<Eigen::Infinity>());
-      worst_rdx =
-          std::max(worst_rdx, (wr.x - cr.x).lpNorm<Eigen::Infinity>());
+      worst_rdx = std::max(worst_rdx, (wr.x - cr.x).lpNorm<Eigen::Infinity>());
       last_relax_x = wr.x;
       // The rows grow 1.5^k, so termination is by the relative clause late
       // in the run: bound the KKT residual relative to the data scale
       worst_kkt = std::max(
-          worst_kkt, problem_gen::ElasticKKTResidual(
-                         qp0.Q, q, A, b, G, h, penalty, ws.x, ws.t, ws.y,
-                         ws.z_t, ws.z) /
-                         std::max({1.0, h.lpNorm<Eigen::Infinity>(),
-                                   b.lpNorm<Eigen::Infinity>()}));
+          worst_kkt,
+          problem_gen::ElasticKKTResidual(qp0.Q, q, A, b, G, h, penalty, ws.x,
+                                          ws.t, ws.y, ws.z_t, ws.z) /
+              std::max({1.0, h.lpNorm<Eigen::Infinity>(),
+                        b.lpNorm<Eigen::Infinity>()}));
     }
     std::printf(
         "  refreshes=%d/%d worst_drift_after=%.2f | solve iters warm=%d "
         "cold=%d | relax iters warm=%d cold=%d | worst_kkt=%9.2e\n",
-        refreshes, ticks, worst_drift, warm_iters, cold_iters,
-        relax_warm_iters, relax_cold_iters, worst_kkt);
+        refreshes, ticks, worst_drift, warm_iters, cold_iters, relax_warm_iters,
+        relax_cold_iters, worst_kkt);
     Check("auto refresh fires and settles",
           refreshes >= 3 && refreshes < ticks &&
               worst_drift <= warm.settings.ruiz_refresh_ratio,
           worst_drift, "drift");
-    Check("solve matches fresh setup", all_conv && worst_dx < 1e-4 &&
-                                           worst_kkt < 1e-8,
-          worst_dx, "|dx|");
+    Check("solve matches fresh setup",
+          all_conv && worst_dx < 1e-4 && worst_kkt < 1e-8, worst_dx, "|dx|");
     // (The relax warm chain is mostly rejected by the flip gate on these
     // 1.5x row jumps, so only accuracy is checked here; the exact remap of
     // the relax iterate is checked below.)
@@ -323,10 +319,11 @@ int main() {
       const auto hs2 = half.solve();
       const auto hr2 = half.relax(kappa);
       const double rdx = (hr2.x - hr.x).lpNorm<Eigen::Infinity>();
-      std::printf("  unchanged problem: drift %.2f -> %.2f | solve iters %d "
-                  "-> %d | relax iters %d -> %d |dx|=%9.2e\n",
-                  drift_before, drift_after, hs.iters, hs2.iters, hr.iters,
-                  hr2.iters, rdx);
+      std::printf(
+          "  unchanged problem: drift %.2f -> %.2f | solve iters %d "
+          "-> %d | relax iters %d -> %d |dx|=%9.2e\n",
+          drift_before, drift_after, hs.iters, hs2.iters, hr.iters, hr2.iters,
+          rdx);
       Check("remap keeps solve() warm iterate",
             hs.converged == 1 && drift_before > 1.5 &&
                 drift_after <= fresh.scaling_drift() * (1 + 1e-9) &&
@@ -350,7 +347,7 @@ int main() {
     warm.set_h(h);
     warm.set_penalty(penalty);
     warm.settings.ruiz_refresh_ratio = 0;  // manual only
-    pdal::Solver stale = warm;         // same state, scaling left as is
+    pdal::Solver stale = warm;             // same state, scaling left as is
     warm.reequilibrate();
     const auto ss3 = stale.solve();
     const auto ws3 = warm.solve();
@@ -358,9 +355,10 @@ int main() {
     const auto wr3 = warm.relax(kappa);
     const double dx3 = (ws3.x - ss3.x).lpNorm<Eigen::Infinity>();
     const double rdx3 = (wr3.x - sr3.x).lpNorm<Eigen::Infinity>();
-    std::printf("  drifted rows: solve iters stale=%d remapped=%d |dx|=%9.2e "
-                "| relax iters stale=%d remapped=%d |dx|=%9.2e\n",
-                ss3.iters, ws3.iters, dx3, sr3.iters, wr3.iters, rdx3);
+    std::printf(
+        "  drifted rows: solve iters stale=%d remapped=%d |dx|=%9.2e "
+        "| relax iters stale=%d remapped=%d |dx|=%9.2e\n",
+        ss3.iters, ws3.iters, dx3, sr3.iters, wr3.iters, rdx3);
     Check("remapped warm solve matches stale",
           ss3.converged == 1 && ws3.converged == 1 && dx3 < 1e-6 &&
               ws3.iters <= 2 * ss3.iters,
@@ -399,13 +397,10 @@ int main() {
       const auto cs =
           SolveWith<pdal::Solver>(Q, qp0.q, A, qp0.b, G, qp0.h, penalty);
       all_ok &= ws.converged == 1 && cs.converged == 1;
-      worst_dx = std::max(worst_dx,
-                          (ws.x - cs.x).lpNorm<Eigen::Infinity>());
-      worst_kkt = std::max(
-          worst_kkt,
-          problem_gen::ElasticKKTResidual(Q, qp0.q, A, qp0.b, G, qp0.h,
-                                          penalty, ws.x, ws.t, ws.y, ws.z_t,
-                                          ws.z));
+      worst_dx = std::max(worst_dx, (ws.x - cs.x).lpNorm<Eigen::Infinity>());
+      worst_kkt = std::max(worst_kkt, problem_gen::ElasticKKTResidual(
+                                          Q, qp0.q, A, qp0.b, G, qp0.h, penalty,
+                                          ws.x, ws.t, ws.y, ws.z_t, ws.z));
     }
     // A matrix update must invalidate the cached factorization.
     Check("n=20 m=5 p=80 10 matrix ticks",
@@ -448,13 +443,10 @@ int main() {
         comp = std::max(comp, std::abs(s_ineq[i] * rel.z[i] - kappa));
       }
       char name[64];
-      std::snprintf(name, sizeof(name), "kappa=%.0e matches IPM relax",
-                    kappa);
+      std::snprintf(name, sizeof(name), "kappa=%.0e matches IPM relax", kappa);
       Check(name,
-            tight.converged == 1 && rel.converged == 1 &&
-                iref.converged == 1 && dx < 1e-7 && dz < 1e-6 &&
-                comp < 1e-8 &&
-                rel.iters <= 12,
+            tight.converged == 1 && rel.converged == 1 && iref.converged == 1 &&
+                dx < 1e-7 && dz < 1e-6 && comp < 1e-8 && rel.iters <= 12,
             std::max(dx, dz), "|dx|,|dz|");
     }
   }
@@ -600,9 +592,8 @@ int main() {
     std::mt19937 fd_rng(14);
     for (const bool with_eq : {false, true}) {
       const int n = 8, m = with_eq ? 3 : 0, p = 20;
-      const QPData qp = with_eq
-                            ? problem_gen::RandomFeasible(fd_rng, n, m, p)
-                            : problem_gen::Infeasible(fd_rng, n, p, p / 4);
+      const QPData qp = with_eq ? problem_gen::RandomFeasible(fd_rng, n, m, p)
+                                : problem_gen::Infeasible(fd_rng, n, p, p / 4);
       const VectorXd pen = VectorXd::Constant(p, 10.0);
 
       elastiqp::Cotangents ct;
@@ -625,8 +616,8 @@ int main() {
           return std::numeric_limits<double>::quiet_NaN();
         }
         if (out != nullptr) *out = r;
-        double L = ct.x.dot(r.x) + ct.t.dot(r.t) + ct.z_t.dot(r.z_t) +
-                   ct.z.dot(r.z);
+        double L =
+            ct.x.dot(r.x) + ct.t.dot(r.t) + ct.z_t.dot(r.z_t) + ct.z.dot(r.z);
         if (m > 0) L += ct.y.dot(r.y);
         return L;
       };
@@ -649,14 +640,12 @@ int main() {
         const VectorXd dh = problem_gen::Randn(fd_rng, p, 1);
         const VectorXd dw = problem_gen::Randn(fd_rng, p, 1);
 
-        const double lp =
-            loss(qp.Q + eps * dQ, qp.q + eps * dq, qp.A + eps * dA,
-                 qp.b + eps * db, qp.G + eps * dG, qp.h + eps * dh,
-                 pen + eps * dw, nullptr);
-        const double lm =
-            loss(qp.Q - eps * dQ, qp.q - eps * dq, qp.A - eps * dA,
-                 qp.b - eps * db, qp.G - eps * dG, qp.h - eps * dh,
-                 pen - eps * dw, nullptr);
+        const double lp = loss(
+            qp.Q + eps * dQ, qp.q + eps * dq, qp.A + eps * dA, qp.b + eps * db,
+            qp.G + eps * dG, qp.h + eps * dh, pen + eps * dw, nullptr);
+        const double lm = loss(
+            qp.Q - eps * dQ, qp.q - eps * dq, qp.A - eps * dA, qp.b - eps * db,
+            qp.G - eps * dG, qp.h - eps * dh, pen - eps * dw, nullptr);
         const double fd = (lp - lm) / (2.0 * eps);
         double an = (g.Q.array() * dQ.array()).sum() + g.q.dot(dq) +
                     (g.G.array() * dG.array()).sum() + g.h.dot(dh) +
@@ -673,7 +662,6 @@ int main() {
             std::isfinite(worst) && worst < 1e-4, worst, "relerr");
     }
   }
-
 
   std::printf(test_util::g_all_ok ? "\nAll PDAL tests passed.\n"
                                   : "\nFAILURES\n");

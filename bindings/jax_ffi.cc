@@ -103,8 +103,8 @@ ffi::Error dispatch(int64_t method, double eps_abs, int64_t max_iter,
                     int64_t p, const double* Q, const double* q,
                     const double* A, const double* b, const double* G,
                     const double* h, const double* penalty, const double* x0,
-                    const double* y0, const double* z0,
-                    elastiqp::Solution& sol, elastiqp::Solution& rsol) {
+                    const double* y0, const double* z0, elastiqp::Solution& sol,
+                    elastiqp::Solution& rsol) {
   switch (method) {
     case 0:
       if (target_kappa > 0 && p > 0) {
@@ -113,18 +113,18 @@ ffi::Error dispatch(int64_t method, double eps_abs, int64_t max_iter,
                           "differentiable); use method='pdal' or 'ipm'");
       }
       run_solver<elastiqp::das::Solver>(eps_abs, max_iter, ruiz, target_kappa,
-                                        n, m, p, Q, q, A, b, G, h, penalty,
-                                        x0, y0, z0, sol, rsol);
+                                        n, m, p, Q, q, A, b, G, h, penalty, x0,
+                                        y0, z0, sol, rsol);
       return ffi::Error::Success();
     case 1:
-      run_solver<elastiqp::pdal::Solver>(eps_abs, max_iter, ruiz,
-                                         target_kappa, n, m, p, Q, q, A, b, G,
-                                         h, penalty, x0, y0, z0, sol, rsol);
+      run_solver<elastiqp::pdal::Solver>(eps_abs, max_iter, ruiz, target_kappa,
+                                         n, m, p, Q, q, A, b, G, h, penalty, x0,
+                                         y0, z0, sol, rsol);
       return ffi::Error::Success();
     case 2:
       run_solver<elastiqp::ipm::Solver>(eps_abs, max_iter, ruiz, target_kappa,
-                                        n, m, p, Q, q, A, b, G, h, penalty,
-                                        x0, y0, z0, sol, rsol);
+                                        n, m, p, Q, q, A, b, G, h, penalty, x0,
+                                        y0, z0, sol, rsol);
       return ffi::Error::Success();
     default:
       return ffi::Error(ffi::ErrorCode::kInvalidArgument,
@@ -147,24 +147,25 @@ void write_solution(const elastiqp::Solution& sol, int64_t n, int64_t m,
 
 ffi::Error ElastiqpSolveImpl(
     double eps_abs, int64_t max_iter, int64_t ruiz, double target_kappa,
-    int64_t method, ffi::Buffer<ffi::F64> Q, ffi::Buffer<ffi::F64> q, ffi::Buffer<ffi::F64> A,
-    ffi::Buffer<ffi::F64> b, ffi::Buffer<ffi::F64> G, ffi::Buffer<ffi::F64> h,
-    ffi::Buffer<ffi::F64> penalty, ffi::ResultBuffer<ffi::F64> x,
-    ffi::ResultBuffer<ffi::F64> t, ffi::ResultBuffer<ffi::F64> y,
-    ffi::ResultBuffer<ffi::F64> z_t, ffi::ResultBuffer<ffi::F64> z,
-    ffi::ResultBuffer<ffi::F64> xr, ffi::ResultBuffer<ffi::F64> tr,
-    ffi::ResultBuffer<ffi::F64> yr, ffi::ResultBuffer<ffi::F64> z_t_r,
-    ffi::ResultBuffer<ffi::F64> z_r, ffi::ResultBuffer<ffi::F64> info) {
+    int64_t method, ffi::Buffer<ffi::F64> Q, ffi::Buffer<ffi::F64> q,
+    ffi::Buffer<ffi::F64> A, ffi::Buffer<ffi::F64> b, ffi::Buffer<ffi::F64> G,
+    ffi::Buffer<ffi::F64> h, ffi::Buffer<ffi::F64> penalty,
+    ffi::ResultBuffer<ffi::F64> x, ffi::ResultBuffer<ffi::F64> t,
+    ffi::ResultBuffer<ffi::F64> y, ffi::ResultBuffer<ffi::F64> z_t,
+    ffi::ResultBuffer<ffi::F64> z, ffi::ResultBuffer<ffi::F64> xr,
+    ffi::ResultBuffer<ffi::F64> tr, ffi::ResultBuffer<ffi::F64> yr,
+    ffi::ResultBuffer<ffi::F64> z_t_r, ffi::ResultBuffer<ffi::F64> z_r,
+    ffi::ResultBuffer<ffi::F64> info) {
   const int64_t n = q.dimensions()[0];
   const int64_t m = b.dimensions()[0];
   const int64_t p = h.dimensions()[0];
 
   elastiqp::Solution sol, rsol;
-  ffi::Error err = dispatch(method, eps_abs, max_iter, ruiz, target_kappa, n,
-                            m, p, Q.typed_data(), q.typed_data(),
-                            A.typed_data(), b.typed_data(), G.typed_data(),
-                            h.typed_data(), penalty.typed_data(), nullptr,
-                            nullptr, nullptr, sol, rsol);
+  ffi::Error err =
+      dispatch(method, eps_abs, max_iter, ruiz, target_kappa, n, m, p,
+               Q.typed_data(), q.typed_data(), A.typed_data(), b.typed_data(),
+               G.typed_data(), h.typed_data(), penalty.typed_data(), nullptr,
+               nullptr, nullptr, sol, rsol);
   if (err.failure()) return err;
 
   write_solution(sol, n, m, p, x, t, y, z_t, z);
@@ -195,11 +196,11 @@ ffi::Error ElastiqpSolveWarmImpl(
   }
 
   elastiqp::Solution sol, rsol;
-  ffi::Error err = dispatch(method, eps_abs, max_iter, ruiz, 0.0, n, m, p,
-                            Q.typed_data(), q.typed_data(), A.typed_data(),
-                            b.typed_data(), G.typed_data(), h.typed_data(),
-                            penalty.typed_data(), x0.typed_data(),
-                            y0.typed_data(), z0.typed_data(), sol, rsol);
+  ffi::Error err =
+      dispatch(method, eps_abs, max_iter, ruiz, 0.0, n, m, p, Q.typed_data(),
+               q.typed_data(), A.typed_data(), b.typed_data(), G.typed_data(),
+               h.typed_data(), penalty.typed_data(), x0.typed_data(),
+               y0.typed_data(), z0.typed_data(), sol, rsol);
   if (err.failure()) return err;
 
   write_solution(sol, n, m, p, x, t, y, z_t, z);

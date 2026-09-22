@@ -55,8 +55,8 @@ struct Backend<elastiqp::das::Solver> {
   using Settings = elastiqp::das::Settings;
   static constexpr const char* name = "das";
   static constexpr bool has_relax = false;
-  static constexpr bool has_refresh = true;  // drift-gated Ruiz refresh
-  static constexpr double slack_tol = 1e-10;  // t at a feasible solution
+  static constexpr bool has_refresh = true;       // drift-gated Ruiz refresh
+  static constexpr double slack_tol = 1e-10;      // t at a feasible solution
   static constexpr double invariant_tol = 1e-12;  // z_t + z == w
   static Settings Tight() {
     Settings s;
@@ -121,11 +121,11 @@ elastiqp::Solution SolveWith(
   return s.solve();
 }
 template <class Solver>
-elastiqp::Solution SolveWith(
-    const MatrixXd& Q, const VectorXd& q, const MatrixXd& G, const VectorXd& h,
-    const VectorXd& penalty,
-    const typename Backend<Solver>::Settings& settings =
-        Backend<Solver>::Tight()) {
+elastiqp::Solution SolveWith(const MatrixXd& Q, const VectorXd& q,
+                             const MatrixXd& G, const VectorXd& h,
+                             const VectorXd& penalty,
+                             const typename Backend<Solver>::Settings&
+                                 settings = Backend<Solver>::Tight()) {
   return SolveWith<Solver>(Q, q, MatrixXd(0, q.size()), VectorXd(0), G, h,
                            penalty, settings);
 }
