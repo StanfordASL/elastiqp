@@ -1,43 +1,3 @@
-// ElastiQP-IPM: a proximal interior-point method for the elastic QP
-//
-// The elastic QP form is stated in elastiqp/common.hpp. The method is based
-// on PIQP, with the elastic condensation tricks of qpax, and a few other
-// changes (see notes below). It reaches the same solution and the same
-// kappa-relaxed central point (relax()) as the PDAL solver by a different
-// route, which is why the test suite uses it as the oracle for the other
-// two methods; on its own it is the backend of choice when a solve should
-// take a predictable number of iterations regardless of the active set.
-//
-// Notes:
-//
-// PIQP regularizes its Newton system with a primal proximal term rho (on the
-// primal iterate distance to a prox center xi) and a dual proximal term delta
-// (on the dual distance to a prox center nu). Its dense backend condenses the
-// hard-constrained KKT onto
-//   Q + rho*I + (1/delta) A^T A + G^T diag(1/(s/z + delta)) G.
-// For the elastic form, eliminating (s1, s2, z1, z2, t) gives the same
-// structure with a generalized diagonal weight:
-//
-//   W1 = s1/z1 + delta,  W2 = s2/z2 + delta,  D = rho + 1/W1 + 1/W2
-//   K  = Q + rho*I + (1/delta) A^T A + G^T diag(Lambda) G,
-//   Lambda = (rho + 1/W1) / (W2 .* D)
-//
-// Lambda -> 1/W2 as W1 -> 0 (hard constraint limit, PIQP's weight) and
-// Lambda -> 1/(s1/z1 + s2/z2) as rho, delta -> 0 (qpax's elastic weight).
-// The equality dual step is recovered as dy = (A dx - v_y) / delta, exactly
-// as in PIQP's dense backend.
-//
-// Faithful to PIQP: initialization (unit slacks KKT solve + positivity shift),
-// Mehrotra predictor-corrector with separate primal/dual step sizes,
-// regularization update rules driven by residual progress and mu decrease,
-// factorization retries, and absolute/relative + duality-gap convergence
-// criteria on the unregularized residuals.
-// Omitted from PIQP: iterative refinement and infeasibility detection.
-//
-// Beyond vanilla PIQP (which re-initializes its iterates on every solve),
-// ipm::Solver supports warm starting across repeated solves of slowly-changing
-// problems (e.g. a control loop); see init_warm() for the mechanism.
-
 #pragma once
 
 #include <Eigen/Cholesky>
@@ -53,13 +13,12 @@
 
 #include "elastiqp/common.hpp"
 
+// Proximal interior-point backend after PIQP, with the elastic condensation
+// of the paper's appendix. Also the test oracle for the other backends.
 namespace elastiqp::ipm {
 
-// Interior-point settings -- every knob this solver has. The termination
-// block is field-for-field identical to pdal::Settings; everything below is
-// specific to this method.
 struct Settings {
-  // Termination, on the unregularized elastic-KKT residuals.
+  // Convergence.
   double eps_abs = 1e-5;
   double eps_rel = 0;
   bool check_duality_gap = true;
@@ -67,57 +26,34 @@ struct Settings {
   double eps_duality_gap_rel = 0;
   int max_factor_retries = 10;
 
-  // Reuse the previous solve's iterate from the second solve() on, after
-  // flooring slacks and duals off the boundary (see init_warm()).
   bool warm_start = true;
-
-  // Check if equalities are inconsistent (the only infeasibility case).
-  // Runs when A/b data is set; only applies if eps_rel = 0
   bool check_eq_consistency = true;
-
-  // Interior-point iterations, which is also what Solution::iters reports.
   int max_iter = 250;
 
+  // Proximal regularization: initial values, floors, and stall thresholds for
+  // lowering the floor.
   double rho_init = 1e-6;
   double delta_init = 1e-4;
-
   double infeasibility_threshold = 0.9;
-
   double reg_lower_limit = 1e-10;
   double reg_finetune_lower_limit = 1e-13;
   int reg_finetune_primal_update_threshold = 7;
   int reg_finetune_dual_update_threshold = 7;
 
-  double tau = 0.99;
+  double tau = 0.99;  // Fraction-to-boundary.
 
-  // Warm-start flooring (takes effect from the second solve() on, and for
-  // warm_start_from()). The previous solution seeds the iterate; slacks and
-  // duals are floored at warm_start_fraction times the residual of the
-  // previous iterate under the new data (clamped to [min_floor, max_floor])
-  // so step lengths stay healthy when the problem has shifted.
+  // Warm start: floor slacks and duals at this fraction of the residual,
+  // clamped.
   double warm_start_fraction = 0.1;
   double warm_start_min_floor = 1e-8;
   double warm_start_max_floor = 1.0;
 
-  // Ruiz equilibration of the stacked [Q A' G'; A 0 0; G 0 0] structure
-  // plus cost normalization -- field-for-field the same block as
-  // elastiqp::Settings, with the same semantics. Read at setup() time
-  // (ignored when p == 0); set_*() updates are rescaled with the
-  // setup()-time scaling (call setup() again to re-equilibrate). The
-  // iterates live in the scaled space, but termination and every reported
-  // residual stay on the unscaled elastic KKT, and Solution is returned
-  // unscaled. The penalty transforms as w_scaled = c * w / delta_row; the
-  // slacks scale with the row and the duals against it, so each s.z
-  // product only picks up the cost factor c.
+  // Ruiz equilibration.
   bool ruiz = false;
   int ruiz_max_iter = 10;
   double ruiz_tol = 1e-3;
 };
 
-// Reusable PIQP-style elastic solver. setup() once, then alternate
-// set_*() / solve() to exploit warm starting across a sequence of related
-// problems. All workspace is allocated in setup(); solve() is allocation-free
-// on the warm path.
 class Solver {
  public:
   Settings settings;
@@ -193,7 +129,6 @@ class Solver {
     wAx_.resize(m_);
     zero_p_ = VectorXd::Zero(p_);
 
-    // Equality-consistency certificate, on the still-unscaled (A_, b_)
     check_eq_A(A_);
     check_eq_b(b_);
 
@@ -213,7 +148,6 @@ class Solver {
     setup(Q, q, A, b, G, h, VectorXd::Constant(h.size(), penalty));
   }
 
-  // Inequality-only overloads (no equality constraints).
   void setup(const MatrixXd& Q, const VectorXd& q, const MatrixXd& G,
              const VectorXd& h, const VectorXd& penalty) {
     setup(Q, q, MatrixXd(0, q.size()), VectorXd(0), G, h, penalty);
@@ -224,14 +158,11 @@ class Solver {
     setup(Q, q, G, h, VectorXd::Constant(h.size(), penalty));
   }
 
-  // Problem dimensions
   Eigen::Index n() const { return n_; }
   Eigen::Index m() const { return m_; }
   Eigen::Index p() const { return p_; }
 
-  // Data updates between solves (dimensions must not change). The previous
-  // solution is kept as the warm-start point. Inputs are unscaled; with Ruiz
-  // active they are rescaled into the setup()-time scaled frame on ingestion.
+  // Setters store data in the current Ruiz frame (scaling is fixed at setup).
   void set_Q(const MatrixXd& Q) {
     Q_ = 0.5 * (Q + Q.transpose());
     if (ruiz_) Q_ = c_s_ * dx_s_.asDiagonal() * Q_ * dx_s_.asDiagonal();
@@ -259,16 +190,8 @@ class Solver {
     penalty_ = ruiz_ ? VectorXd(c_s_ * penalty.cwiseQuotient(di_s_)) : penalty;
   }
 
-  // Explicitly seed the next solve()'s starting iterate, replacing the
-  // automatic warm start (see init_warm). The point is used exactly as
-  // given, in the user's unscaled frame: the slacks and duals must be
-  // strictly positive, and lifting the iterate off the boundary is the
-  // caller's responsibility. rho/delta > 0 reset the proximal
-  // regularization state; when <= 0 the state carried over from the
-  // previous solve (or rho_init/delta_init if there is none) is kept.
-  // Takes effect once, for the next solve() only, regardless of
-  // settings.warm_start -- this is the hook for building external
-  // warm-start strategies on top of the solver.
+  // Seed the next solve from a full user-frame iterate, used as-is (no
+  // interior floor); rho/delta of 0 keep the current values.
   void set_warm_start(const VectorXd& x, const VectorXd& t, const VectorXd& y,
                       const VectorXd& s_t, const VectorXd& s_ineq,
                       const VectorXd& z_t, const VectorXd& z,
@@ -279,27 +202,14 @@ class Solver {
     explicit_warm_ = true;
   }
 
-  // Seed the next solve() from a Solution produced by any backend (see the
-  // (x, y, z) overload; the certificate carries nothing beyond that
-  // point that the reconstruction would not recover to within its
-  // residuals).
   void warm_start_from(const Solution& sol) {
     warm_start_from(sol.x, sol.y, sol.z);
   }
 
-  // Seed the next solve() from an elastic point (x, y, z) in the user
-  // frame, e.g. a previous Solution of any backend or state carried
-  // through a functional (JAX) loop; the expanded-form slacks and duals
-  // are reconstructed from it (t = [G x - h]_+, s_ineq = [h - G x]_+,
-  // z_t = penalty - z). Unlike set_warm_start(), this applies the
-  // interior-point boundary floor for you, which such a point needs: a
-  // converged PDAL certificate sits exactly on the boundary, and an
-  // unfloored interior-point start there collapses the
-  // fraction-to-boundary step length. Dimensions must match setup().
-  // Takes effect once, for the next solve() only.
+  // Seed the next solve from user-frame (x, y, z) only: t and slacks from
+  // the residual, z_t = penalty - z, then floored interior.
   void warm_start_from(const VectorXd& x, const VectorXd& y,
                        const VectorXd& z) {
-    // User-frame G x - h and penalty from the stored (possibly scaled) data
     VectorXd r = G_ * (ruiz_ ? VectorXd(x.cwiseQuotient(dx_s_)) : x) - h_;
     VectorXd w = penalty_;
     if (ruiz_) {
@@ -316,15 +226,14 @@ class Solver {
 
   const Solution& solution() const { return sol_; }
 
-  // Lower bound on the reachable equality residual (0 if consistent or the
-  // check is disabled)
+  // Certified lower bound on ||Ax - b|| (0 when consistent or unchecked).
   double eq_infeasibility() const { return eq_infeas_lb_; }
 
   const Solution& solve() {
     const bool explicit_ws = explicit_warm_;
     explicit_warm_ = false;
 
-    // Inconsistent equalities: eps_abs is unreachable, report and exit
+    // Inconsistent equalities: report the certificate instead of iterating.
     if (settings.check_eq_consistency && settings.eps_rel <= 0 &&
         eq_infeas_lb_ > settings.eps_abs) {
       if (!have_warm_ && !explicit_ws) {
@@ -339,7 +248,6 @@ class Solver {
       if (p_ > 0) {
         update_residuals_nr();
       } else {
-        // Residuals of the current iterate at the (unreachable) equalities
         wQx_.noalias() = Q_ * x_;
         wAty_.noalias() = A_.transpose() * y_;
         wAx_.noalias() = A_ * x_;
@@ -362,17 +270,10 @@ class Solver {
     no_dual_update_ = 0;
 
     if (explicit_ws) {
-      // Iterate and regularization state were provided via set_warm_start();
-      // use them as-is.
       reg_limit_ = settings.reg_lower_limit;
     } else if (settings.warm_start && have_warm_) {
-      // Keep rho_, delta_, reg_limit_ from the previous solve. PIQP's
-      // regularization schedule shrinks with the relative decrease of mu;
-      // a warm start begins with mu already tiny, so restarting from
-      // rho_init/delta_init would leave the schedule with no fuel and
-      // dominate the iteration count. The previous (converged) values are
-      // the right scale, and factorization retries bump them back up if the
-      // perturbed problem needs it.
+      // Warm start carries rho, delta and the regularization floor from the
+      // last solve; restarting them would starve the mu-driven schedule.
       init_warm();
     } else {
       rho_ = settings.rho_init;
@@ -394,7 +295,6 @@ class Solver {
     prev_primal_res_ = primal_res_;
     prev_dual_res_ = dual_res_;
 
-    // ---------------- main loop (PIQP::solve_impl) ------------------------
     int iter = 0;
     while (iter < settings.max_iter) {
       if ((primal_res_ < settings.eps_abs ||
@@ -410,7 +310,7 @@ class Solver {
 
       iter++;
 
-      // Avoid getting too close to the boundary (division by zero guard).
+      // Keep duals strictly positive.
       {
         bool boundary_shifted = false;
         const double eps = std::numeric_limits<double>::epsilon();
@@ -421,8 +321,8 @@ class Solver {
         if (boundary_shifted) mu_ = calculate_mu();
       }
 
-      // Avoid converging to a local minimum: lower the regularization floor
-      // once progress stalls at the current limit (PIQP's finetune logic).
+      // Stalled at the regularization floor with small prox terms: lower the
+      // floor.
       if ((no_primal_update_ > settings.reg_finetune_primal_update_threshold &&
            rho_ == reg_limit_ &&
            reg_limit_ != settings.reg_finetune_lower_limit) ||
@@ -437,6 +337,7 @@ class Solver {
         }
       }
 
+      // Factorization failed: inflate regularization and retry.
       update_scalings();
       bool regularization_changed = false;
       while (!factor()) {
@@ -455,7 +356,7 @@ class Solver {
 
       if (regularization_changed) update_residuals_r();
 
-      // ------------------ predictor step ------------------
+      // Predictor step.
       res_s1_ = -s1_.cwiseProduct(z1_);
       res_s2_ = -s2_.cwiseProduct(z2_);
       kkt_solve(res_x_, res_y_, res_t_, res_z1_, res_z2_, res_s1_, res_s2_);
@@ -471,7 +372,7 @@ class Solver {
       sigma = std::max(0.0, std::min(1.0, sigma));
       sigma = sigma * sigma * sigma;
 
-      // ------------------ corrector step ------------------
+      // Mehrotra corrector with centering sigma.
       res_s1_.array() += -ds1_.array() * dz1_.array() + sigma * mu_;
       res_s2_.array() += -ds2_.array() * dz2_.array() + sigma * mu_;
       kkt_solve(res_x_, res_y_, res_t_, res_z1_, res_z2_, res_s1_, res_s2_);
@@ -480,7 +381,6 @@ class Solver {
       const double primal_step = alpha_s * settings.tau;
       const double dual_step = alpha_z * settings.tau;
 
-      // ------------------ update ------------------
       x_ += primal_step * dx_;
       t_ += primal_step * dt_;
       s1_ += primal_step * ds1_;
@@ -493,7 +393,6 @@ class Solver {
       mu_ = calculate_mu();
       const double mu_rate = std::max(0.0, (mu_prev - mu_) / mu_prev);
 
-      // ------------------ update regularization ------------------
       update_residuals_nr();
 #ifdef ELASTIQP_IPM_DEBUG
       std::printf("it %3d pres %.2e dres %.2e gap %.2e mu %.2e rho %.1e delta %.1e lim %.1e "
@@ -504,6 +403,8 @@ class Solver {
                   z1_.lpNorm<Eigen::Infinity>(), no_primal_update_, no_dual_update_);
 #endif
 
+      // Move each prox center only when its residual improved; otherwise
+      // count a stall.
       if (dual_res_ < 0.95 * prev_dual_res_ ||
           (dual_res_ < settings.eps_abs ||
            dual_res_rel_ < settings.eps_rel) ||
@@ -539,20 +440,12 @@ class Solver {
     return finish(Status::kMaxIter, iter);
   }
 
-  // Re-solve from the current iterate to a kappa-relaxed central point:
-  // the same KKT conditions but with relaxed complementarity
-  // s1.z1 = s2.z2 = kappa (qpax's "relaxation"). Differentiating the KKT
-  // system at this point instead of the exact solution yields smoothed
-  // gradients whose backward solve stays well-conditioned near degenerate
-  // (weakly-active) constraints -- the complementarity margins are bounded
-  // below by ~kappa. Call after solve(); solution() afterwards returns the
-  // RELAXED point, not the optimum.
+  // Re-solve the KKT system with complementarity fixed at kappa
+  // (differentiable); see paper.
   const Solution& relax(double kappa, double tol = 1e-8, int max_iter = 30) {
     if (p_ == 0 || !have_warm_) return sol_;
 
-    // kappa is in the user's frame. Row scaling cancels in each s.z pair
-    // (s scales with the row, z against it), so the scaled-space target is
-    // just c_s_ * kappa, and the residual unscales by 1/c_s_.
+    // Row scaling cancels in each s.z pair; only the cost scale remains.
     const double kappa_s = c_s_ * kappa;
     int iter = 0;
     Status status = Status::kMaxIter;
@@ -570,9 +463,7 @@ class Solver {
       }
       iter++;
 
-      // Proximal centers at the current iterate: the regularized system then
-      // agrees with the true KKT at this point, and rho/delta (already at
-      // their converged floors) only stabilize the factorization.
+      // Prox center at the current iterate: regularization without bias.
       xi_x_ = x_;
       xi_t_ = t_;
       nu1_ = z1_;
@@ -599,7 +490,6 @@ class Solver {
         break;
       }
 
-      // Newton step toward the kappa-hyperbola (no Mehrotra correction).
       res_s1_.array() = kappa_s - (s1_.array() * z1_.array());
       res_s2_.array() = kappa_s - (s2_.array() * z2_.array());
       kkt_solve(res_x_, res_y_, res_t_, res_z1_, res_z2_, res_s1_, res_s2_);
@@ -631,7 +521,7 @@ class Solver {
     }
   }
 
-  // Equality consistency (common.hpp EqCertificate) on the unscaled (A, b)
+  // Consistency certificate for Ax = b, refreshed whenever A or b changes.
   void check_eq_A(const MatrixXd& A) {
     eq_infeas_lb_ = 0.0;
     if (m_ == 0 || !settings.check_eq_consistency) return;
@@ -643,10 +533,8 @@ class Solver {
     eq_infeas_lb_ = eq_cert_.bound(b);
   }
 
-  // Ruiz sweeps on the stacked symmetric structure [Q A' G'; A 0 0; G 0 0],
-  // applied in place to the stored data, with the per-sweep cost
-  // normalization -- identical to pdal::Solver::equilibrate() so the
-  // solvers scale a given problem the same way (primitives in common.hpp).
+  // Ruiz equilibration accumulating dx_s_/de_s_/di_s_/c_s_; penalty scales
+  // like z.
   void equilibrate() {
     VectorXd dx(n_), de(m_), di(p_);
     for (int iter = 0; iter < settings.ruiz_max_iter; ++iter) {
@@ -688,8 +576,7 @@ class Solver {
     z_us_ = di_s_ / c_s_;
   }
 
-  // Ingest an unscaled iterate into the setup()-time scaled frame
-  // (see Settings::ruiz). Identity when Ruiz is off.
+  // User frame -> Ruiz frame.
   void scale_iterate(const VectorXd& x, const VectorXd& t, const VectorXd& y,
                      const VectorXd& s_t, const VectorXd& s_ineq,
                      const VectorXd& z_t, const VectorXd& z) {
@@ -712,11 +599,6 @@ class Solver {
     z2_ = c_s_ * z.cwiseQuotient(di_s_);
   }
 
-  // No inequality constraints: with equalities the problem is a plain
-  // equality-constrained QP; solve its (indefinite) KKT system directly.
-  // The solve is not iterative, so failures (singular KKT, inconsistent
-  // A x = b) are caught by checking the KKT residuals against the usual
-  // convergence criteria: kSolved or kNumerics.
   const Solution& solve_no_inequalities() {
     SolveEqualityQP(Q_, q_, A_, b_, settings.rho_init,
                     eq_cert_.rank_deficient(), x_, y_);
@@ -735,7 +617,7 @@ class Solver {
     return finish(ok ? Status::kSolved : Status::kNumerics, 0);
   }
 
-  // Elastic KKT scalings for the current (s, z, rho, delta).
+  // Diagonal scalings for eliminating the t-block (see kkt_solve).
   void update_scalings() {
     w1_ = s1_.cwiseQuotient(z1_).array() + delta_;
     w2_ = s2_.cwiseQuotient(z2_).array() + delta_;
@@ -746,8 +628,7 @@ class Solver {
     lambda_ = (w1_inv_.array() + rho_) * w2_inv_.array() * d_inv_.array();
   }
 
-  // Factor K = Q + rho*I + (1/delta) A^T A + G^T diag(lambda) G via a
-  // symmetric rank update on the row-scaled G.
+  // Condensed KKT: K = Q + rho I + A'A/delta + G' diag(lambda) G.
   bool factor() {
     GS_.noalias() = lambda_.cwiseSqrt().asDiagonal() * G_;
     K_.triangularView<Eigen::Lower>() = Q_;
@@ -761,15 +642,7 @@ class Solver {
            std::isfinite(K_.diagonal().sum());
   }
 
-  // Solve the regularized elastic Newton system
-  //   (Q + rho I) dx + A^T dy   + G^T dz2           = v_x
-  //   A dx - delta dy                               = v_y
-  //   rho dt - dz1 - dz2                            = v_t
-  //   -dt + ds1 - delta dz1                         = v_z1
-  //   G dx - dt + ds2 - delta dz2                   = v_z2
-  //   S1 dz1 + Z1 ds1 = v_s1,  S2 dz2 + Z2 ds2 = v_s2
-  // by condensation onto K (factored above). Results in dx_, dy_, dt_,
-  // ds*_, dz*_.
+  // Solve the regularized KKT system, eliminating (s, z, t, y) onto x.
   void kkt_solve(const VectorXd& v_x, const VectorXd& v_y, const VectorXd& v_t,
                  const VectorXd& v_z1, const VectorXd& v_z2,
                  const VectorXd& v_s1, const VectorXd& v_s2) {
@@ -800,8 +673,7 @@ class Solver {
     return (s1_.dot(z1_) + s2_.dot(z2_)) / static_cast<double>(2 * p_);
   }
 
-  // Largest step in [0, 1] keeping slacks (alpha_s) and duals (alpha_z)
-  // nonnegative (PIQP::calculate_step). The equality dual y is free.
+  // Largest step keeping slacks and duals nonnegative.
   void calculate_step(double& alpha_s, double& alpha_z) const {
     alpha_s = 1.0;
     alpha_z = 1.0;
@@ -813,14 +685,8 @@ class Solver {
     }
   }
 
-  // Unregularized residuals, objectives, and convergence norms
-  // (PIQP::update_residuals_nr). The rnr_* VECTORS stay in the (possibly
-  // Ruiz-scaled) frame -- they seed the Newton right-hand sides via
-  // update_residuals_r -- but every NORM below is unscaled componentwise
-  // (PIQP unscales through its preconditioner the same way), so the
-  // reported residuals and the termination test are on the true elastic
-  // KKT regardless of equilibration (with Ruiz off, all unscale vectors
-  // are ones).
+  // Residuals without prox terms (Ruiz frame); their norms, the objectives
+  // and the gap are measured in the user frame.
   void update_residuals_nr() {
     prev_primal_res_ = primal_res_;
     prev_dual_res_ = dual_res_;
@@ -829,7 +695,6 @@ class Solver {
       return v.size() > 0 ? v.cwiseAbs().cwiseProduct(s).maxCoeff() : 0.0;
     };
 
-    // Dual residual: [Q x + q + A^T y + G^T z2; penalty - z1 - z2]
     wQx_.noalias() = Q_ * x_;
     wGtz2_.noalias() = G_.transpose() * z2_;
     rnr_x_ = -wQx_ - q_ - wGtz2_;
@@ -847,8 +712,6 @@ class Solver {
          inf_us(wGtz2_, inv_cdx_), aty_norm, z12_norm,
          inf_us(penalty_, z_us_)});
 
-    // Primal residual: [b - A x; t - s1; G x - t + s2 - h]
-    // (negated, PIQP convention)
     wGxt_.noalias() = G_ * x_;
     wGxt_ -= t_;
     rnr_z1_ = t_ - s1_;
@@ -865,9 +728,6 @@ class Solver {
           {primal_rel_norm, inf_us(wAx_, inv_de_), inf_us(b_, inv_de_)});
     }
 
-    // Objectives and duality gap. Dual objective of the elastic QP:
-    // -0.5 x^T Q x - b^T y - h^T z2 (the t >= 0 bound has zero rhs).
-    // Every scaled term is c_s_ times its unscaled value.
     const double xQx = x_.dot(wQx_);
     primal_obj_ = (0.5 * xQx + q_.dot(x_) + penalty_.dot(t_)) / c_s_;
     double dual_obj = (-0.5 * xQx - h_.dot(z2_)) / c_s_;
@@ -890,8 +750,7 @@ class Solver {
     dual_res_rel_ = dual_res_ / std::max(1.0, dual_rel_norm);
   }
 
-  // Regularized residuals (PIQP::update_residuals_r) and proximal
-  // infeasibility measures.
+  // Add the prox terms; record their size for the stall tests.
   void update_residuals_r() {
     res_x_ = rnr_x_ - rho_ * (x_ - xi_x_);
     res_t_ = rnr_t_ - rho_ * (t_ - xi_t_);
@@ -910,9 +769,8 @@ class Solver {
                                      (t_ - xi_t_).lpNorm<Eigen::Infinity>());
   }
 
-  // Cold start (PIQP::solve_impl preamble): unit slacks, KKT solve with rhs
-  // (-q, b, -penalty, -x_l, h_u) = (-q, b, -penalty, 0, h), then shift (s, z)
-  // into the positive orthant.
+  // Cold start: one KKT solve from the origin, then shift slacks and duals
+  // interior.
   bool init_cold() {
     x_.setZero();
     t_.setZero();
@@ -954,8 +812,8 @@ class Solver {
     z1_.array() += delta_z;
     z2_.array() += delta_z;
 
+    // Project each (s, z) pair onto the central path at mu_init.
     const double mu_init = std::max(calculate_mu(), 1e-10);
-    // Per-element shift onto the s*z = mu hyperbola (PIQP's sqrt correction).
     for (Eigen::Index i = 0; i < p_; ++i) {
       double c = z1_[i] - delta_z;
       z1_[i] = 0.5 * (c + std::sqrt(c * c + 4 * mu_init));
@@ -967,21 +825,9 @@ class Solver {
     return true;
   }
 
-  // Warm start: keep the previous iterate, but lift slacks and duals off the
-  // boundary in proportion to how infeasible the old iterate is for the NEW
-  // data. A converged iterate has s (or z) ~ 0 at active (or inactive)
-  // constraints; if the problem then shifts by r, the Newton step needs
-  // slack/dual moves of size ~ r, and any component sitting at ~0 truncates
-  // the step length to ~0 -- the solver would stall re-centering itself.
-  // Flooring at f ~ r keeps step lengths healthy while preserving the
-  // active-set information; as r grows this degrades gracefully toward a
-  // centered (cold-like) point. The equality dual y is free and carries
-  // over unchanged. With Ruiz active the floor mixes frames (unscaled
-  // residual, scaled slacks); equilibrated rows are O(1) so the mismatch
-  // is bounded by the [min_floor, max_floor] clamp, and the floor is a
-  // heuristic either way.
+  // Floor slacks and duals so the warm iterate is interior.
   void init_warm() {
-    update_residuals_nr();  // residuals of the previous iterate, new data
+    update_residuals_nr();
     const double r = std::max(primal_res_, dual_res_);
     const double f =
         std::min(std::max(settings.warm_start_fraction * r,
@@ -993,10 +839,9 @@ class Solver {
     z2_ = z2_.cwiseMax(f);
   }
 
-  // Internals index the two inequality blocks 1/2 to match PIQP's derivation
-  // (W1, W2, Lambda); the returned certificate names them by block instead.
+  // Unscale to the user frame; kNumerics disables warm start, kInfeasible
+  // leaves it untouched.
   const Solution& finish(Status status, int iters) {
-    // Unscale into the user's frame (identity when Ruiz is off).
     sol_.x = x_.cwiseProduct(dx_s_);
     sol_.t = t_.cwiseProduct(inv_di_);
     sol_.y = y_.cwiseProduct(y_us_);
@@ -1012,66 +857,61 @@ class Solver {
     sol_.primal_res = primal_res_;
     sol_.dual_res = dual_res_;
     sol_.duality_gap = duality_gap_;
-    // A converged (or at least finite) iterate seeds the next warm start;
-    // kInfeasible exits early and leaves the warm-start state as it was.
     if (status != Status::kInfeasible) {
       have_warm_ = status != Status::kNumerics;
     }
     return sol_;
   }
 
-  // Problem data
+  // Problem data (Ruiz frame).
   Eigen::Index n_ = 0, m_ = 0, p_ = 0;
   MatrixXd Q_, A_, G_;
   VectorXd q_, b_, h_, penalty_;
-  MatrixXd AtA_;  // cached A^T A (lower triangle valid), only when m_ > 0
+  MatrixXd AtA_;  // Lower triangle only.
 
-  // Iterates (persist across solves for warm starting)
+  // Iterates: (s1, z1) for t >= 0, (s2, z2) for Gx - t <= h.
   VectorXd x_, t_, y_, s1_, s2_, z1_, z2_;
   bool have_warm_ = false;
-  bool explicit_warm_ = false;  // next solve seeded via set_warm_start()
+  bool explicit_warm_ = false;
 
-  // Equality-consistency certificate (check_eq_A / check_eq_b)
   EqCertificate eq_cert_;
   double eq_infeas_lb_ = 0.0;
 
-  // Ruiz scaling state (identity when ruiz_ is false)
+  // Ruiz scaling, inverses, and dual unscale factors.
   bool ruiz_ = false;
   double c_s_ = 1.0;
-  VectorXd dx_s_, de_s_, di_s_;         // cumulative scale factors
-  VectorXd inv_cdx_, inv_de_, inv_di_;  // residual unscaling
-  VectorXd y_us_, z_us_;                // dual unscaling (de/c, di/c)
+  VectorXd dx_s_, de_s_, di_s_;
+  VectorXd inv_cdx_, inv_de_, inv_di_;
+  VectorXd y_us_, z_us_;
 
-  // Proximal centers (PIQP: xi for primal, nu for dual)
+  // Prox centers.
   VectorXd xi_x_, xi_t_, nu_y_, nu1_, nu2_;
 
-  // Regularization state
   double rho_ = 0, delta_ = 0, reg_limit_ = 0, mu_ = 0;
   int factor_retries_ = 0, no_primal_update_ = 0, no_dual_update_ = 0;
 
-  // Residuals (PIQP convention: negated KKT residuals)
-  VectorXd rnr_x_, rnr_t_, rnr_y_, rnr_z1_, rnr_z2_;  // non-regularized
-  VectorXd res_x_, res_t_, res_y_, res_z1_, res_z2_;  // regularized
-  VectorXd res_s1_, res_s2_;                          // complementarity rhs
+  // Negated KKT residuals: rnr_ without prox terms, res_ with.
+  VectorXd rnr_x_, rnr_t_, rnr_y_, rnr_z1_, rnr_z2_;
+  VectorXd res_x_, res_t_, res_y_, res_z1_, res_z2_;
+  VectorXd res_s1_, res_s2_;
   double primal_res_ = 0, dual_res_ = 0;
   double prev_primal_res_ = 0, prev_dual_res_ = 0;
   double primal_res_rel_ = 0, dual_res_rel_ = 0;
   double primal_obj_ = 0, duality_gap_ = 0, duality_gap_rel_ = 0;
   double primal_prox_inf_ = 0, dual_prox_inf_ = 0;
 
-  // KKT workspace (allocated in setup, reused every iteration)
+  // KKT workspace.
   VectorXd w1_, w2_, w1_inv_, w2_inv_, d_inv_, lambda_;
   MatrixXd GS_, K_;
   Eigen::LLT<MatrixXd, Eigen::Lower> llt_;
   VectorXd rb1_, rb2_, wv_, pv_, rhs_x_, Gdx_;
   VectorXd dx_, dt_, dy_, ds1_, ds2_, dz1_, dz2_;
-  VectorXd wQx_, wGtz2_, wGxt_, wAty_, wAx_;  // residual-evaluation buffers
+  VectorXd wQx_, wGtz2_, wGxt_, wAty_, wAx_;
   VectorXd zero_p_;
 
   Solution sol_;
 };
 
-// One-shot convenience wrappers (cold start).
 inline Solution Solve(
     const MatrixXd& Q, const VectorXd& q, const MatrixXd& A, const VectorXd& b,
     const MatrixXd& G, const VectorXd& h, const VectorXd& penalty,
@@ -1090,7 +930,6 @@ inline Solution Solve(
                   settings);
 }
 
-// Inequality-only overloads.
 inline Solution Solve(
     const MatrixXd& Q, const VectorXd& q, const MatrixXd& G, const VectorXd& h,
     const VectorXd& penalty, const Settings& settings = {}) {
