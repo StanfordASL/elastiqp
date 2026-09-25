@@ -46,13 +46,12 @@ static_assert(
             ipm::Settings{}.eps_duality_gap_rel &&
         pdal::Settings{}.max_factor_retries ==
             ipm::Settings{}.max_factor_retries &&
-        pdal::Settings{}.warm_start == ipm::Settings{}.warm_start &&
         pdal::Settings{}.check_eq_consistency ==
             ipm::Settings{}.check_eq_consistency &&
         pdal::Settings{}.ruiz == ipm::Settings{}.ruiz &&
         pdal::Settings{}.ruiz_max_iter == ipm::Settings{}.ruiz_max_iter &&
         pdal::Settings{}.ruiz_tol == ipm::Settings{}.ruiz_tol,
-    "the termination/warm-start/ruiz defaults shared by pdal::Settings and "
+    "the termination/ruiz defaults shared by pdal::Settings and "
     "ipm::Settings must agree");
 
 namespace {

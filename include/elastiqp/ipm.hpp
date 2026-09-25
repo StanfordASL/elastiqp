@@ -26,7 +26,6 @@ struct Settings {
   double eps_duality_gap_rel = 0;
   int max_factor_retries = 10;
 
-  bool warm_start = true;
   bool check_eq_consistency = true;
   int max_iter = 250;
 
@@ -42,13 +41,7 @@ struct Settings {
 
   double tau = 0.99;  // Fraction-to-boundary.
 
-  // Warm start: floor slacks and duals at this fraction of the residual,
-  // clamped.
-  double warm_start_fraction = 0.1;
-  double warm_start_min_floor = 1e-8;
-  double warm_start_max_floor = 1.0;
-
-  // Ruiz equilibration.
+  // Ruiz equilibration; recomputed by solve() after any matrix update.
   bool ruiz = true;
   int ruiz_max_iter = 10;
   double ruiz_tol = 1e-3;
@@ -71,8 +64,7 @@ class Solver {
     G_ = G;
     h_ = h;
     penalty_ = penalty;
-    have_warm_ = false;
-    explicit_warm_ = false;
+    has_iterate_ = false;
 
     x_.resize(n_);
     t_.resize(p_);
@@ -140,6 +132,7 @@ class Solver {
     if (ruiz_) equilibrate();
     update_unscale_vectors();
     compute_AtA();
+    matrix_dirty_ = false;
   }
 
   void setup(const MatrixXd& Q, const VectorXd& q, const MatrixXd& A,
@@ -162,10 +155,13 @@ class Solver {
   Eigen::Index m() const { return m_; }
   Eigen::Index p() const { return p_; }
 
-  // Setters store data in the current Ruiz frame (scaling is fixed at setup).
+  // Setters store data in the current Ruiz frame; solve() re-equilibrates
+  // after a matrix change (every solve is cold, so there is no iterate to
+  // carry across the new scaling).
   void set_Q(const MatrixXd& Q) {
     Q_ = 0.5 * (Q + Q.transpose());
     if (ruiz_) Q_ = c_s_ * dx_s_.asDiagonal() * Q_ * dx_s_.asDiagonal();
+    matrix_dirty_ = true;
   }
   void set_q(const VectorXd& q) {
     q_ = ruiz_ ? VectorXd(c_s_ * q.cwiseProduct(dx_s_)) : q;
@@ -175,6 +171,7 @@ class Solver {
     check_eq_b(ruiz_ ? VectorXd(b_.cwiseProduct(inv_de_)) : b_);
     A_ = ruiz_ ? MatrixXd(de_s_.asDiagonal() * A * dx_s_.asDiagonal()) : A;
     compute_AtA();
+    matrix_dirty_ = true;
   }
   void set_b(const VectorXd& b) {
     check_eq_b(b);
@@ -182,6 +179,7 @@ class Solver {
   }
   void set_G(const MatrixXd& G) {
     G_ = ruiz_ ? MatrixXd(di_s_.asDiagonal() * G * dx_s_.asDiagonal()) : G;
+    matrix_dirty_ = true;
   }
   void set_h(const VectorXd& h) {
     h_ = ruiz_ ? VectorXd(h.cwiseProduct(di_s_)) : h;
@@ -190,61 +188,25 @@ class Solver {
     penalty_ = ruiz_ ? VectorXd(c_s_ * penalty.cwiseQuotient(di_s_)) : penalty;
   }
 
-  // Seed the next solve from a full user-frame iterate, used as-is (no
-  // interior floor); rho/delta of 0 keep the current values.
-  void set_warm_start(const VectorXd& x, const VectorXd& t, const VectorXd& y,
-                      const VectorXd& s_t, const VectorXd& s_ineq,
-                      const VectorXd& z_t, const VectorXd& z, double rho = 0.0,
-                      double delta = 0.0) {
-    scale_iterate(x, t, y, s_t, s_ineq, z_t, z);
-    rho_ = rho > 0 ? rho : (rho_ > 0 ? rho_ : settings.rho_init);
-    delta_ = delta > 0 ? delta : (delta_ > 0 ? delta_ : settings.delta_init);
-    explicit_warm_ = true;
-  }
-
-  void warm_start_from(const Solution& sol) {
-    warm_start_from(sol.x, sol.y, sol.z);
-  }
-
-  // Seed the next solve from user-frame (x, y, z) only: t and slacks from
-  // the residual, z_t = penalty - z, then floored interior.
-  void warm_start_from(const VectorXd& x, const VectorXd& y,
-                       const VectorXd& z) {
-    VectorXd r = G_ * (ruiz_ ? VectorXd(x.cwiseQuotient(dx_s_)) : x) - h_;
-    VectorXd w = penalty_;
-    if (ruiz_) {
-      r = r.cwiseQuotient(di_s_);
-      w = w.cwiseProduct(di_s_) / c_s_;
-    }
-    const VectorXd t = r.cwiseMax(0.0);
-    scale_iterate(x, t, y, t, (-r).cwiseMax(0.0), w - z, z);
-    if (rho_ <= 0) rho_ = settings.rho_init;
-    if (delta_ <= 0) delta_ = settings.delta_init;
-    if (p_ > 0) init_warm();
-    explicit_warm_ = true;
-  }
-
   const Solution& solution() const { return sol_; }
 
   // Certified lower bound on ||Ax - b|| (0 when consistent or unchecked).
   double eq_infeasibility() const { return eq_infeas_lb_; }
 
   const Solution& solve() {
-    const bool explicit_ws = explicit_warm_;
-    explicit_warm_ = false;
+    if (ruiz_ && matrix_dirty_) reequilibrate();
+    matrix_dirty_ = false;
 
     // Inconsistent equalities: report the certificate instead of iterating.
     if (settings.check_eq_consistency && settings.eps_rel <= 0 &&
         eq_infeas_lb_ > settings.eps_abs) {
-      if (!have_warm_ && !explicit_ws) {
-        x_.setZero();
-        t_.setZero();
-        y_.setZero();
-        s_t_.setOnes();
-        s_in_.setOnes();
-        z_t_.setOnes();
-        z_in_.setOnes();
-      }
+      x_.setZero();
+      t_.setZero();
+      y_.setZero();
+      s_t_.setOnes();
+      s_in_.setOnes();
+      z_t_.setOnes();
+      z_in_.setOnes();
       if (p_ > 0) {
         update_residuals_nr();
       } else {
@@ -271,19 +233,11 @@ class Solver {
     no_primal_update_ = 0;
     no_dual_update_ = 0;
 
-    if (explicit_ws) {
-      reg_limit_ = settings.reg_lower_limit;
-    } else if (settings.warm_start && have_warm_) {
-      // Warm start carries rho, delta and the regularization floor from the
-      // last solve; restarting them would starve the mu-driven schedule.
-      init_warm();
-    } else {
-      rho_ = settings.rho_init;
-      delta_ = settings.delta_init;
-      reg_limit_ = settings.reg_lower_limit;
-      if (!init_cold()) {
-        return finish(Status::kNumerics, 0);
-      }
+    rho_ = settings.rho_init;
+    delta_ = settings.delta_init;
+    reg_limit_ = settings.reg_lower_limit;
+    if (!init_cold()) {
+      return finish(Status::kNumerics, 0);
     }
     mu_ = calculate_mu();
 
@@ -457,7 +411,7 @@ class Solver {
   // Re-solve the KKT system with complementarity fixed at kappa
   // (differentiable); see paper.
   const Solution& relax(double kappa, double tol = 1e-8, int max_iter = 30) {
-    if (p_ == 0 || !have_warm_) return sol_;
+    if (p_ == 0 || !has_iterate_) return sol_;
 
     // Row scaling cancels in each s.z pair; only the cost scale remains.
     const double kappa_s = c_s_ * kappa;
@@ -548,6 +502,29 @@ class Solver {
     eq_infeas_lb_ = eq_cert_.bound(b);
   }
 
+  // Undo the current Ruiz scaling and recompute it from the user frame
+  // (refreshing incrementally leaks row scale into the column factors).
+  void reequilibrate() {
+    const VectorXd ix = dx_s_.cwiseInverse(), ie = de_s_.cwiseInverse(),
+                   ii = di_s_.cwiseInverse();
+    Q_ = (ix.asDiagonal() * Q_ * ix.asDiagonal()) / c_s_;
+    q_ = q_.cwiseProduct(ix) / c_s_;
+    if (m_ > 0) {
+      A_ = ie.asDiagonal() * A_ * ix.asDiagonal();
+      b_ = b_.cwiseProduct(ie);
+    }
+    G_ = ii.asDiagonal() * G_ * ix.asDiagonal();
+    h_ = h_.cwiseProduct(ii);
+    penalty_ = penalty_.cwiseProduct(di_s_) / c_s_;
+    dx_s_.setOnes();
+    de_s_.setOnes();
+    di_s_.setOnes();
+    c_s_ = 1.0;
+    equilibrate();
+    update_unscale_vectors();
+    compute_AtA();
+  }
+
   // Ruiz equilibration accumulating dx_s_/de_s_/di_s_/c_s_; penalty scales
   // like z.
   void equilibrate() {
@@ -589,29 +566,6 @@ class Solver {
     inv_di_ = di_s_.cwiseInverse();
     y_us_ = de_s_ / c_s_;
     z_us_ = di_s_ / c_s_;
-  }
-
-  // User frame -> Ruiz frame.
-  void scale_iterate(const VectorXd& x, const VectorXd& t, const VectorXd& y,
-                     const VectorXd& s_t, const VectorXd& s_ineq,
-                     const VectorXd& z_t, const VectorXd& z) {
-    if (!ruiz_) {
-      x_ = x;
-      t_ = t;
-      if (m_ > 0) y_ = y;
-      s_t_ = s_t;
-      s_in_ = s_ineq;
-      z_t_ = z_t;
-      z_in_ = z;
-      return;
-    }
-    x_ = x.cwiseQuotient(dx_s_);
-    t_ = t.cwiseProduct(di_s_);
-    if (m_ > 0) y_ = c_s_ * y.cwiseQuotient(de_s_);
-    s_t_ = s_t.cwiseProduct(di_s_);
-    s_in_ = s_ineq.cwiseProduct(di_s_);
-    z_t_ = c_s_ * z_t.cwiseQuotient(di_s_);
-    z_in_ = c_s_ * z.cwiseQuotient(di_s_);
   }
 
   const Solution& solve_no_inequalities() {
@@ -837,21 +791,8 @@ class Solver {
     return true;
   }
 
-  // Floor slacks and duals so the warm iterate is interior.
-  void init_warm() {
-    update_residuals_nr();
-    const double r = std::max(primal_res_, dual_res_);
-    const double f = std::min(std::max(settings.warm_start_fraction * r,
-                                       settings.warm_start_min_floor),
-                              settings.warm_start_max_floor);
-    s_t_ = s_t_.cwiseMax(f);
-    s_in_ = s_in_.cwiseMax(f);
-    z_t_ = z_t_.cwiseMax(f);
-    z_in_ = z_in_.cwiseMax(f);
-  }
-
-  // Unscale to the user frame; kNumerics disables warm start, kInfeasible
-  // leaves it untouched.
+  // Unscale to the user frame. relax() needs an iterate from a solve that
+  // did not fail numerically; a gated (kInfeasible) tick keeps the last one.
   const Solution& finish(Status status, int iters) {
     sol_.x = x_.cwiseProduct(dx_s_);
     sol_.t = t_.cwiseProduct(inv_di_);
@@ -869,7 +810,7 @@ class Solver {
     sol_.dual_res = dual_res_;
     sol_.duality_gap = duality_gap_;
     if (status != Status::kInfeasible) {
-      have_warm_ = status != Status::kNumerics;
+      has_iterate_ = status != Status::kNumerics;
     }
     return sol_;
   }
@@ -882,8 +823,7 @@ class Solver {
 
   // Iterates.
   VectorXd x_, t_, y_, s_t_, s_in_, z_t_, z_in_;
-  bool have_warm_ = false;
-  bool explicit_warm_ = false;
+  bool has_iterate_ = false;
 
   EqCertificate eq_cert_;
   double eq_infeas_lb_ = 0.0;
@@ -894,6 +834,7 @@ class Solver {
   VectorXd dx_s_, de_s_, di_s_;
   VectorXd inv_cdx_, inv_de_, inv_di_;
   VectorXd y_us_, z_us_;
+  bool matrix_dirty_ = false;  // a matrix setter ran since the last solve
 
   // Prox centers.
   VectorXd xi_x_, xi_t_, nu_y_, nu_t_, nu_in_;

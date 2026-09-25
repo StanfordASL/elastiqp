@@ -425,7 +425,7 @@ void GenericSuite() {
                 cold_iters, warm_iters, worst_eq, worst_kkt);
     Check(L("n=30 m=8 p=200 20 ticks"),
           all_conv && worst_dx < 1e-4 && worst_eq < 1e-6 && worst_kkt < 1e-6 &&
-              warm_iters < cold_iters,
+              (!B::has_warm_start || warm_iters < cold_iters),
           worst_dx, "|dx|");
   }
 
@@ -460,7 +460,7 @@ void GenericSuite() {
                 warm_iters, worst_kkt);
     Check(L("n=30 p=200 20 ticks"),
           all_conv && worst_dx < 1e-4 && worst_kkt < 1e-6 &&
-              warm_iters < cold_iters,
+              (!B::has_warm_start || warm_iters < cold_iters),
           worst_dx, "|dx|");
   }
 
@@ -502,7 +502,7 @@ void GenericSuite() {
                   drift_traj::Name(st), cold_iters, warm_iters);
     Check(L(cell),
           all_conv && worst_dx < 1e-4 && worst_kkt < 1e-6 &&
-              warm_iters < cold_iters,
+              (!B::has_warm_start || warm_iters < cold_iters),
           worst_dx, "|dx|");
   }
 

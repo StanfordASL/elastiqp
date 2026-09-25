@@ -4,7 +4,7 @@
 //   ElastiqpSolve:     (Q, q, A, b, G, h, penalty)
 //                        -> (x, t, y, z_t, z, xr, tr, yr, z_t_r, z_r, info)
 //   ElastiqpSolveWarm: (Q, q, A, b, G, h, penalty, x0, y0, z0)
-//                        -> (x, t, y, z_t, z, info)
+//                        -> (x, t, y, z_t, z, info)      (das and pdal only)
 //
 // method: 0 = das, 1 = pdal, 2 = ipm. max_iter is the backend's outer budget.
 // The *r block is the kappa-relaxed point the Python wrappers differentiate
@@ -59,17 +59,8 @@ void apply_options(elastiqp::ipm::Solver& solver, double eps_abs,
   solver.settings.ruiz = ruiz != 0;
 }
 
-template <typename SolverT>
-void apply_warm_start(SolverT& solver, const VectorXd& x0, const VectorXd& y0,
-                      const VectorXd& z0) {
-  if constexpr (std::is_same_v<SolverT, elastiqp::ipm::Solver>) {
-    solver.warm_start_from(x0, y0, z0);  // reconstructs + floors the slacks
-  } else {
-    solver.set_warm_start(x0, y0, z0);
-  }
-}
-
-// x0 != nullptr seeds the solve from (x0, y0, z0).
+// x0 != nullptr seeds the solve from (x0, y0, z0); the IPM has no warm
+// start (dispatch rejects it).
 template <typename SolverT>
 void run_solver(double eps_abs, int64_t max_iter, int64_t ruiz,
                 double target_kappa, int64_t n, int64_t m, int64_t p,
@@ -83,9 +74,12 @@ void run_solver(double eps_abs, int64_t max_iter, int64_t ruiz,
   solver.setup(MapMatrix(Q, n, n), MapVector(q, n), MapMatrix(A, m, n),
                MapVector(b, m), MapMatrix(G, p, n), MapVector(h, p),
                MapVector(penalty, p));
-  if (x0 != nullptr) {
-    apply_warm_start(solver, VectorXd(MapVector(x0, n)),
-                     VectorXd(MapVector(y0, m)), VectorXd(MapVector(z0, p)));
+  if constexpr (!std::is_same_v<SolverT, elastiqp::ipm::Solver>) {
+    if (x0 != nullptr) {
+      solver.set_warm_start(VectorXd(MapVector(x0, n)),
+                            VectorXd(MapVector(y0, m)),
+                            VectorXd(MapVector(z0, p)));
+    }
   }
   sol = solver.solve();
   // Gradient accuracy is set by the relax residual, so cap it at 1e-6.
@@ -122,6 +116,11 @@ ffi::Error dispatch(int64_t method, double eps_abs, int64_t max_iter,
                                          y0, z0, sol, rsol);
       return ffi::Error::Success();
     case 2:
+      if (x0 != nullptr) {
+        return ffi::Error(ffi::ErrorCode::kInvalidArgument,
+                          "method='ipm' has no warm start; use method='das' "
+                          "or 'pdal'");
+      }
       run_solver<elastiqp::ipm::Solver>(eps_abs, max_iter, ruiz, target_kappa,
                                         n, m, p, Q, q, A, b, G, h, penalty, x0,
                                         y0, z0, sol, rsol);

@@ -214,7 +214,7 @@ def main():
         and solver2.settings.max_outer_iter == 250
         and solver2.settings.max_iter_in == 1500
         and solver2.settings.mu_in_init == 1e-1
-        and solver2.settings.ruiz is False,
+        and solver2.settings.ruiz is True,
         "",
     )
     solver3 = elastiqp.Solver()
@@ -484,14 +484,14 @@ def main():
         f"iters={again.iters}",
     )
 
-    print("ipm.Solver: relax, warm_start_from a foreign solution, settings")
+    print("ipm.Solver: relax, settings")
     ipm = elastiqp.Solver("ipm")
     ipm.settings.eps_abs = 1e-8
     ipm.settings.eps_duality_gap_abs = 1e-8
     ipm.setup(Qp, qp_, Gp, hp, 10.0, A=Ap, b=bp)
     isol = ipm.solve()
-    dx = np.abs(isol.x - tight.x).max()
-    check("ipm matches pdal", isol.converged == 1 and dx < 1e-6, f"|dx|={dx:.1e}")
+    dx = np.abs(isol.x - tight.x).max()  # tight is at the pdal default 1e-5
+    check("ipm matches pdal", isol.converged == 1 and dx < 1e-5, f"|dx|={dx:.1e}")
     irs = ipm.relax(kappa, 1e-8)
     comp = relaxed_comp(irs)
     rdx = np.abs(irs.x - rsol.x).max()
@@ -500,22 +500,13 @@ def main():
         irs.converged == 1 and np.abs(comp - kappa).max() < 1e-6 and rdx < 1e-5,
         f"comp_err={np.abs(comp - kappa).max():.1e} |dx|={rdx:.1e}",
     )
-    ipm2 = elastiqp.Solver("ipm")
-    ipm2.settings.eps_abs = 1e-8
-    ipm2.settings.eps_duality_gap_abs = 1e-8
-    ipm2.setup(Qp, qp_, Gp, hp, 10.0, A=Ap, b=bp)
-    ipm2.warm_start_from(tight)  # a PDAL certificate seeds the IPM
-    iw = ipm2.solve()
-    check(
-        "warm_start_from(pdal solution) converges in fewer iters",
-        iw.converged == 1 and iw.iters < isol.iters,
-        f"{iw.iters} < {isol.iters}",
-    )
     check(
         "ipm.Settings round-trip",
         ipm.settings.max_iter == 250
         and ipm.settings.rho_init == 1e-6
-        and ipm.settings.eps_abs == 1e-8,
+        and ipm.settings.eps_abs == 1e-8
+        and not hasattr(ipm, "set_warm_start")
+        and not hasattr(ipm.settings, "warm_start"),
         "",
     )
 

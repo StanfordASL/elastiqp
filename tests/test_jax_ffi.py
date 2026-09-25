@@ -588,10 +588,8 @@ def main():
         )
         for k in range(ticks)
     ]
-    for method in elastiqp.jax.METHODS:
-        nb_cls = {"das": elastiqp.das, "pdal": elastiqp.pdal, "ipm": elastiqp.ipm}[
-            method
-        ]
+    for method in ("das", "pdal"):  # the ipm backend has no warm start
+        nb_cls = {"das": elastiqp.das, "pdal": elastiqp.pdal}[method]
         prev = None
         warm_iters = cold_iters = 0
         worst_dx = worst_nb = 0.0
@@ -631,10 +629,7 @@ def main():
                     np.asarray(prev.y),
                     np.asarray(prev.z),
                 )
-                if method == "ipm":
-                    nb.warm_start_from(x0, y0, z0)
-                else:
-                    nb.set_warm_start(x0, y0, z0)
+                nb.set_warm_start(x0, y0, z0)
                 nbs = nb.solve()
                 worst_nb = max(worst_nb, float(np.abs(nbs.x - np.asarray(ws.x)).max()))
             all_conv &= int(ws.converged) == 1 and int(cs.converged) == 1
@@ -644,27 +639,26 @@ def main():
             all_conv and worst_dx < 1e-4,
             f"|dx|={worst_dx:.1e} ws-flips={ws_changed}",
         )
-        # The interior point gains little from a boundary seed (its
-        # floored start is close to the cold one); only require that it
-        # does not regress.
-        if method == "ipm":
-            check(
-                f"[{method}] warm does not regress",
-                warm_iters <= 1.25 * cold_iters,
-                f"{warm_iters} vs {cold_iters}",
-            )
-        else:
-            check(
-                f"[{method}] warm saves iterations",
-                warm_iters < cold_iters,
-                f"{warm_iters} vs {cold_iters}",
-            )
+        check(
+            f"[{method}] warm saves iterations",
+            warm_iters < cold_iters,
+            f"{warm_iters} vs {cold_iters}",
+        )
         check(
             f"[{method}] matches nanobind set_warm_start",
             worst_nb < FFI_NB_TOL,
             f"|dx|={worst_nb:.1e}",
         )
     check("warm sequence has working-set changes", ws_changed > 0, f"{ws_changed}")
+    try:
+        elastiqp.jax.solve(
+            Qw, drift[0][0], Gw, drift[0][1], 10.0, A=Aw, b=drift[0][2],
+            method="ipm", warm_start=prev,
+        )
+        ipm_raised = False
+    except ValueError:
+        ipm_raised = True
+    check("warm_start with method='ipm' raises", ipm_raised, "")
 
     # Cross-backend seed: a PDAL result warm-starts the active set (and
     # vice versa); the tuple form is accepted too.

@@ -56,6 +56,7 @@ struct Backend<elastiqp::das::Solver> {
   static constexpr const char* name = "das";
   static constexpr bool has_relax = false;
   static constexpr bool has_refresh = true;       // drift-gated Ruiz refresh
+  static constexpr bool has_warm_start = true;
   static constexpr double slack_tol = 1e-10;      // t at a feasible solution
   static constexpr double invariant_tol = 1e-12;  // z_t + z == w
   static Settings Tight() {
@@ -74,6 +75,7 @@ struct Backend<elastiqp::pdal::Solver> {
   static constexpr const char* name = "pdal";
   static constexpr bool has_relax = true;
   static constexpr bool has_refresh = true;
+  static constexpr bool has_warm_start = true;
   static constexpr double slack_tol = 0.0;
   static constexpr double invariant_tol = 1e-12;
   static Settings Tight() {
@@ -93,7 +95,8 @@ struct Backend<elastiqp::ipm::Solver> {
   using Settings = elastiqp::ipm::Settings;
   static constexpr const char* name = "ipm";
   static constexpr bool has_relax = true;
-  static constexpr bool has_refresh = false;  // scaling fixed at setup()
+  static constexpr bool has_refresh = false;     // re-equilibrates instead
+  static constexpr bool has_warm_start = false;  // every solve() is cold
   static constexpr double slack_tol = 1e-6;
   static constexpr double invariant_tol = 1e-6;
   static Settings Tight() {

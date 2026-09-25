@@ -425,7 +425,6 @@ NB_MODULE(_core, m) {
         .def_rw("eps_duality_gap_abs", &S::eps_duality_gap_abs)
         .def_rw("eps_duality_gap_rel", &S::eps_duality_gap_rel)
         .def_rw("max_factor_retries", &S::max_factor_retries)
-        .def_rw("warm_start", &S::warm_start)
         .def_rw("check_eq_consistency", &S::check_eq_consistency)
         .def_rw("max_iter", &S::max_iter)
         .def_rw("rho_init", &S::rho_init)
@@ -438,9 +437,6 @@ NB_MODULE(_core, m) {
         .def_rw("reg_finetune_dual_update_threshold",
                 &S::reg_finetune_dual_update_threshold)
         .def_rw("tau", &S::tau)
-        .def_rw("warm_start_fraction", &S::warm_start_fraction)
-        .def_rw("warm_start_min_floor", &S::warm_start_min_floor)
-        .def_rw("warm_start_max_floor", &S::warm_start_max_floor)
         .def_rw("ruiz", &S::ruiz)
         .def_rw("ruiz_max_iter", &S::ruiz_max_iter)
         .def_rw("ruiz_tol", &S::ruiz_tol);
@@ -449,35 +445,8 @@ NB_MODULE(_core, m) {
     auto cls = nb::class_<Sv>(ipm, "Solver", "Proximal interior-point backend");
     def_common(cls);
     def_relax(cls, 30);
-    cls.def(
-           "solution", [](const Sv& s) -> Solution { return s.solution(); },
-           "Result of the last solve() or relax()")
-        .def(
-            "set_warm_start",
-            [](Sv& s, const Eigen::VectorXd& x, const Eigen::VectorXd& t,
-               const Eigen::VectorXd& y, const Eigen::VectorXd& s_t,
-               const Eigen::VectorXd& s_ineq, const Eigen::VectorXd& z_t,
-               const Eigen::VectorXd& z, double rho, double delta) {
-              s.set_warm_start(x, t, y, s_t, s_ineq, z_t, z, rho, delta);
-            },
-            nb::arg("x"), nb::arg("t"), nb::arg("y"), nb::arg("s_t"),
-            nb::arg("s_ineq"), nb::arg("z_t"), nb::arg("z"), nb::kw_only(),
-            nb::arg("rho") = 0.0, nb::arg("delta") = 0.0,
-            "Seed the next solve() with a strictly interior iterate, used as "
-            "given.")
-        .def(
-            "warm_start_from",
-            [](Sv& s, const Solution& sol) { s.warm_start_from(sol); },
-            nb::arg("solution"),
-            "Seed the next solve() from a Solution; slacks are rebuilt and "
-            "floored off the boundary.")
-        .def(
-            "warm_start_from",
-            [](Sv& s, const Eigen::VectorXd& x, const Eigen::VectorXd& y,
-               const Eigen::VectorXd& z) { s.warm_start_from(x, y, z); },
-            nb::arg("x"), nb::arg("y"), nb::arg("z"),
-            "Seed the next solve() from a user-frame (x, y, z); slacks are "
-            "rebuilt and floored off the boundary.");
+    cls.def("solution", [](const Sv& s) -> Solution { return s.solution(); },
+            "Result of the last solve() or relax()");
   }
 
   // --- one-shot solve ------------------------------------------------------

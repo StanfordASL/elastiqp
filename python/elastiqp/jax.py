@@ -409,7 +409,8 @@ def solve(
         target_kappa (float, optional): Kappa-relaxation parameter for smooth
             derivatives. Defaults to 1e-3.
         warm_start (tuple | Result, optional): Explicit warm start, either a
-            previous Result or a (x, y, z) tuple. Defaults to None.
+            previous Result or a (x, y, z) tuple, (das and pdal only).
+            Defaults to None.
 
     Returns:
         Result: Solution to the elastic QP
@@ -445,6 +446,10 @@ def solve(
     penalty = jnp.broadcast_to(jnp.asarray(penalty, dtype=jnp.float64), h.shape)
 
     if warm_start is not None:
+        if method == "ipm":
+            raise ValueError(
+                "warm_start is not supported with method='ipm'; use 'das' or 'pdal'"
+            )
         if isinstance(warm_start, Result):
             x0, y0, z0 = warm_start.x, warm_start.y, warm_start.z
         else:
