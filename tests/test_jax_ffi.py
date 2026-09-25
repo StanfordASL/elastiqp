@@ -199,7 +199,18 @@ def main():
 
     def loss_relaxed(Q_, q_, A_, b_, G_, h_, penalty_, kap=kappa):
         out = elastiqp.jax._ffi_solve(
-            Q_, q_, A_, b_, G_, h_, penalty_, 1e-11, 300, False, "sequential", kap,
+            Q_,
+            q_,
+            A_,
+            b_,
+            G_,
+            h_,
+            penalty_,
+            1e-11,
+            300,
+            False,
+            "sequential",
+            kap,
             "pdal",
         )
         xr, tr = out[5], out[6]
@@ -294,9 +305,9 @@ def main():
     # Value is unaffected by kappa: still the tight solution. Compare the
     # differentiation (fwd) path, which runs the relaxation, against the
     # value-only path, which skips it.
-    v_smooth, _ = jax.value_and_grad(
-        lambda q_: loss_smooth(args[0], q_, *args[2:])
-    )(args[1])
+    v_smooth, _ = jax.value_and_grad(lambda q_: loss_smooth(args[0], q_, *args[2:]))(
+        args[1]
+    )
     v_tight = loss_tight(args[1])
     dv = abs(float(v_smooth) - float(v_tight))
     check("value unchanged by kappa (fwd path)", dv == 0.0, f"|dv|={dv:.1e}")
@@ -308,9 +319,7 @@ def main():
     # relaxation would otherwise mean silently wrong gradients). s_t = t and
     # s_in = h + t - Gx are the slacks of t >= 0 and Gx - t <= h; s_in is
     # reconstructed from x, so it carries the O(tol) primal residual.
-    out = elastiqp.jax._ffi_solve(
-        *args, 1e-11, 300, False, "sequential", kappa, "pdal"
-    )
+    out = elastiqp.jax._ffi_solve(*args, 1e-11, 300, False, "sequential", kappa, "pdal")
     xr, tr, z_t_r, z_r, info = out[5], out[6], out[8], out[9], out[10]
     s_in_r = args[5] + tr - args[4] @ xr
     comp = max(
@@ -327,9 +336,7 @@ def main():
     # silently: an absurd kappa converges the solve (info[0]) but stalls the
     # relaxation (info[2]), and solve() folds that into converged on the
     # differentiated path.
-    out = elastiqp.jax._ffi_solve(
-        *args, 1e-11, 300, False, "sequential", 1e8, "pdal"
-    )
+    out = elastiqp.jax._ffi_solve(*args, 1e-11, 300, False, "sequential", 1e8, "pdal")
     tight_ok, relax_bad = float(out[10][0]) == 1.0, float(out[10][2]) == 0.0
 
     def conv_smooth(q_):
@@ -362,9 +369,7 @@ def main():
     qs_b = args[1] + batch_dq
 
     def batched_smooth(qs):
-        return jnp.sum(
-            jax.vmap(lambda q_: loss_smooth(args[0], q_, *args[2:]))(qs)
-        )
+        return jnp.sum(jax.vmap(lambda q_: loss_smooth(args[0], q_, *args[2:]))(qs))
 
     g_b = jax.jit(jax.grad(batched_smooth))(qs_b)
     g_ref = jnp.stack(
@@ -404,9 +409,7 @@ def main():
     pen0 = 10.0 + jnp.linspace(0.0, 5.0, 8)
     A0 = jnp.zeros((0, 12))
     b0 = jnp.zeros((0,))
-    a0 = tuple(
-        jnp.asarray(vv) for vv in (Q0, q0, A0, b0, G0, h0, pen0)
-    )
+    a0 = tuple(jnp.asarray(vv) for vv in (Q0, q0, A0, b0, G0, h0, pen0))
 
     g_m0 = jax.jit(jax.grad(lambda q_: loss_smooth(a0[0], q_, *a0[2:])))(a0[1])
     fd = (
@@ -499,18 +502,38 @@ def main():
     # ...and the two backends agree on it (same relaxed KKT point).
     g_pd, g_ip = (
         jax.grad(
-            lambda q_: loss_smooth(args[0], q_, *args[2:])
-            if m == "pdal"
-            else w_loss
-            @ elastiqp.jax.solve(
-                args[0], q_, args[4], args[5], args[6], A=args[2], b=args[3],
-                method="ipm", eps_abs=1e-11, max_iter=300, target_kappa=kappa,
-            ).x
-            + w_t
-            @ elastiqp.jax.solve(
-                args[0], q_, args[4], args[5], args[6], A=args[2], b=args[3],
-                method="ipm", eps_abs=1e-11, max_iter=300, target_kappa=kappa,
-            ).t
+            lambda q_: (
+                loss_smooth(args[0], q_, *args[2:])
+                if m == "pdal"
+                else w_loss
+                @ elastiqp.jax.solve(
+                    args[0],
+                    q_,
+                    args[4],
+                    args[5],
+                    args[6],
+                    A=args[2],
+                    b=args[3],
+                    method="ipm",
+                    eps_abs=1e-11,
+                    max_iter=300,
+                    target_kappa=kappa,
+                ).x
+                + w_t
+                @ elastiqp.jax.solve(
+                    args[0],
+                    q_,
+                    args[4],
+                    args[5],
+                    args[6],
+                    A=args[2],
+                    b=args[3],
+                    method="ipm",
+                    eps_abs=1e-11,
+                    max_iter=300,
+                    target_kappa=kappa,
+                ).t
+            )
         )(args[1])
         for m in ("pdal", "ipm")
     )
@@ -521,12 +544,20 @@ def main():
     a_sol = elastiqp.jax.solve(Qx, qx, Gx, hx, 10.0, A=Ax, b=bx, method="das")
     a_ref = elastiqp.solve(Qx, qx, Gx, hx, 10.0, A=Ax, b=bx, method="das")
     da = float(jnp.abs(a_sol.x - jnp.asarray(a_ref.x)).max())
-    check("as forward matches nanobind", int(a_sol.converged) == 1 and da < FFI_NB_TOL, f"|dx|={da:.1e}")
-    a_jit = jax.jit(lambda q_: elastiqp.jax.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx, method="das").x)(qx)
+    check(
+        "as forward matches nanobind",
+        int(a_sol.converged) == 1 and da < FFI_NB_TOL,
+        f"|dx|={da:.1e}",
+    )
+    a_jit = jax.jit(
+        lambda q_: elastiqp.jax.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx, method="das").x
+    )(qx)
     check("as under jit", float(jnp.abs(a_jit - a_sol.x).max()) == 0.0, "")
     try:
         jax.grad(
-            lambda q_: jnp.sum(elastiqp.jax.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx, method="das").x)
+            lambda q_: jnp.sum(
+                elastiqp.jax.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx, method="das").x
+            )
         )(qx)
         msg = None
     except TypeError as e:
@@ -551,13 +582,17 @@ def main():
     Gw, h0 = make_infeasible(Gw, h0, p // 4)
     Qw, Aw, Gw = jnp.asarray(Qw), jnp.asarray(Aw), jnp.asarray(Gw)
     drift = [
-        (q0 + 0.2 * np.cumsum(rng.standard_normal((ticks, n)), 0)[k],
-         h0 + 0.2 * np.cumsum(rng.standard_normal((ticks, p)), 0)[k],
-         b0 + 0.05 * np.cumsum(rng.standard_normal((ticks, m)), 0)[k])
+        (
+            q0 + 0.2 * np.cumsum(rng.standard_normal((ticks, n)), 0)[k],
+            h0 + 0.2 * np.cumsum(rng.standard_normal((ticks, p)), 0)[k],
+            b0 + 0.05 * np.cumsum(rng.standard_normal((ticks, m)), 0)[k],
+        )
         for k in range(ticks)
     ]
     for method in elastiqp.jax.METHODS:
-        nb_cls = {"das": elastiqp.das, "pdal": elastiqp.pdal, "ipm": elastiqp.ipm}[method]
+        nb_cls = {"das": elastiqp.das, "pdal": elastiqp.pdal, "ipm": elastiqp.ipm}[
+            method
+        ]
         prev = None
         warm_iters = cold_iters = 0
         worst_dx = worst_nb = 0.0
@@ -565,19 +600,38 @@ def main():
         ws_changed = 0
         for q_k, h_k, b_k in drift:
             cs = elastiqp.jax.solve(Qw, q_k, Gw, h_k, 10.0, A=Aw, b=b_k, method=method)
-            ws = elastiqp.jax.solve(
-                Qw, q_k, Gw, h_k, 10.0, A=Aw, b=b_k, method=method, warm_start=prev
-            ) if prev is not None else cs
+            ws = (
+                elastiqp.jax.solve(
+                    Qw, q_k, Gw, h_k, 10.0, A=Aw, b=b_k, method=method, warm_start=prev
+                )
+                if prev is not None
+                else cs
+            )
             if prev is not None:
-                ws_changed += int(np.count_nonzero(
-                    (np.asarray(prev.z) > 1e-6) != (np.asarray(ws.z) > 1e-6)))
+                ws_changed += int(
+                    np.count_nonzero(
+                        (np.asarray(prev.z) > 1e-6) != (np.asarray(ws.z) > 1e-6)
+                    )
+                )
                 warm_iters += int(ws.iters)
                 cold_iters += int(cs.iters)
                 worst_dx = max(worst_dx, float(jnp.abs(ws.x - cs.x).max()))
                 # nanobind parity: same seed, same C++
                 nb = nb_cls.Solver()
-                nb.setup(np.asarray(Qw), q_k, np.asarray(Gw), h_k, 10.0, A=np.asarray(Aw), b=b_k)
-                x0, y0, z0 = (np.asarray(prev.x), np.asarray(prev.y), np.asarray(prev.z))
+                nb.setup(
+                    np.asarray(Qw),
+                    q_k,
+                    np.asarray(Gw),
+                    h_k,
+                    10.0,
+                    A=np.asarray(Aw),
+                    b=b_k,
+                )
+                x0, y0, z0 = (
+                    np.asarray(prev.x),
+                    np.asarray(prev.y),
+                    np.asarray(prev.z),
+                )
                 if method == "ipm":
                     nb.warm_start_from(x0, y0, z0)
                 else:
@@ -618,14 +672,23 @@ def main():
     q_k, h_k, b_k = drift[0]
     p_sol = elastiqp.jax.solve(Qw, q_k, Gw, h_k, 10.0, A=Aw, b=b_k, method="pdal")
     a_warm = elastiqp.jax.solve(
-        Qw, q_k, Gw, h_k, 10.0, A=Aw, b=b_k, method="das",
+        Qw,
+        q_k,
+        Gw,
+        h_k,
+        10.0,
+        A=Aw,
+        b=b_k,
+        method="das",
         warm_start=(p_sol.x, p_sol.y, p_sol.z),
     )
     a_cold = elastiqp.jax.solve(Qw, q_k, Gw, h_k, 10.0, A=Aw, b=b_k, method="das")
     dxa = float(jnp.abs(a_warm.x - a_cold.x).max())
     check(
         "das seeded from a pdal result (tuple form)",
-        int(a_warm.converged) == 1 and dxa < 1e-4 and int(a_warm.iters) < int(a_cold.iters),
+        int(a_warm.converged) == 1
+        and dxa < 1e-4
+        and int(a_warm.iters) < int(a_cold.iters),
         f"|dx|={dxa:.1e} iters {int(a_warm.iters)} vs {int(a_cold.iters)}",
     )
 
@@ -639,16 +702,22 @@ def main():
     def rollout(qs, hs, bs):
         def step(state, data):
             q_k, h_k, b_k = data
-            r = elastiqp.jax.solve(Qw, q_k, Gw, h_k, 10.0, A=Aw, b=b_k, warm_start=state)
+            r = elastiqp.jax.solve(
+                Qw, q_k, Gw, h_k, 10.0, A=Aw, b=b_k, warm_start=state
+            )
             return r, (r.x, r.iters, r.converged)
+
         init = elastiqp.jax.solve(Qw, qs[0], Gw, hs[0], 10.0, A=Aw, b=bs[0])
         _, out = jax.lax.scan(step, init, (qs, hs, bs))
         return out
 
     xs_scan, it_scan, cv_scan = rollout(qs, hs, bs)
-    xs_cold = np.stack([
-        np.asarray(elastiqp.jax.solve(Qw, d[0], Gw, d[1], 10.0, A=Aw, b=d[2]).x) for d in drift
-    ])
+    xs_cold = np.stack(
+        [
+            np.asarray(elastiqp.jax.solve(Qw, d[0], Gw, d[1], 10.0, A=Aw, b=d[2]).x)
+            for d in drift
+        ]
+    )
     dxs = float(np.abs(np.asarray(xs_scan) - xs_cold).max())
     check(
         "warm start as a lax.scan carry under jit",
@@ -657,21 +726,30 @@ def main():
     )
 
     # vmap over a batch of problems, each with its own warm state.
-    v_cold = jax.vmap(lambda q_, h_, b_: elastiqp.jax.solve(Qw, q_, Gw, h_, 10.0, A=Aw, b=b_))(qs, hs, bs)
+    v_cold = jax.vmap(
+        lambda q_, h_, b_: elastiqp.jax.solve(Qw, q_, Gw, h_, 10.0, A=Aw, b=b_)
+    )(qs, hs, bs)
     v_warm = jax.vmap(
-        lambda q_, h_, b_, s: elastiqp.jax.solve(Qw, q_, Gw, h_, 10.0, A=Aw, b=b_, warm_start=s)
+        lambda q_, h_, b_, s: elastiqp.jax.solve(
+            Qw, q_, Gw, h_, 10.0, A=Aw, b=b_, warm_start=s
+        )
     )(qs, hs, bs, v_cold)
     dxv = float(jnp.abs(v_warm.x - v_cold.x).max())
     check(
         "warm start under vmap",
-        bool((v_warm.converged == 1).all()) and dxv < 1e-6 and int(v_warm.iters.max()) <= 1,
+        bool((v_warm.converged == 1).all())
+        and dxv < 1e-6
+        and int(v_warm.iters.max()) <= 1,
         f"|dx|={dxv:.1e} max iters={int(v_warm.iters.max())}",
     )
 
     try:
         jax.grad(
-            lambda q_: jnp.sum(elastiqp.jax.solve(
-                Qw, q_, Gw, h_k, 10.0, A=Aw, b=b_k, method="pdal", warm_start=p_sol).x)
+            lambda q_: jnp.sum(
+                elastiqp.jax.solve(
+                    Qw, q_, Gw, h_k, 10.0, A=Aw, b=b_k, method="pdal", warm_start=p_sol
+                ).x
+            )
         )(q_k)
         msg = None
     except TypeError as e:
@@ -682,11 +760,22 @@ def main():
         "",
     )
     try:
-        elastiqp.jax.solve(Qw, q_k, Gw, h_k, 10.0, A=Aw, b=b_k, warm_start=(p_sol.x, p_sol.y, p_sol.z[:-1]))
+        elastiqp.jax.solve(
+            Qw,
+            q_k,
+            Gw,
+            h_k,
+            10.0,
+            A=Aw,
+            b=b_k,
+            warm_start=(p_sol.x, p_sol.y, p_sol.z[:-1]),
+        )
         msg = None
     except ValueError as e:
         msg = str(e)
-    check("warm_start shape mismatch raises", msg is not None and "warm_start" in msg, "")
+    check(
+        "warm_start shape mismatch raises", msg is not None and "warm_start" in msg, ""
+    )
 
     # The solver terminates on and returns unscaled quantities, so the VJP
     # (which differentiates the KKT at the returned point) must not see the

@@ -106,7 +106,9 @@ def main():
     )
     check(
         "outer_iters: as >= 1 prox round, pdal >= 1 BCL round, ipm 0",
-        sols["das"].outer_iters >= 1 and sols["pdal"].outer_iters >= 1 and sols["ipm"].outer_iters == 0,
+        sols["das"].outer_iters >= 1
+        and sols["pdal"].outer_iters >= 1
+        and sols["ipm"].outer_iters == 0,
         f"{[s.outer_iters for s in sols.values()]}",
     )
 
@@ -119,17 +121,32 @@ def main():
             return False
         return False
 
-    check("unknown method raises", raises(ValueError, lambda: elastiqp.solve(Q, q, G, h, 1e3, method="sqp")), "")
-    check("Solver('sqp') raises", raises(ValueError, lambda: elastiqp.Solver("sqp")), "")
+    check(
+        "unknown method raises",
+        raises(ValueError, lambda: elastiqp.solve(Q, q, G, h, 1e3, method="sqp")),
+        "",
+    )
+    check(
+        "Solver('sqp') raises", raises(ValueError, lambda: elastiqp.Solver("sqp")), ""
+    )
     check(
         "settings of the wrong backend raises",
-        raises(ValueError, lambda: elastiqp.solve(Q, q, G, h, 1e3, method="ipm", settings=elastiqp.pdal.Settings())),
+        raises(
+            ValueError,
+            lambda: elastiqp.solve(
+                Q, q, G, h, 1e3, method="ipm", settings=elastiqp.pdal.Settings()
+            ),
+        ),
         "",
     )
     st = elastiqp.Settings("das")
     st.eps_abs = 1e-10
     ss = elastiqp.solve(Qc, qc, Gc, hc, penc, A=Ac, b=bc, settings=st)
-    check("settings= object honored", ss.converged == 1 and np.abs(ss.x - ref.x).max() < 1e-7, "")
+    check(
+        "settings= object honored",
+        ss.converged == 1 and np.abs(ss.x - ref.x).max() < 1e-7,
+        "",
+    )
 
     print("solve: infeasible => slacks activate")
     G2, h2 = make_infeasible(G, h, 5)
@@ -448,7 +465,9 @@ def main():
         # s_ineq = h + t - G x): complementarity holds to the relaxed point's
         # primal residual times the dual.
         s_ineq = hp + np.asarray(s.t) - Gp @ np.asarray(s.x)
-        return np.concatenate([np.asarray(s.t) * np.asarray(s.z_t), s_ineq * np.asarray(s.z)])
+        return np.concatenate(
+            [np.asarray(s.t) * np.asarray(s.z_t), s_ineq * np.asarray(s.z)]
+        )
 
     comp = relaxed_comp(rsol)
     moved = np.abs(np.asarray(rsol.x) - np.asarray(tight.x)).max()
@@ -494,7 +513,9 @@ def main():
     )
     check(
         "ipm.Settings round-trip",
-        ipm.settings.max_iter == 250 and ipm.settings.rho_init == 1e-6 and ipm.settings.eps_abs == 1e-8,
+        ipm.settings.max_iter == 250
+        and ipm.settings.rho_init == 1e-6
+        and ipm.settings.eps_abs == 1e-8,
         "",
     )
 
@@ -515,10 +536,19 @@ def main():
     a2 = asol.solve()
     check(
         "q-only update keeps the factorization, warm re-solve is short",
-        a2.converged == 1 and not asol.refactored() and asol.rows_updated() == 0 and a2.iters <= 5,
+        a2.converged == 1
+        and not asol.refactored()
+        and asol.rows_updated() == 0
+        and a2.iters <= 5,
         f"iters={a2.iters}",
     )
-    check("das.Settings round-trip", asol.settings.max_iter == 10000 and asol.settings.eps_abs == 1e-9 and asol.settings.ruiz is True, "")
+    check(
+        "das.Settings round-trip",
+        asol.settings.max_iter == 10000
+        and asol.settings.eps_abs == 1e-9
+        and asol.settings.ruiz is True,
+        "",
+    )
     pen_inf = np.full(60, 10.0)
     pen_inf[:4] = np.inf  # the first conflicting pair is now hard on both sides
     hard = elastiqp.solve(Qp, qp_, Gp, hp, pen_inf, A=Ap, b=bp, method="das")
@@ -580,7 +610,9 @@ def main():
     # 0.8-stall gate -- so bcl_release_jump never fired and the warm solve took
     # 30 iters vs 13 cold. The projected-horizon gate (bcl_release_jump_horizon)
     # fires on round one instead: 5 iters measured (bounds hold 2x headroom).
-    d = np.load(os.path.join(os.path.dirname(__file__), "data", "warmstart_stale_duals.npz"))
+    d = np.load(
+        os.path.join(os.path.dirname(__file__), "data", "warmstart_stale_duals.npz")
+    )
     tol = float(d["solver_tol"])
 
     def hard_case_solver():
@@ -624,7 +656,9 @@ def main():
     # with the correct duals converges in 2 iters, so the stale duals are the
     # cost. Pinned as a regression guard (bounds hold ~1.3x headroom); tighten
     # the warm-iters bound once a fix lands.
-    d2 = np.load(os.path.join(os.path.dirname(__file__), "data", "warmstart_dual_overshoot.npz"))
+    d2 = np.load(
+        os.path.join(os.path.dirname(__file__), "data", "warmstart_dual_overshoot.npz")
+    )
     tol2 = float(d2["solver_tol"])
 
     def overshoot_solver():

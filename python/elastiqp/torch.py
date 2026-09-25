@@ -9,7 +9,7 @@ Supported:
 Notes:
 - Upcasts to float64
 - Currently does not support warm starting
-- Recommended default kappa for differentiability: 1e-3 
+- Recommended default kappa for differentiability: 1e-3
 """
 
 from typing import NamedTuple, Tuple

@@ -10,7 +10,7 @@ Notes:
 - Requires float64
 - Warm-starting is not differentiable
 - Warm-starting requires explicit passing of the previous result
-- Recommended default kappa for differentiability: 1e-3 
+- Recommended default kappa for differentiability: 1e-3
 """
 
 import ctypes
@@ -23,6 +23,7 @@ try:
     import jax
 except ImportError as e:
     import sys
+
     if sys.version_info < (3, 11):
         raise ImportError(
             "elastiqp.jax requires Python >= 3.11 (for jax>=0.9.1)"
