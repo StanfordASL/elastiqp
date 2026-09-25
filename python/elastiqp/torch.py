@@ -1,32 +1,15 @@
 """ElastiQP PyTorch interface
 
-The torch analogue of the JAX FFI (elastiqp.jax): the solve is registered as
-a custom operator (``torch.ops.elastiqp.solve``), so it composes with
-autograd and torch.compile as an opaque primitive rather than as unrolled
-solver iterations, and the forward and backward passes each cross into C++
-exactly once per problem.
+Supported:
+- Different methods (das, pdal, ipm)
+- torch.compile, functorch transforms
+- backward/grad (currently, only for ipm and pdal)
+- batch dimensions
 
-``method`` selects the backend: "das" (dual active set, the default),
-"pdal" (primal-dual augmented Lagrangian) or "ipm" (interior point).
-Forward solves work with all three. Gradients need the kappa relaxation,
-which only the PDAL and IPM backends have: with ``method="pdal"`` or
-``"ipm"`` and ``target_kappa > 0`` (log-barrier smoothed gradients,
-evaluated at the kappa-relaxed central point with complementarity
-s.z = kappa; the default 1e-3 is qpax's) loss.backward() works out of the
-box. Differentiating a ``method="das"`` solve raises.
-
-Set ruiz=True for badly-scaled data (the active-set backend has it on by
-default).
-
-Leading batch dimensions are supported directly (one solve per entry;
-batch shapes of the arguments broadcast) and via torch.vmap. Gradients
-come from autograd (loss.backward(), torch.autograd.grad) or the
-functional torch.func.grad / jacrev transforms. The solve runs on the CPU
-in float64: inputs on other devices / in float32 are moved and upcast,
-outputs are float64 on the input device, and gradients flow back through
-the casts.
-
-Currently, does not support warm-starting: every call is a cold solve.
+Notes:
+- Upcasts to float64
+- Currently does not support warm starting
+- Recommended default kappa for differentiability: 1e-3 
 """
 
 from typing import NamedTuple, Tuple
@@ -68,14 +51,11 @@ class Result(NamedTuple):
 
 _NOT_DIFFERENTIABLE_MSG = (
     "elastiqp.torch.solve is not differentiable with target_kappa=0: "
-    "the solution sits exactly on the constraint boundary, where "
-    "the exact KKT derivative is undefined. Set target_kappa > 0 "
-    "(e.g. 1e-3) for log-barrier smoothed gradients"
+    "Set target_kappa > 0  (e.g. 1e-3) for smoothed gradients"
 )
 _DAS_NOT_DIFFERENTIABLE_MSG = (
-    "elastiqp.torch.solve is not differentiable with method='das': the "
-    "active-set backend has no kappa relaxation. Use method='pdal' or "
-    "method='ipm' (with target_kappa > 0) for gradients"
+    "elastiqp.torch.solve is not differentiable with method='das': "
+    "See method='ipm' or 'pdal' instead"
 )
 
 
