@@ -15,6 +15,7 @@ dependencies = ["numpy"]
 [project.optional-dependencies]
 jax = ["jax>=0.9.1"]  # minimum version dictated by FFI compatibility
 torch = ["torch>=2.4"]  # for torch.library.custom_op
+examples = ["matplotlib"]
 
 [project.urls]
 Homepage = "https://github.com/StanfordASL/elastiqp"
