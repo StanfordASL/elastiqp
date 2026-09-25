@@ -13,9 +13,11 @@ license = { file = "LICENSE" }
 dependencies = ["numpy"]
 
 [project.optional-dependencies]
-jax = ["jax>=0.9.1"]  # minimum version dictated by FFI compatibility
+jax = ["jax>=0.9.1; python_version >= '3.11'"]  # minimum version dictated by FFI compatibility
 torch = ["torch>=2.4"]  # for torch.library.custom_op
 examples = ["matplotlib"]
+dev = ["scikit-build-core>=0.9", "nanobind>=2.0"]
+all = ["elastiqp[jax,torch,examples,dev]"]
 
 [project.urls]
 Homepage = "https://github.com/StanfordASL/elastiqp"
