@@ -71,6 +71,11 @@ Testing/
 __pycache__/
 *.pyc
 
+# packaging
+dist/
+
 # other
 untracked/
 .vscode/
+elastiqp_benchmarks/
+.claude/
