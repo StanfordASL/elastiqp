@@ -16,7 +16,7 @@ dependencies = ["numpy"]
 jax = ["jax>=0.9.1; python_version >= '3.11'"]  # minimum version dictated by FFI compatibility
 torch = ["torch>=2.4"]  # for torch.library.custom_op
 examples = ["matplotlib"]
-dev = ["scikit-build-core>=0.9", "nanobind>=2.0"]
+dev = ["scikit-build-core>=0.9", "nanobind>=2.0", "ruff"]
 all = ["elastiqp[jax,torch,examples,dev]"]
 
 [project.urls]
