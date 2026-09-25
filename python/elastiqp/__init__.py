@@ -85,6 +85,19 @@ def Solver(method="das"):
     return _lookup(_BACKENDS, method).Solver()
 
 
+_DEFAULT_EPS_ABS = das.Settings().eps_abs
+_DEFAULT_MAX_ITER = {
+    "das": das.Settings().max_iter,
+    "pdal": pdal.Settings().max_outer_iter,
+    "ipm": ipm.Settings().max_iter,
+}
+
+
+def _default_options(method):
+    """(eps_abs, max_iter) used by the jax/torch wrappers when given None."""
+    return _DEFAULT_EPS_ABS, _lookup(_DEFAULT_MAX_ITER, method)
+
+
 def Settings(method="das"):
     """Factory: a default settings object for the given backend
     (elastiqp.das.Settings / pdal.Settings / ipm.Settings); assign to

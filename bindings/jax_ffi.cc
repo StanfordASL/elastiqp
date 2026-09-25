@@ -46,7 +46,6 @@ template <>
 void apply_options(elastiqp::pdal::Solver& solver, double eps_abs,
                    int64_t max_iter, int64_t ruiz) {
   solver.settings.eps_abs = eps_abs;
-  solver.settings.eps_duality_gap_abs = eps_abs;
   solver.settings.max_outer_iter = static_cast<int>(max_iter);
   solver.settings.ruiz = ruiz != 0;
 }
@@ -54,7 +53,6 @@ template <>
 void apply_options(elastiqp::ipm::Solver& solver, double eps_abs,
                    int64_t max_iter, int64_t ruiz) {
   solver.settings.eps_abs = eps_abs;
-  solver.settings.eps_duality_gap_abs = eps_abs;
   solver.settings.max_iter = static_cast<int>(max_iter);
   solver.settings.ruiz = ruiz != 0;
 }

@@ -43,20 +43,14 @@ inline void apply_options(elastiqp::pdal::Settings& s,
                           std::optional<double> eps,
                           std::optional<int> max_iter,
                           std::optional<bool> ruiz) {
-  if (eps) {
-    s.eps_abs = *eps;
-    s.eps_duality_gap_abs = *eps;
-  }
+  if (eps) s.eps_abs = *eps;
   if (max_iter) s.max_outer_iter = *max_iter;
   if (ruiz) s.ruiz = *ruiz;
 }
 inline void apply_options(elastiqp::ipm::Settings& s, std::optional<double> eps,
                           std::optional<int> max_iter,
                           std::optional<bool> ruiz) {
-  if (eps) {
-    s.eps_abs = *eps;
-    s.eps_duality_gap_abs = *eps;
-  }
+  if (eps) s.eps_abs = *eps;
   if (max_iter) s.max_iter = *max_iter;
   if (ruiz) s.ruiz = *ruiz;
 }

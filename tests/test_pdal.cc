@@ -33,6 +33,11 @@ using test_util::SolveWith;
 namespace ipm = elastiqp::ipm;
 namespace pdal = elastiqp::pdal;
 
+// eps_abs means the same thing for every backend, so the three headers must
+// agree on it (elastiqp/__init__.py reads the DAS value for all of them).
+static_assert(elastiqp::das::Settings{}.eps_abs == pdal::Settings{}.eps_abs &&
+              pdal::Settings{}.eps_abs == ipm::Settings{}.eps_abs);
+
 // The termination / warm-start / Ruiz defaults shared by the PDAL and IPM
 // settings must agree (the IPM is the oracle at matching tolerances).
 static_assert(

@@ -34,15 +34,12 @@ from jax import Array
 import jax.numpy as jnp
 import numpy as np
 
+from elastiqp import _default_options
+
 __all__ = ["solve", "Result", "METHODS"]
 
 METHODS = ("das", "pdal", "ipm")
 _METHOD_ID = {"das": 0, "pdal": 1, "ipm": 2}
-# Default outer budget for das/pdal/ipm,
-# (active-set iterations / BCL rounds / interior-point iterations)
-_DEFAULT_MAX_ITER = {"das": 10000, "pdal": 250, "ipm": 250}
-_DEFAULT_EPS_ABS = {"das": 1e-6, "pdal": 1e-5, "ipm": 1e-5}
-# TODO (dan): get these defaults in alignment across backends
 
 
 def _find_library():
@@ -400,10 +397,12 @@ def solve(
         b (Array, optional): Linear equality constraint vector, shape (m,).
             Defaults to None.
         method (str, optional): Backend (das/pdal/ipm). Defaults to "das".
-        eps_abs (float, optional): Solve tolerance.
-            Defaults to None (use default for backend)
-        max_iter (int, optional): Max solver iterations (backend-dependent).
-            Defaults to None (use default for backend).
+        eps_abs (float, optional): Absolute KKT tolerance (same meaning for
+            every backend). Defaults to None (the backend's Settings default).
+        max_iter (int, optional): Outer iteration budget; what it counts
+            depends on the backend (das: active-set iterations, pdal: BCL
+            rounds, ipm: interior-point iterations). Defaults to None (the
+            backend's Settings default).
         ruiz (bool, optional): Whether to use ruiz equilibration.
             Defaults to True.
         target_kappa (float, optional): Kappa-relaxation parameter for smooth
@@ -423,10 +422,11 @@ def solve(
             "jax.config.update('jax_enable_x64', True) "
             "or set JAX_ENABLE_X64=1 in your environment."
         )
+    default_eps_abs, default_max_iter = _default_options(method)
     if eps_abs is None:
-        eps_abs = _DEFAULT_EPS_ABS[method]
+        eps_abs = default_eps_abs
     if max_iter is None:
-        max_iter = _DEFAULT_MAX_ITER[method]
+        max_iter = default_max_iter
     Q = jnp.asarray(Q)
     q = jnp.asarray(q)
     G = jnp.asarray(G)

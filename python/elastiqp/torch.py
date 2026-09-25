@@ -21,16 +21,11 @@ except ImportError as e:
 
 import numpy as np
 
-from elastiqp import _core
+from elastiqp import _core, _default_options
 
 __all__ = ["solve", "Result", "METHODS"]
 
 METHODS = ("das", "pdal", "ipm")
-# Default outer budget per backend (active-set iterations / BCL rounds /
-# interior-point iterations), used when max_iter is None.
-_DEFAULT_MAX_ITER = {"das": 10000, "pdal": 250, "ipm": 250}
-# Backend eps_abs defaults (see Settings in each header).
-_DEFAULT_EPS_ABS = {"das": 1e-6, "pdal": 1e-5, "ipm": 1e-5}
 
 if not hasattr(torch.library, "custom_op"):
     raise ImportError("elastiqp.torch requires torch >= 2.4 (torch.library.custom_op)")
@@ -426,11 +421,11 @@ def solve(
 
     `method` selects the backend: "das" (dual active set, the default),
     "pdal" (primal-dual augmented Lagrangian) or "ipm" (interior point).
-    `max_iter` is the backend's outer budget (active-set iterations, BCL
-    rounds, interior-point iterations); None uses the backend default
-    (10000 / 250 / 250). `ruiz=None` likewise uses the backend default
-    (on for "das", off for "pdal" / "ipm"); set it explicitly for
-    badly-scaled data.
+    `eps_abs` is the absolute KKT tolerance and means the same thing for
+    every backend; None uses the backend's Settings default. `max_iter` is
+    the backend's outer budget and counts different things per backend
+    (active-set iterations, BCL rounds, interior-point iterations); None
+    uses the backend's Settings default.
 
     Leading batch dimensions (Q: (..., n, n), q: (..., n), ...) solve one
     problem per entry; the batch shapes of the arguments broadcast against
@@ -462,10 +457,11 @@ def solve(
     """
     if method not in METHODS:
         raise ValueError(f"method must be one of {METHODS}, got {method!r}")
+    default_eps_abs, default_max_iter = _default_options(method)
     if eps_abs is None:
-        eps_abs = _DEFAULT_EPS_ABS[method]
+        eps_abs = default_eps_abs
     if max_iter is None:
-        max_iter = _DEFAULT_MAX_ITER[method]
+        max_iter = default_max_iter
     Q = torch.as_tensor(Q)
     device = Q.device
     to = lambda x: torch.as_tensor(x, device=device).to(torch.float64)

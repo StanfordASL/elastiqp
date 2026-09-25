@@ -16,10 +16,10 @@ namespace elastiqp::pdal {
 
 struct Settings {
   // Convergence.
-  double eps_abs = 1e-5;
+  double eps_abs = 1e-6;
   double eps_rel = 0;
   bool check_duality_gap = true;
-  double eps_duality_gap_abs = 1e-5;
+  double eps_duality_gap_abs = -1;  // < 0: same as eps_abs.
   double eps_duality_gap_rel = 0;
   int max_factor_retries = 10;
 
@@ -63,6 +63,10 @@ struct Settings {
   int ruiz_max_iter = 10;
   double ruiz_tol = 1e-3;
   double ruiz_refresh_ratio = 4.0;
+
+  double gap_tol_abs() const {
+    return eps_duality_gap_abs < 0 ? eps_abs : eps_duality_gap_abs;
+  }
 
   // relax(): regularization and warm-start policy (flip_tol < 0: always warm).
   double relax_reg = 1e-9;
@@ -565,7 +569,7 @@ class Solver {
     duality_gap_rel_ = st.duality_gap_rel;
     const bool ok = st.converged(
         settings.eps_abs, settings.eps_rel, settings.check_duality_gap,
-        settings.eps_duality_gap_abs, settings.eps_duality_gap_rel);
+        settings.gap_tol_abs(), settings.eps_duality_gap_rel);
     return finish(ok ? Status::kSolved : Status::kNumerics);
   }
 
@@ -645,7 +649,7 @@ class Solver {
     if (duality_gap_ >= gap_prev || !(gap_prev > 0.0)) return true;
     const double decay =
         std::pow(duality_gap_ / gap_prev, settings.bcl_release_jump_horizon);
-    return duality_gap_ * decay >= settings.eps_duality_gap_abs &&
+    return duality_gap_ * decay >= settings.gap_tol_abs() &&
            duality_gap_rel_ * decay >= settings.eps_duality_gap_rel;
   }
 
@@ -1201,7 +1205,7 @@ class Solver {
            (dual_res_ < settings.eps_abs || dual_res_rel_ < settings.eps_rel);
   }
   bool gap_ok() const {
-    return duality_gap_ < settings.eps_duality_gap_abs ||
+    return duality_gap_ < settings.gap_tol_abs() ||
            duality_gap_rel_ < settings.eps_duality_gap_rel;
   }
   bool converged() const {
