@@ -66,9 +66,6 @@ If you've installed with CMake, you can also `find_package(elastiqp)`
 
 #### From PyPI
 
-> [!WARNING]  
-> The code is not yet available on PyPI but I will upload a copy shortly
-
 ```
 pip install elastiqp
 ```
