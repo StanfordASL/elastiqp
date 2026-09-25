@@ -85,17 +85,13 @@ def Solver(method="das"):
     return _lookup(_BACKENDS, method).Solver()
 
 
-_DEFAULT_EPS_ABS = das.Settings().eps_abs
+# Per-backend outer iteration budget (the jax/torch wrappers' max_iter=None),
+# read from each backend's Settings so it cannot drift from C++.
 _DEFAULT_MAX_ITER = {
     "das": das.Settings().max_iter,
     "pdal": pdal.Settings().max_outer_iter,
     "ipm": ipm.Settings().max_iter,
 }
-
-
-def _default_options(method):
-    """(eps_abs, max_iter) used by the jax/torch wrappers when given None."""
-    return _DEFAULT_EPS_ABS, _lookup(_DEFAULT_MAX_ITER, method)
 
 
 def Settings(method="das"):

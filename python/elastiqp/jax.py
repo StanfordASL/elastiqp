@@ -34,7 +34,7 @@ from jax import Array
 import jax.numpy as jnp
 import numpy as np
 
-from elastiqp import _default_options
+from elastiqp import _DEFAULT_MAX_ITER
 
 __all__ = ["solve", "Result", "METHODS"]
 
@@ -375,7 +375,7 @@ def solve(
     A: Array | None = None,
     b: Array | None = None,
     method: str = "das",
-    eps_abs: float | None = None,
+    eps_abs: float = 1e-6,
     max_iter: int | None = None,
     ruiz: bool = True,
     target_kappa: float = 1e-3,
@@ -398,7 +398,7 @@ def solve(
             Defaults to None.
         method (str, optional): Backend (das/pdal/ipm). Defaults to "das".
         eps_abs (float, optional): Absolute KKT tolerance (same meaning for
-            every backend). Defaults to None (the backend's Settings default).
+            every backend). Defaults to 1e-6.
         max_iter (int, optional): Outer iteration budget; what it counts
             depends on the backend (das: active-set iterations, pdal: BCL
             rounds, ipm: interior-point iterations). Defaults to None (the
@@ -422,11 +422,8 @@ def solve(
             "jax.config.update('jax_enable_x64', True) "
             "or set JAX_ENABLE_X64=1 in your environment."
         )
-    default_eps_abs, default_max_iter = _default_options(method)
-    if eps_abs is None:
-        eps_abs = default_eps_abs
     if max_iter is None:
-        max_iter = default_max_iter
+        max_iter = _DEFAULT_MAX_ITER[method]
     Q = jnp.asarray(Q)
     q = jnp.asarray(q)
     G = jnp.asarray(G)

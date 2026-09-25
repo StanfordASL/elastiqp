@@ -21,7 +21,7 @@ except ImportError as e:
 
 import numpy as np
 
-from elastiqp import _core, _default_options
+from elastiqp import _DEFAULT_MAX_ITER, _core
 
 __all__ = ["solve", "Result", "METHODS"]
 
@@ -405,7 +405,7 @@ def solve(
     A=None,
     b=None,
     method="das",
-    eps_abs=None,
+    eps_abs=1e-6,
     max_iter=None,
     ruiz=True,
     target_kappa=1e-3,
@@ -422,7 +422,7 @@ def solve(
     `method` selects the backend: "das" (dual active set, the default),
     "pdal" (primal-dual augmented Lagrangian) or "ipm" (interior point).
     `eps_abs` is the absolute KKT tolerance and means the same thing for
-    every backend; None uses the backend's Settings default. `max_iter` is
+    every backend (default 1e-6). `max_iter` is
     the backend's outer budget and counts different things per backend
     (active-set iterations, BCL rounds, interior-point iterations); None
     uses the backend's Settings default.
@@ -457,11 +457,8 @@ def solve(
     """
     if method not in METHODS:
         raise ValueError(f"method must be one of {METHODS}, got {method!r}")
-    default_eps_abs, default_max_iter = _default_options(method)
-    if eps_abs is None:
-        eps_abs = default_eps_abs
     if max_iter is None:
-        max_iter = default_max_iter
+        max_iter = _DEFAULT_MAX_ITER[method]
     Q = torch.as_tensor(Q)
     device = Q.device
     to = lambda x: torch.as_tensor(x, device=device).to(torch.float64)
