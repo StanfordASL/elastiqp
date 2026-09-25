@@ -1,0 +1,98 @@
+# Build manylinux + macOS wheels and an sdist, then publish to PyPI on a version tag.
+#
+# Manual runs (workflow_dispatch) build everything and publish to TestPyPI.
+# Tag pushes matching v* publish to PyPI.
+#
+# Both publish jobs use PyPI trusted publishing (no API token): register this
+# repo + workflow file name under the project's "Publishing" settings on
+# pypi.org and test.pypi.org, with environment names "pypi" and "testpypi".
+name: wheels
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - ".github/workflows/wheels.yml"
+      - "pyproject.toml"
+      - "CMakeLists.txt"
+  workflow_dispatch:
+
+jobs:
+  build_wheels:
+    name: wheels on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pypa/cibuildwheel@v2.21
+        env:
+          CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-* cp313-*"
+          CIBW_SKIP: "*-musllinux_* *_i686"
+          # AlmaLinux 8 based image: glibc 2.28, broad compatibility.
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
+          # Eigen is a header-only find_package dependency (see CMakeLists.txt).
+          CIBW_BEFORE_ALL_LINUX: dnf install -y epel-release && dnf install -y eigen3-devel
+          CIBW_BEFORE_ALL_MACOS: brew install eigen
+          CIBW_ENVIRONMENT_MACOS: MACOSX_DEPLOYMENT_TARGET=11.0
+          # Smoke-test each wheel from a clean venv (no ELASTIQP_BUILD_DIR set,
+          # so the test imports the installed elastiqp._core).
+          CIBW_TEST_COMMAND: python {project}/tests/test_bindings.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  build_sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pipx run build --sdist
+      - name: Check sdist installs from source
+        run: |
+          sudo apt-get update && sudo apt-get install -y libeigen3-dev
+          python -m pip install dist/*.tar.gz
+          python tests/test_bindings.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  publish_testpypi:
+    name: publish to TestPyPI
+    if: github.event_name == 'workflow_dispatch'
+    needs: [build_wheels, build_sdist]
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  publish_pypi:
+    name: publish to PyPI
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build_wheels, build_sdist]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
