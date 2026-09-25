@@ -31,6 +31,11 @@ from typing import NamedTuple
 try:
     import jax
 except ImportError as e:
+    import sys
+    if sys.version_info < (3, 11):
+        raise ImportError(
+            "elastiqp.jax requires Python >= 3.11 (for jax>=0.9.1)"
+        ) from e
     raise ImportError("elastiqp.jax requires jax to be installed") from e
 
 import jax.numpy as jnp
