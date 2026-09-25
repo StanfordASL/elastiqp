@@ -59,7 +59,7 @@ struct Settings {
   int safe_guard = 10000;
 
   // Ruiz equilibration; refresh when scaling drifts by this ratio (0: never).
-  bool ruiz = false;
+  bool ruiz = true;
   int ruiz_max_iter = 10;
   double ruiz_tol = 1e-3;
   double ruiz_refresh_ratio = 4.0;

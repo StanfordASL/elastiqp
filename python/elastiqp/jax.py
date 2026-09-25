@@ -42,7 +42,6 @@ _METHOD_ID = {"das": 0, "pdal": 1, "ipm": 2}
 # (active-set iterations / BCL rounds / interior-point iterations)
 _DEFAULT_MAX_ITER = {"das": 10000, "pdal": 250, "ipm": 250}
 _DEFAULT_EPS_ABS = {"das": 1e-6, "pdal": 1e-5, "ipm": 1e-5}
-_DEFAULT_RUIZ = {"das": True, "pdal": False, "ipm": False}
 # TODO (dan): get these defaults in alignment across backends
 
 
@@ -381,7 +380,7 @@ def solve(
     method: str = "das",
     eps_abs: float | None = None,
     max_iter: int | None = None,
-    ruiz: bool | None = None,
+    ruiz: bool = True,
     target_kappa: float = 1e-3,
     warm_start: tuple[Array, Array, Array] | Result | None = None,
 ) -> Result:
@@ -406,7 +405,7 @@ def solve(
         max_iter (int, optional): Max solver iterations (backend-dependent).
             Defaults to None (use default for backend).
         ruiz (bool, optional): Whether to use ruiz equilibration.
-            Defaults to None (use default for backend).
+            Defaults to True.
         target_kappa (float, optional): Kappa-relaxation parameter for smooth
             derivatives. Defaults to 1e-3.
         warm_start (tuple | Result, optional): Explicit warm start, either a
@@ -427,8 +426,6 @@ def solve(
         eps_abs = _DEFAULT_EPS_ABS[method]
     if max_iter is None:
         max_iter = _DEFAULT_MAX_ITER[method]
-    if ruiz is None:
-        ruiz = _DEFAULT_RUIZ[method]
     Q = jnp.asarray(Q)
     q = jnp.asarray(q)
     G = jnp.asarray(G)

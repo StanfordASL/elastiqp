@@ -49,7 +49,7 @@ struct Settings {
   double warm_start_max_floor = 1.0;
 
   // Ruiz equilibration.
-  bool ruiz = false;
+  bool ruiz = true;
   int ruiz_max_iter = 10;
   double ruiz_tol = 1e-3;
 };

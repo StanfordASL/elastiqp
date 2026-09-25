@@ -31,9 +31,6 @@ METHODS = ("das", "pdal", "ipm")
 _DEFAULT_MAX_ITER = {"das": 10000, "pdal": 250, "ipm": 250}
 # Backend eps_abs defaults (see Settings in each header).
 _DEFAULT_EPS_ABS = {"das": 1e-6, "pdal": 1e-5, "ipm": 1e-5}
-# Ruiz equilibration default per backend (on for the active set, whose LDP
-# conditioning depends on it; off for PDAL / IPM), used when ruiz is None.
-_DEFAULT_RUIZ = {"das": True, "pdal": False, "ipm": False}
 
 if not hasattr(torch.library, "custom_op"):
     raise ImportError("elastiqp.torch requires torch >= 2.4 (torch.library.custom_op)")
@@ -415,7 +412,7 @@ def solve(
     method="das",
     eps_abs=None,
     max_iter=None,
-    ruiz=None,
+    ruiz=True,
     target_kappa=1e-3,
 ):
     """Solve the elastic QP
@@ -469,8 +466,6 @@ def solve(
         eps_abs = _DEFAULT_EPS_ABS[method]
     if max_iter is None:
         max_iter = _DEFAULT_MAX_ITER[method]
-    if ruiz is None:
-        ruiz = _DEFAULT_RUIZ[method]
     Q = torch.as_tensor(Q)
     device = Q.device
     to = lambda x: torch.as_tensor(x, device=device).to(torch.float64)
