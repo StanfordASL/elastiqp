@@ -369,10 +369,6 @@ NB_MODULE(_core, m) {
         .def_rw("bcl_release_jump", &S::bcl_release_jump)
         .def_rw("bcl_release_jump_horizon", &S::bcl_release_jump_horizon)
         .def_rw("bcl_warm_eta", &S::bcl_warm_eta)
-        .def_rw("cold_reset_mu", &S::cold_reset_mu)
-        .def_rw("cold_reset_threshold", &S::cold_reset_threshold)
-        .def_rw("cold_reset_residual", &S::cold_reset_residual)
-        .def_rw("cold_reset_limit", &S::cold_reset_limit)
         .def_rw("safe_guard", &S::safe_guard)
         .def_rw("ruiz", &S::ruiz)
         .def_rw("ruiz_max_iter", &S::ruiz_max_iter)
@@ -391,8 +387,6 @@ NB_MODULE(_core, m) {
            "Result of the last solve() or relax()")
         .def("factorizations", &Sv::factorizations,
              "KKT factorizations in the last solve()")
-        .def("cold_resets", &Sv::cold_resets,
-             "BCL cold resets in the last solve()")
         .def("reequilibrate", &Sv::reequilibrate,
              "Recompute the Ruiz scaling in place; solve() does this when "
              "drift exceeds settings.ruiz_refresh_ratio")
