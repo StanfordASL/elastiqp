@@ -30,6 +30,7 @@ except ImportError as e:
         ) from e
     raise ImportError("elastiqp.jax requires jax to be installed") from e
 
+from jax import Array
 import jax.numpy as jnp
 import numpy as np
 
@@ -369,74 +370,50 @@ _solve.defvjp(_solve_fwd, _solve_bwd)
 
 
 def solve(
-    Q,
-    q,
-    G,
-    h,
-    penalty,
+    Q: Array,
+    q: Array,
+    G: Array,
+    h: Array,
+    penalty: Array | float,
     *,
-    A=None,
-    b=None,
-    method="das",
-    eps_abs=None,
-    max_iter=None,
-    ruiz=None,
-    target_kappa=1e-3,
-    warm_start=None,
-):
+    A: Array | None = None,
+    b: Array | None = None,
+    method: str = "das",
+    eps_abs: float | None = None,
+    max_iter: int | None = None,
+    ruiz: bool | None = None,
+    target_kappa: float = 1e-3,
+    warm_start: tuple[Array, Array, Array] | Result | None = None,
+) -> Result:
     """Solve the elastic QP
 
-        min 0.5 x'Qx + q'x + penalty' t
-        s.t. A x == b, G x - t <= h, t >= 0
+    min 0.5 x'Qx + q'x + penalty' t
+    s.t. A x == b, G x - t <= h, t >= 0
 
-    `penalty` may be a scalar or a per-constraint vector of length p.
-    `method`, `eps_abs`, `max_iter`, `ruiz` and `target_kappa` are static
-    (compile-time) options.
+    Args:
+        Q (Array): Quadratic cost matrix, shape (n, n)
+        q (Array): Quadratic cost vector, shape (n,)
+        G (Array): Linear inequality constraint matrix, shape (p, n)
+        h (Array): Linear inequality constraint vector, shape (p,)
+        penalty (Array | float): L1 penalty, shape (p,) if vector
+        A (Array, optional): Linear equality constraint matrix, shape (m, n).
+            Defaults to None.
+        b (Array, optional): Linear equality constraint vector, shape (m,).
+            Defaults to None.
+        method (str, optional): Backend (das/pdal/ipm). Defaults to "das".
+        eps_abs (float, optional): Solve tolerance.
+            Defaults to None (use default for backend)
+        max_iter (int, optional): Max solver iterations (backend-dependent).
+            Defaults to None (use default for backend).
+        ruiz (bool, optional): Whether to use ruiz equilibration.
+            Defaults to None (use default for backend).
+        target_kappa (float, optional): Kappa-relaxation parameter for smooth
+            derivatives. Defaults to 1e-3.
+        warm_start (tuple | Result, optional): Explicit warm start, either a
+            previous Result or a (x, y, z) tuple. Defaults to None.
 
-    `method` selects the backend: "das" (dual active set, the default),
-    "pdal" (primal-dual augmented Lagrangian) or "ipm" (interior point).
-    `max_iter` is the backend's outer budget (active-set iterations, BCL
-    rounds, interior-point iterations); None uses the backend default
-    (10000 / 250 / 250). `ruiz=None` likewise uses the backend default
-    (on for "das", off for "pdal" / "ipm"); set it explicitly for
-    badly-scaled data.
-
-    `warm_start` seeds the solve from a previous point: a `Result` from an
-    earlier call (of any method) or an `(x, y, z)` tuple with shapes (n,),
-    (m,), (p,). The C++ solver is still constructed fresh (the call stays
-    pure, so it composes with jit, vmap and lax.scan; carry the Result as
-    loop state), but starts from that point: the active-set backend reads
-    its working set off z, PDAL / IPM start their iterates there. This
-    keeps the iteration savings of a persistent solver but not its cached
-    factorization. A warm-started solve is never differentiable (jax.grad
-    raises at trace time). `y` must be empty when there are no equalities.
-
-    Without `warm_start` every call is a cold solve. With method "pdal" or
-    "ipm" it is differentiable in reverse mode w.r.t. all array arguments when
-    target_kappa > 0 (the default); jax.grad with method="das" or with an
-    explicit target_kappa=0 raises at trace time (the active-set backend
-    has no relaxation; the certificate sits exactly on the constraint
-    boundary, where the exact KKT derivative is undefined).
-    `ruiz=True` enables Ruiz equilibration for badly-scaled data; the
-    solver terminates on and returns unscaled quantities, so it does not
-    affect gradients.
-
-    `target_kappa` controls gradient smoothing (qpax-style): kappa > 0
-    (the default 1e-3 is also qpax's) differentiates at a kappa-relaxed
-    central point with complementarity s.z = kappa, giving smoothed,
-    well-conditioned gradients near active-set changes at the cost of an
-    O(kappa) bias. With large penalty weights (>= ~1e4) the corrector's
-    roundoff amplification grows as penalty^2 / kappa and stalls it at
-    small kappa (check `converged`); enable ruiz=True in that regime,
-    which rescales the penalties to O(1) and removes the amplification.
-    The relaxed point is reached by a Newton corrector in the log-barrier
-    retraction coordinates z = b_kappa(v), s = b_kappa(-v). The relaxation
-    only runs on the differentiation path: a plain (undifferentiated)
-    solve never pays for it, and the returned solution is always the
-    tight (unrelaxed) optimum. `converged` covers everything the call
-    computed: when differentiating with kappa > 0 it is 0 if either the
-    solve or the relaxation failed, so a bad gradient evaluation point is
-    never silent.
+    Returns:
+        Result: Solution to the elastic QP
     """
     if method not in METHODS:
         raise ValueError(f"method must be one of {METHODS}, got {method!r}")
