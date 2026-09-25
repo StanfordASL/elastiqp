@@ -12,7 +12,7 @@ Notes:
 - Recommended default kappa for differentiability: 1e-3
 """
 
-from typing import NamedTuple, Tuple
+from typing import NamedTuple
 
 try:
     import torch
@@ -87,7 +87,7 @@ def _requires_grad(x: torch.Tensor) -> bool:
 # operators for torch.compile, where the solve must be an opaque op with a
 # shape function. solve() routes between them.
 
-_SOLVE_OUT = Tuple[
+_SOLVE_OUT = tuple[
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
@@ -202,7 +202,7 @@ def _vjp_impl(
     ct_y: torch.Tensor,
     ct_z_t: torch.Tensor,
     ct_z: torch.Tensor,
-) -> Tuple[
+) -> tuple[
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
