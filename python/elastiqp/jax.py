@@ -1,25 +1,15 @@
 """ElastiQP JAX FFI wrapper
 
-``method`` selects the backend: "das" (dual active set, the default),
-"pdal" (primal-dual augmented Lagrangian) or "ipm" (interior point).
-Forward solves work with all three. Gradients need the kappa relaxation,
-which only the PDAL and IPM backends have: with ``method="pdal"`` or
-``"ipm"`` and ``target_kappa > 0`` (log-barrier smoothed gradients,
-evaluated at the kappa-relaxed central point with complementarity
-s.z = kappa; the default 1e-3 is qpax's) jax.grad works out of the box.
-Differentiating an ``method="das"`` solve raises at trace time.
+Supported:
+- Different methods (das, pdal, ipm)
+- jit, vmap, scan
+- grad (currently, only for ipm and pdal)
 
-Set ruiz=True for badly-scaled data (the active-set backend has it on by
-default).
-
-Supports JIT and vmap (under "sequential" mode, which performs one solve
-per entry in the batch). Requires float64 (JAX_ENABLE_X64).
-
-Warm starting is explicit, to keep the call pure: pass the previous
-``Result`` (or an ``(x, y, z)`` tuple) as ``warm_start=`` and the fresh
-solver is seeded from it. Carry the Result through your loop (a
-``lax.scan`` carry, a Python loop variable) like any other state. The
-warm-started path is not differentiable.
+Notes:
+- vmap is sequential mode
+- Requires float64
+- Warm-starting is not differentiable
+- Warm-starting requires explicit passing of the previous result
 """
 
 import ctypes
