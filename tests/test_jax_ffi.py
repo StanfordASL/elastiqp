@@ -209,7 +209,6 @@ def main():
             1e-11,
             300,
             False,
-            "sequential",
             kap,
             "pdal",
         )
@@ -319,7 +318,7 @@ def main():
     # relaxation would otherwise mean silently wrong gradients). s_t = t and
     # s_in = h + t - Gx are the slacks of t >= 0 and Gx - t <= h; s_in is
     # reconstructed from x, so it carries the O(tol) primal residual.
-    out = elastiqp.jax._ffi_solve(*args, 1e-11, 300, False, "sequential", kappa, "pdal")
+    out = elastiqp.jax._ffi_solve(*args, 1e-11, 300, False, kappa, "pdal")
     xr, tr, z_t_r, z_r, info = out[5], out[6], out[8], out[9], out[10]
     s_in_r = args[5] + tr - args[4] @ xr
     comp = max(
@@ -336,7 +335,7 @@ def main():
     # silently: an absurd kappa converges the solve (info[0]) but stalls the
     # relaxation (info[2]), and solve() folds that into converged on the
     # differentiated path.
-    out = elastiqp.jax._ffi_solve(*args, 1e-11, 300, False, "sequential", 1e8, "pdal")
+    out = elastiqp.jax._ffi_solve(*args, 1e-11, 300, False, 1e8, "pdal")
     tight_ok, relax_bad = float(out[10][0]) == 1.0, float(out[10][2]) == 0.0
 
     def conv_smooth(q_):

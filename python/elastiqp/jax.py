@@ -106,7 +106,6 @@ def _ffi_solve(
     eps_abs,
     max_iter,
     ruiz,
-    vmap_method,
     target_kappa,
     method="pdal",
 ):
@@ -131,7 +130,7 @@ def _ffi_solve(
         vec(p),
         vec(3),
     ]
-    call = jax.ffi.ffi_call("elastiqp_solve", out_types, vmap_method=vmap_method)
+    call = jax.ffi.ffi_call("elastiqp_solve", out_types, vmap_method="sequential")
     return call(
         Q,
         q,
@@ -162,7 +161,6 @@ def _ffi_solve_warm(
     eps_abs,
     max_iter,
     ruiz,
-    vmap_method,
     method,
 ):
     n = Q.shape[-1]
@@ -172,7 +170,7 @@ def _ffi_solve_warm(
     vec = lambda d: jax.ShapeDtypeStruct(batch + (d,), jnp.float64)
     # (x, t, y, z_t, z), then info = [converged, iters].
     out_types = [vec(n), vec(p), vec(m), vec(p), vec(p), vec(2)]
-    call = jax.ffi.ffi_call("elastiqp_solve_warm", out_types, vmap_method=vmap_method)
+    call = jax.ffi.ffi_call("elastiqp_solve_warm", out_types, vmap_method="sequential")
     return call(
         Q,
         q,
@@ -191,7 +189,7 @@ def _ffi_solve_warm(
     )
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(10, 11, 12, 13, 14))
+@partial(jax.custom_vjp, nondiff_argnums=(10, 11, 12, 13))
 def _solve_warm(
     Q,
     q,
@@ -206,7 +204,6 @@ def _solve_warm(
     eps_abs,
     max_iter,
     ruiz,
-    vmap_method,
     method,
 ):
     return _ffi_solve_warm(
@@ -223,7 +220,6 @@ def _solve_warm(
         eps_abs,
         max_iter,
         ruiz,
-        vmap_method,
         method,
     )
 
@@ -290,7 +286,7 @@ def _kkt_bwd(res, ct):
     return Qb, qb, Ab, bb, Gb, hb, penalty_b
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12))
+@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11))
 def _solve(
     Q,
     q,
@@ -302,7 +298,6 @@ def _solve(
     eps_abs,
     max_iter,
     ruiz,
-    vmap_method,
     target_kappa,
     method,
 ):
@@ -318,7 +313,6 @@ def _solve(
         eps_abs,
         max_iter,
         ruiz,
-        vmap_method,
         0.0,
         method,
     )
@@ -336,7 +330,6 @@ def _solve_fwd(
     eps_abs,
     max_iter,
     ruiz,
-    vmap_method,
     target_kappa,
     method,
 ):
@@ -361,7 +354,6 @@ def _solve_fwd(
         eps_abs,
         max_iter,
         ruiz,
-        vmap_method,
         target_kappa,
         method,
     )
@@ -369,7 +361,7 @@ def _solve_fwd(
     return (x, t, y, z_t, z, info), (Q, A, G, h, xr, tr, yr, z_t_r, z_r)
 
 
-def _solve_bwd(eps_abs, max_iter, ruiz, vmap_method, target_kappa, method, res, ct):
+def _solve_bwd(eps_abs, max_iter, ruiz, target_kappa, method, res, ct):
     return _kkt_bwd(res, ct)
 
 
@@ -390,7 +382,6 @@ def solve(
     max_iter=None,
     ruiz=None,
     target_kappa=1e-3,
-    vmap_method="sequential",
     warm_start=None,
 ):
     """Solve the elastic QP
@@ -507,7 +498,6 @@ def solve(
             float(eps_abs),
             int(max_iter),
             bool(ruiz),
-            vmap_method,
             method,
         )
         return Result(
@@ -531,7 +521,6 @@ def solve(
         float(eps_abs),
         int(max_iter),
         bool(ruiz),
-        vmap_method,
         float(target_kappa),
         method,
     )
