@@ -104,7 +104,7 @@ def _ffi_solve(
     max_iter,
     ruiz,
     target_kappa,
-    method="pdal",
+    method,
 ):
     n = Q.shape[-1]
     m = b.shape[-1]
