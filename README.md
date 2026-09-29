@@ -1,3 +1,7 @@
+<div align="center">
+<img src="https://github.com/user-attachments/assets/12b43719-2b23-478d-9aaa-5481911741b4" alt="logo" width="400" height="73"></img>
+</div>
+
 # ElastiQP
 
 [![Paper](http://img.shields.io/badge/arXiv-2609.19080-B31B1B.svg)](https://arxiv.org/abs/2609.19080)
