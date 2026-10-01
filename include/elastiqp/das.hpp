@@ -39,6 +39,9 @@ struct Settings {
   bool warm_start = true;
   // Keep the Cholesky of Q_s across solves when only rows/vectors changed.
   bool reuse_factorization = true;
+  // Rows equal to +-an earlier row (e.g. two-sided limits) reuse its row of M
+  // instead of another triangular solve.
+  bool share_twin_rows = true;
 
   bool ruiz = true;
   int ruiz_max_iter = 10;
@@ -96,7 +99,7 @@ class Solver {
     eq_infeas_ = 0.0;
 
     Mt_.resize(n_, mp_);
-    twin_.clear();
+    twins_found_ = false;
     scale_.resize(mp_);
     hi_.resize(mp_);
     d_.resize(mp_);
@@ -336,11 +339,14 @@ class Solver {
       eps_ = eps_ > 0 ? 2.0 * eps_ : settings.eps_prox * std::max(1.0, scale);
       if (tries == 17) return false;
     }
-    if (!twins_hold()) find_twins();
+    update_twins();
     std::vector<int> rows;
     for (int i = 0; i < mp_; ++i)
       if (twin_[i] < 0) rows.push_back(i);
-    solve_rows(rows);
+    if (static_cast<int>(rows.size()) == mp_)  // no twins: one direct solve
+      Mt_ = llt_.matrixL().solve(Cts_);
+    else
+      solve_rows(rows);
     for (int i = 0; i < mp_; ++i) normalize_row(i);
     rows_updated_ = mp_;
     refactored_ = true;
@@ -354,8 +360,15 @@ class Solver {
   // after setup() and again only when a known pair stops matching (new twins
   // are found then too). Twins have equal 1-norms, so sorting by (norm, index)
   // makes them adjacent.
+  void update_twins() {
+    if (!settings.share_twin_rows) {
+      twin_.assign(static_cast<size_t>(mp_), -1);
+      twins_found_ = false;
+    } else if (!twins_found_ || !twins_hold()) {
+      find_twins();
+    }
+  }
   bool twins_hold() const {
-    if (static_cast<int>(twin_.size()) != mp_) return false;
     for (int i = 0; i < mp_; ++i) {
       const int j = twin_[i];
       if (j >= 0 && Cts_.col(i) != twin_sign_[i] * Cts_.col(j)) return false;
@@ -371,6 +384,7 @@ class Solver {
     });
     twin_.assign(static_cast<size_t>(mp_), -1);
     twin_sign_.assign(static_cast<size_t>(mp_), 1.0);
+    twins_found_ = true;
     for (size_t p = 1; p < order.size(); ++p) {
       const int i = order[p];
       for (size_t q = p; q-- > 0 && norm1[order[q]] == norm1[i];) {
@@ -446,7 +460,7 @@ class Solver {
     }
     // A clean row keeps its M row even if its twin changed, so only dirty
     // rows without a twin are solved.
-    if (!twins_hold()) find_twins();
+    update_twins();
     std::vector<int> changed, solve;
     for (int i = 0; i < mp_; ++i) {
       if (!col_dirty_[static_cast<size_t>(i)]) continue;
@@ -1063,6 +1077,7 @@ class Solver {
   MatrixXd Mt_;
   std::vector<int> twin_;
   std::vector<double> twin_sign_;
+  bool twins_found_ = false;
   VectorXd scale_, hi_, d_, v_, u_, uS_, mu_, x_, xc_, lam_full_;
   std::vector<RowState> state_;
   // Working set and LDL^T of its Gram matrix.

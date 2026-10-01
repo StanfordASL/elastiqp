@@ -292,6 +292,7 @@ NB_MODULE(_core, m) {
         .def_rw("max_outer", &S::max_outer)
         .def_rw("warm_start", &S::warm_start)
         .def_rw("reuse_factorization", &S::reuse_factorization)
+        .def_rw("share_twin_rows", &S::share_twin_rows)
         .def_rw("ruiz", &S::ruiz)
         .def_rw("ruiz_max_iter", &S::ruiz_max_iter)
         .def_rw("ruiz_tol", &S::ruiz_tol)
