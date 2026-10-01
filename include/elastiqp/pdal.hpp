@@ -998,20 +998,6 @@ class Solver {
     relax_finish(status, iter);
   }
 
-  // Smoothed complementarity: retraction(v) * retraction(-v) = kappa. Branch
-  // avoids cancellation.
-  static double retraction(double v, double kappa) {
-    const double r = std::sqrt(v * v + 4.0 * kappa);
-    return v >= 0.0 ? 0.5 * (v + r) : 2.0 * kappa / (r - v);
-  }
-
-  // 1 - retraction'(v), computed without cancellation.
-  static double retraction_dcomp(double v, double kappa) {
-    const double r = std::sqrt(v * v + 4.0 * kappa);
-    const double small = 2.0 * kappa / (r * (r + std::abs(v)));
-    return v >= 0.0 ? small : 1.0 - small;
-  }
-
   // Smoothed-KKT residual at the relax iterate; fills rf1..rf5
   // (x-stationarity, t-stationarity, eq, t >= 0, Gx - h <= t).
   double relax_residual(double kappa_s) {

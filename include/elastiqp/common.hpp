@@ -293,4 +293,18 @@ inline void count_row_states(const VectorXd& t, const VectorXd& z, double tol,
   }
 }
 
+// Smoothed complementarity for relax(): retraction(v) * retraction(-v) = kappa.
+// Branch avoids cancellation.
+inline double retraction(double v, double kappa) {
+  const double r = std::sqrt(v * v + 4.0 * kappa);
+  return v >= 0.0 ? 0.5 * (v + r) : 2.0 * kappa / (r - v);
+}
+
+// 1 - retraction'(v), computed without cancellation.
+inline double retraction_dcomp(double v, double kappa) {
+  const double r = std::sqrt(v * v + 4.0 * kappa);
+  const double small = 2.0 * kappa / (r * (r + std::abs(v)));
+  return v >= 0.0 ? small : 1.0 - small;
+}
+
 }  // namespace elastiqp

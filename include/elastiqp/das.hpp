@@ -476,18 +476,6 @@ class Solver {
     w.ready = true;
   }
 
-  // Smoothed complementarity: retraction(v) * retraction(-v) = kappa.
-  static double retraction(double v, double kappa) {
-    const double r = std::sqrt(v * v + 4.0 * kappa);
-    return v >= 0.0 ? 0.5 * (v + r) : 2.0 * kappa / (r - v);
-  }
-  // 1 - retraction'(v).
-  static double retraction_dcomp(double v, double kappa) {
-    const double r = std::sqrt(v * v + 4.0 * kappa);
-    const double small = 2.0 * kappa / (r * (r + std::abs(v)));
-    return v >= 0.0 ? small : 1.0 - small;
-  }
-
   // Retraction coordinates v = z - s of the solve() point, duals read off the
   // row states.
   void relax_seed() {
