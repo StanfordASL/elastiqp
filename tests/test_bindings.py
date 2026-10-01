@@ -547,11 +547,20 @@ def main():
         and a2.iters <= 5,
         f"iters={a2.iters}",
     )
+    aw = asol.relax(kappa, 1e-10)  # warm: continues from the point above
+    ac = asol.relax(kappa, 1e-10, warm=False)
+    wdx = np.abs(aw.x - ac.x).max()
+    check(
+        "das relax(warm) chain lands on the cold-start point",
+        aw.converged == 1 and ac.converged == 1 and aw.iters <= ac.iters and wdx < 1e-7,
+        f"warm iters={aw.iters} cold iters={ac.iters} |dx|={wdx:.1e}",
+    )
     check(
         "das.Settings round-trip",
         asol.settings.max_iter == 10000
         and asol.settings.eps_abs == 1e-9
-        and asol.settings.ruiz is True,
+        and asol.settings.ruiz is True
+        and asol.settings.relax_warm_budget == 15,
         "",
     )
     pen_inf = np.full(60, 10.0)

@@ -58,6 +58,10 @@ struct Settings {
   // relax(): Newton regularization, and x100 retries on a failed factorization.
   double relax_reg = 1e-9;
   int relax_factor_retries = 10;
+  // relax(warm): iteration budget of the warm attempt before the cold restart,
+  // and predicted sign flips above which it is skipped (< 0: always warm).
+  int relax_warm_budget = 15;
+  int relax_warm_flip_tol = 0;
 
   double prox_tol() const { return eta_prox > 0 ? eta_prox : eps_abs; }
 };
@@ -341,10 +345,14 @@ class Solver {
 
   // Moves the solve() result to the kappa-relaxed central point (s.z = kappa
   // on both slack blocks; hard rows keep t = 0), the differentiation point read
-  // by kkt_vjp.hpp. Newton on the smoothed KKT system, seeded from the working
-  // set. Needs a solve() on the current data; leaves the working set and warm
-  // start untouched. The first call after setup() allocates its workspace.
-  const Solution& relax(double kappa, double tol = 1e-6, int max_iter = 50) {
+  // by kkt_vjp.hpp. Newton on the smoothed KKT system. With warm, it continues
+  // from the previous relaxed point when few retraction sign flips are
+  // predicted, and restarts cold (seeded from the working set) if that attempt
+  // does not converge. Needs a solve() on the current data; leaves the working
+  // set and warm start untouched. The first call after setup() allocates its
+  // workspace.
+  const Solution& relax(double kappa, double tol = 1e-6, int max_iter = 50,
+                        bool warm = true) {
     if (p_ == 0 || kappa <= 0.0) return sol_;
     bool stale = Q_dirty_ || penalty_dirty_ || rhs_dirty_;
     for (char c : col_dirty_) stale |= c != 0;
@@ -356,17 +364,81 @@ class Solver {
     if (!rw_.ready) relax_alloc();
     RelaxWork& w = rw_;
     const double kappa_s = c_ * kappa;
-    const auto Gt = Cts_.rightCols(p_);
-    const auto At = Cts_.leftCols(m_);
-    relax_seed();
     if (m_ > 0) {
       w.AtA.setZero();
-      w.AtA.selfadjointView<Eigen::Lower>().rankUpdate(At);
+      w.AtA.selfadjointView<Eigen::Lower>().rankUpdate(Cts_.leftCols(m_));
     }
 
+    // A row that switched between hard and elastic has no warm point.
+    bool use_warm = warm && w.have_warm;
+    for (int i = 0; i < p_; ++i) {
+      const char hard = std::isfinite(ws_[i]) ? 0 : 1;
+      use_warm &= hard == w.hard[static_cast<size_t>(i)];
+      w.hard[static_cast<size_t>(i)] = hard;
+    }
+    if (use_warm && settings.relax_warm_flip_tol >= 0)
+      use_warm = relax_predict_flips(kappa_s) <= settings.relax_warm_flip_tol;
+
+    int iters = 0;
+    Status status = Status::kMaxIter;
+    if (use_warm)
+      status = relax_run(kappa_s, tol,
+                         std::min(max_iter, settings.relax_warm_budget), iters);
+    if (status != Status::kSolved) {
+      relax_seed();
+      status = relax_run(kappa_s, tol, iters + max_iter, iters);
+    }
+    w.have_warm = status == Status::kSolved;
+    relax_finish(status, iters);
+    return sol_;
+  }
+
+ private:
+  // relax() workspace, in the scaled frame.
+  struct RelaxWork {
+    bool ready = false;
+    bool have_warm = false;  // x, t, y, v_t, v_in hold a converged relax point
+    std::vector<char> hard;  // penalty = inf: no elastic slack
+    VectorXd x, t, y, v_t, v_in;
+    VectorXd z_t, z_in, s_t, s_in;
+    VectorXd f1, f2, f3, f4, f5;
+    VectorXd d_t, d_in, einv, lam, w, pv, Gx, Gdx;
+    VectorXd dx, dt, dy, dv_t, dv_in;
+    MatrixXd K, GS, AtA;
+    Eigen::LLT<MatrixXd, Eigen::Lower> llt;
+    double primal_res = 0.0, dual_res = 0.0, merit = 0.0;
+  };
+
+  void relax_alloc() {
+    RelaxWork& w = rw_;
+    w.hard.resize(static_cast<size_t>(p_));
+    w.x.resize(n_);
+    w.y.resize(m_);
+    for (VectorXd* v :
+         {&w.t,  &w.v_t, &w.v_in, &w.z_t, &w.z_in, &w.s_t,  &w.s_in,
+          &w.f2, &w.f4,  &w.f5,   &w.d_t, &w.d_in, &w.einv, &w.lam,
+          &w.w,  &w.pv,  &w.Gx,   &w.Gdx, &w.dt,   &w.dv_t, &w.dv_in})
+      v->setZero(p_);
+    w.f1.resize(n_);
+    w.f3.resize(m_);
+    w.dx.resize(n_);
+    w.dy.resize(m_);
+    w.K.resize(n_, n_);
+    w.GS.resize(n_, p_);
+    w.AtA.resize(n_, n_);
+    w.llt = Eigen::LLT<MatrixXd, Eigen::Lower>(n_);
+    w.ready = true;
+    w.have_warm = false;
+  }
+
+  // Newton from the iterate in rw_ until iters reaches max_iter; iters
+  // accumulates across runs.
+  Status relax_run(double kappa_s, double tol, int max_iter, int& iters) {
+    RelaxWork& w = rw_;
+    const auto Gt = Cts_.rightCols(p_);
+    const auto At = Cts_.leftCols(m_);
     double rho = settings.relax_reg;
     double delta = settings.relax_reg;
-    int iter = 0;
     Status status = Status::kMaxIter;
     double res = relax_residual(kappa_s);
     while (true) {
@@ -378,8 +450,8 @@ class Solver {
         status = Status::kSolved;
         break;
       }
-      if (iter >= max_iter) break;
-      iter++;
+      if (iters >= max_iter) break;
+      iters++;
 
       // Eliminate (t, v_t, v_in) onto x; see relax_factor.
       for (int i = 0; i < p_; ++i) {
@@ -440,48 +512,28 @@ class Solver {
         res = relax_residual(kappa_s);
       }
     }
-    relax_finish(status, iter);
-    return sol_;
+    return status;
   }
 
- private:
-  // relax() workspace, in the scaled frame.
-  struct RelaxWork {
-    bool ready = false;
-    std::vector<char> hard;  // penalty = inf: no elastic slack
-    VectorXd x, t, y, v_t, v_in;
-    VectorXd z_t, z_in, s_t, s_in;
-    VectorXd f1, f2, f3, f4, f5;
-    VectorXd d_t, d_in, einv, lam, w, pv, Gx, Gdx;
-    VectorXd dx, dt, dy, dv_t, dv_in;
-    MatrixXd K, GS, AtA;
-    Eigen::LLT<MatrixXd, Eigen::Lower> llt;
-    double primal_res = 0.0, dual_res = 0.0, merit = 0.0;
+  // Retraction coordinates (v = z - s) of row i at the solve() point, the dual
+  // read off the row state; r = G x - h in the scaled frame.
+  struct RowRetraction {
+    double t, v_t, v_in;
   };
-
-  void relax_alloc() {
-    RelaxWork& w = rw_;
-    w.hard.resize(static_cast<size_t>(p_));
-    w.x.resize(n_);
-    w.y.resize(m_);
-    for (VectorXd* v :
-         {&w.t,  &w.v_t, &w.v_in, &w.z_t, &w.z_in, &w.s_t,  &w.s_in,
-          &w.f2, &w.f4,  &w.f5,   &w.d_t, &w.d_in, &w.einv, &w.lam,
-          &w.w,  &w.pv,  &w.Gx,   &w.Gdx, &w.dt,   &w.dv_t, &w.dv_in})
-      v->setZero(p_);
-    w.f1.resize(n_);
-    w.f3.resize(m_);
-    w.dx.resize(n_);
-    w.dy.resize(m_);
-    w.K.resize(n_, n_);
-    w.GS.resize(n_, p_);
-    w.AtA.resize(n_, n_);
-    w.llt = Eigen::LLT<MatrixXd, Eigen::Lower>(n_);
-    w.ready = true;
+  RowRetraction row_retraction(int i, double r) const {
+    const int row = m_ + i;
+    const double pen = ws_[i];
+    const bool hard = !std::isfinite(pen);
+    double z = 0.0;
+    if (state_[static_cast<size_t>(row)] == RowState::kSaturated)
+      z = pen;
+    else if (state_[static_cast<size_t>(row)] == RowState::kActive)
+      z = std::min(std::max(lam_full_[row] * scale_[row], 0.0), pen);
+    const double t = hard ? 0.0 : std::max(r, 0.0);
+    return {t, hard ? 0.0 : (pen - z) - t, z - std::max(t - r, 0.0)};
   }
 
-  // Retraction coordinates v = z - s of the solve() point, duals read off the
-  // row states.
+  // Cold start: the solve() point.
   void relax_seed() {
     RelaxWork& w = rw_;
     w.x = x_;
@@ -491,21 +543,30 @@ class Solver {
                    : 0.0;
     w.Gx.noalias() = Cts_.rightCols(p_).transpose() * x_;
     for (int i = 0; i < p_; ++i) {
-      const int row = m_ + i;
-      const double r = w.Gx[i] - rhss_[row];
-      const double pen = ws_[i];
-      const bool hard = !std::isfinite(pen);
-      w.hard[static_cast<size_t>(i)] = hard;
-      double z = 0.0;
-      if (state_[static_cast<size_t>(row)] == RowState::kSaturated)
-        z = pen;
-      else if (state_[static_cast<size_t>(row)] == RowState::kActive)
-        z = std::min(std::max(lam_full_[row] * scale_[row], 0.0), pen);
-      const double t = hard ? 0.0 : std::max(r, 0.0);
-      w.t[i] = t;
-      w.v_t[i] = hard ? 0.0 : (pen - z) - t;
-      w.v_in[i] = z - std::max(t - r, 0.0);
+      const RowRetraction rr = row_retraction(i, w.Gx[i] - rhss_[m_ + i]);
+      w.t[i] = rr.t;
+      w.v_t[i] = rr.v_t;
+      w.v_in[i] = rr.v_in;
     }
+  }
+
+  // Retraction variables whose sign differs between the solve() point and the
+  // last relax() point, ignoring pairs within the kappa corner.
+  int relax_predict_flips(double kappa_s) {
+    RelaxWork& w = rw_;
+    const double corner2 = 100.0 * kappa_s;
+    w.Gx.noalias() = Cts_.rightCols(p_).transpose() * x_;
+    int flips = 0;
+    for (int i = 0; i < p_; ++i) {
+      const RowRetraction rr = row_retraction(i, w.Gx[i] - rhss_[m_ + i]);
+      if ((rr.v_t > 0) != (w.v_t[i] > 0) &&
+          std::abs(rr.v_t * w.v_t[i]) > corner2)
+        flips++;
+      if ((rr.v_in > 0) != (w.v_in[i] > 0) &&
+          std::abs(rr.v_in * w.v_in[i]) > corner2)
+        flips++;
+    }
+    return flips;
   }
 
   // Smoothed-KKT residual in user units; fills f1..f5 (x-stationarity,
@@ -770,6 +831,7 @@ class Solver {
       drift_ = 1.0;
       scaled_valid_ = true;
       rescaled_ = true;
+      rw_.have_warm = false;  // the relax point lives in the old frame
       x_ = xu_.cwiseQuotient(dx_);
       for (int i = 0; i < p_; ++i) ws_[i] = c_ * penalty_[i] / dr_[m_ + i];
     }

@@ -305,8 +305,8 @@ void ExplicitWarm(std::mt19937& rng) {
   r.Report("explicit warm start");
 }
 
-// relax() sizes its workspace on the first call after setup(); later calls
-// (and the solves in between) are allocation-free.
+// relax() sizes its workspace on the first call after setup(); later calls,
+// warm or cold (and the solves in between), are allocation-free.
 void Relax(std::mt19937& rng) {
   const double inf = std::numeric_limits<double>::infinity();
   QPData qp = problem_gen::InfeasibleEq(rng, 20, 4, 50, 4);
@@ -324,7 +324,9 @@ void Relax(std::mt19937& rng) {
       r.s.set_h(qp.h);
     });
     r.Solve();
-    r.Update([&] { relaxed &= r.s.relax(1e-3).converged == 1; });
+    r.Update([&] {
+      relaxed &= r.s.relax(1e-3, 1e-6, 50, tick % 2 == 0).converged == 1;
+    });
   }
   r.Report("relax after its first call", relaxed);
 }

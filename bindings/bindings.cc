@@ -301,7 +301,9 @@ NB_MODULE(_core, m) {
         .def_rw("cycle_tol", &S::cycle_tol)
         .def_rw("refactor_tol", &S::refactor_tol)
         .def_rw("relax_reg", &S::relax_reg)
-        .def_rw("relax_factor_retries", &S::relax_factor_retries);
+        .def_rw("relax_factor_retries", &S::relax_factor_retries)
+        .def_rw("relax_warm_budget", &S::relax_warm_budget)
+        .def_rw("relax_warm_flip_tol", &S::relax_warm_flip_tol);
 
     using Sv = elastiqp::das::Solver;
     nb::enum_<Sv::RowState>(das, "RowState")
@@ -313,9 +315,18 @@ NB_MODULE(_core, m) {
     auto cls =
         nb::class_<Sv>(das, "Solver", "Dual active-set backend (default)");
     def_common(cls);
-    def_relax(cls, 50);
-    cls.def("row_state", &Sv::row_state, nb::arg("i"),
-            "RowState of inequality row i")
+    cls.def(
+           "relax",
+           [](Sv& s, double kappa, double tol, int max_iter, bool warm)
+               -> Solution { return s.relax(kappa, tol, max_iter, warm); },
+           nb::arg("kappa"), nb::arg("tol") = 1e-6, nb::arg("max_iter") = 50,
+           nb::arg("warm") = true,
+           "Move the solve() result to the kappa-relaxed point (s.z = kappa) "
+           "for differentiation; the working set stays untouched. With "
+           "warm=True, repeated calls continue from the previous relaxed "
+           "point.")
+        .def("row_state", &Sv::row_state, nb::arg("i"),
+             "RowState of inequality row i")
         .def("proximal", &Sv::proximal, "True if Q is proximally shifted")
         .def("prox_eps", &Sv::prox_eps, "Proximal shift added to Q (0 if none)")
         .def("scaling_drift", &Sv::scaling_drift,
@@ -442,8 +453,9 @@ NB_MODULE(_core, m) {
     auto cls = nb::class_<Sv>(ipm, "Solver", "Proximal interior-point backend");
     def_common(cls);
     def_relax(cls, 30);
-    cls.def("solution", [](const Sv& s) -> Solution { return s.solution(); },
-            "Result of the last solve() or relax()");
+    cls.def(
+        "solution", [](const Sv& s) -> Solution { return s.solution(); },
+        "Result of the last solve() or relax()");
   }
 
   // --- one-shot solve ------------------------------------------------------

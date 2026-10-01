@@ -23,9 +23,10 @@
 //    inactive on a warm working set.
 // 6. relax(kappa), the differentiation point: the same kappa-relaxed central
 //    point as the PDAL and IPM relax (hard rows against a stiff elastic
-//    IPM), the working set left untouched, the KKT VJP against finite
-//    differences of the relaxed map, and data gradients equal to those of
-//    the other backends.
+//    IPM), the working set left untouched, the warm relax chain across
+//    data updates (same point as the cold start, dropped when a row turns
+//    hard), the KKT VJP against finite differences of the relaxed map, and
+//    data gradients equal to those of the other backends.
 
 #include <algorithm>
 #include <chrono>
@@ -756,6 +757,69 @@ void RelaxState(std::mt19937& rng) {
         InfNorm(fresh.x - ref.x), "|dx|");
 }
 
+// relax(warm), the default: the next call continues from the previous relaxed
+// point. See the PDAL twin in test_pdal.cc for the regime notes; the iteration
+// margin is slack, the check pins "same point, no blow-up".
+void RelaxWarmChain() {
+  std::printf("relax(warm): chain across data updates\n");
+  const double inf = std::numeric_limits<double>::infinity();
+  std::mt19937 rng(7);
+  QPData qp = problem_gen::InfeasibleEq(rng, 16, 4, 50, 12);
+  VectorXd penalty = VectorXd::Constant(50, 10.0);
+  das::Solver s;
+  s.settings = Backend<das::Solver>::Tight();
+  s.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
+  bool ok = true;
+  double dmax = 0;
+  int warm_iters = 0, cold_iters = 0;
+  for (int tick = 0; tick < 8; ++tick) {
+    if (tick > 0) {  // smooth control-loop-scale drift
+      for (Eigen::Index i = 0; i < qp.q.size(); ++i)
+        qp.q[i] += 1e-3 * std::sin(0.7 * tick + static_cast<double>(i));
+      for (Eigen::Index i = 0; i < qp.h.size(); ++i)
+        qp.h[i] += 1e-3 * std::cos(0.3 * tick + static_cast<double>(i));
+      s.set_q(qp.q);
+      s.set_h(qp.h);
+    }
+    ok = ok && s.solve().converged == 1;
+    const elastiqp::Solution w = s.relax(1e-3, 1e-10, 50);  // warm
+    const elastiqp::Solution c = s.relax(1e-3, 1e-10, 50, /*warm=*/false);
+    ok = ok && w.converged == 1 && c.converged == 1;
+    warm_iters += w.iters;
+    cold_iters += c.iters;
+    dmax = std::max(dmax, InfNorm(w.x - c.x));
+  }
+  std::printf("  warm iters=%d cold iters=%d\n", warm_iters, cold_iters);
+  Check("warm chain lands on the cold-start point",
+        ok && dmax < 1e-7 && warm_iters < cold_iters, dmax, "|dx|");
+
+  // A converged point is its own warm start.
+  const elastiqp::Solution again = s.relax(1e-3, 1e-10, 50);
+  Check("re-relax from the chain: no iterations",
+        again.converged == 1 && again.iters == 0, again.iters, "iters");
+
+  // A saturated row turning hard: the warm solve() re-enters it as active,
+  // and with no slack block to continue from the chain is dropped (same
+  // iterations as an explicit cold start).
+  const int row = 3;
+  const bool was_saturated =
+      s.row_state(row) == das::Solver::RowState::kSaturated;
+  penalty[row] = inf;
+  s.set_penalty(penalty);
+  const elastiqp::Solution tight = s.solve();
+  const elastiqp::Solution hard = s.relax(1e-3, 1e-10, 50);
+  const elastiqp::Solution cold = s.relax(1e-3, 1e-10, 50, /*warm=*/false);
+  const elastiqp::Solution ref = Relaxed<das::Solver>(qp, penalty, 1e-3, 1e-10);
+  const double dh = InfNorm(hard.x - ref.x);
+  Check("saturated row turned hard: warm solve stays finite",
+        was_saturated && tight.converged == 1 && tight.x.allFinite(),
+        tight.iters, "iters");
+  Check("row turned hard: chain dropped, matches a fresh solver",
+        hard.converged == 1 && ref.converged == 1 && hard.iters > 0 &&
+            hard.iters == cold.iters && hard.t[row] == 0.0 && dh < 1e-9,
+        dh, "|dx|");
+}
+
 // Largest entry of |a - b| over every data-gradient block, relative to the
 // largest gradient entry.
 double GradDiff(const elastiqp::DataGrads& a, const elastiqp::DataGrads& b) {
@@ -890,6 +954,7 @@ int main() {
     RelaxCentralPoint(rng);
     RelaxState(rng);
   }
+  RelaxWarmChain();
   Gradients();
   std::printf(test_util::g_all_ok ? "\nAll active-set tests passed.\n"
                                   : "\nFAILURES\n");
