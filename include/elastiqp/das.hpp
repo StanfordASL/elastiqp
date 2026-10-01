@@ -94,9 +94,8 @@ class Solver {
     scaled_valid_ = false;
     eq_infeas_ = 0.0;
 
-    // Every buffer solve() touches is sized here, so solve() and the set_*
-    // updates do not allocate (beyond the scratch Eigen's blocked triangular
-    // solves may take from the heap on large problems).
+    // Preallocate. Note: Eigen's blocked triangular solve may still allocate
+    // on large problems, roughly, once n*(m+p)>16384.
     Qs_.resize(n_, n_);
     Cts_.resize(n_, mp_);
     llt_ = Eigen::LLT<MatrixXd, Eigen::Upper>(n_);
@@ -147,11 +146,11 @@ class Solver {
     tol_.resize(mp_);
     res_.resize(mp_);
     wQx_.resize(n_);
-    sol_.x.resize(n_);
-    sol_.y.resize(m_);
-    sol_.z.resize(p_);
-    sol_.t.resize(p_);
-    sol_.z_t.resize(p_);
+    sol_.x.setZero(n_);
+    sol_.y.setZero(m_);
+    sol_.z.setZero(p_);
+    sol_.t.setZero(p_);
+    sol_.z_t.setZero(p_);
     sol_.status = Status::kUnsolved;
   }
   void setup(const MatrixXd& Q, const VectorXd& q, const MatrixXd& A,
@@ -405,7 +404,8 @@ class Solver {
     changed_.clear();
     for (int i = 0; i < mp_; ++i)
       if (col_dirty_[static_cast<size_t>(i)]) changed_.push_back(i);
-    auto rhs = changed_cols_.leftCols(static_cast<Eigen::Index>(changed_.size()));
+    auto rhs =
+        changed_cols_.leftCols(static_cast<Eigen::Index>(changed_.size()));
     for (size_t j = 0; j < changed_.size(); ++j)
       rhs.col(static_cast<Eigen::Index>(j)) = Cts_.col(changed_[j]);
     llt_.matrixL().solveInPlace(rhs);
@@ -461,7 +461,8 @@ class Solver {
       refresh = drift_ > settings.ruiz_refresh_ratio;
     }
     if (refresh) {
-      xu_ = dx_.cwiseProduct(x_);  // x in the user frame, kept across
+      // x in the user frame, kept across the rescale.
+      xu_ = dx_.cwiseProduct(x_);
       dx_.setOnes();
       dr_.setOnes();
       c_ = 1.0;
@@ -852,7 +853,7 @@ class Solver {
           u_ -= dir_[i] * Mt_.col(W_[static_cast<size_t>(i)]);
         }
         mu_.noalias() = Mt_.transpose() * u_;
-      mu_ -= d_;
+        mu_ -= d_;
       }
       {
         double dual = -0.5 * u_.squaredNorm();

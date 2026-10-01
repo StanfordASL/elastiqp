@@ -11,9 +11,9 @@
 // abort), and everything else (std::vector growth) through a replaced
 // global operator new.
 //
-// On large problems (n ~ 100 with a few hundred rows and up) Eigen's
-// blocked triangular solve can take its scratch from the heap; that is
-// accepted, so the sizes here stay robot-sized.
+// Eigen's blocked triangular solve takes its scratch from the heap once
+// n * (m + p) > 16384, or once n is past roughly 160 (see Solver::setup);
+// that is accepted, so the sizes here stay well below both.
 
 #include <cstdio>
 #include <cstdlib>
@@ -37,13 +37,14 @@ inline void Fail(const char* what, const char* file, int line) {
   ++g_eigen;
   const bool armed = g_armed;
   g_armed = false;
-  Sites()[std::string(what).substr(0, 60) + " @ " + file + ":" + std::to_string(line)]++;
+  Sites()[std::string(what).substr(0, 60) + " @ " + file + ":" +
+          std::to_string(line)]++;
   g_armed = armed;
 }
 }  // namespace alloc_guard
-#define eigen_assert(x)                                              \
-  do {                                                               \
-    if (!(x)) alloc_guard::Fail(#x, __FILE__, __LINE__);             \
+#define eigen_assert(x)                                  \
+  do {                                                   \
+    if (!(x)) alloc_guard::Fail(#x, __FILE__, __LINE__); \
   } while (false)
 
 void* operator new(std::size_t n) {
@@ -92,9 +93,7 @@ struct Run {
 
   explicit Run(const das::Settings& st = {}) { s.settings = st; }
   void Solve() {
-    allocs += Allocations([&] {
-      last = s.solve().status;
-    });
+    allocs += Allocations([&] { last = s.solve().status; });
     solves++;
     solved += last == elastiqp::Status::kSolved;
   }
@@ -205,7 +204,12 @@ void Duplicated(std::mt19937& rng) {
   VectorXd h(60);
   G << base.G, base.G;
   h << base.h, base.h;
-  Run r;
+  // The repair (refactor_working_set) is too rare to reach by problem data
+  // alone. Pivots of the normalized rows are at most 1, so this threshold
+  // takes it at every optimum with more than two working rows.
+  das::Settings st;
+  st.refactor_tol = 1.0;
+  Run r(st);
   r.s.setup(base.Q, base.q, G, h, VectorXd::Constant(60, 5.0));
   r.Solve();
   int refactors = r.s.refactors();
@@ -216,10 +220,7 @@ void Duplicated(std::mt19937& rng) {
     r.Solve();
     refactors += r.s.refactors();
   }
-  // The repair (refactor_working_set) is rare enough that no generator here
-  // reaches it reliably; its count is reported, not required.
-  std::printf("  duplicated rows: %d working-set refactors\n", refactors);
-  r.Report("duplicated rows (dependent working sets)");
+  r.Report("duplicated rows (dependent working sets, repair)", refactors > 0);
 }
 
 void Proximal(std::mt19937& rng) {
@@ -292,7 +293,8 @@ void RuizRefresh(std::mt19937& rng) {
 void ExplicitWarm(std::mt19937& rng) {
   const QPData qp = problem_gen::InfeasibleEq(rng, 20, 4, 40, 4);
   const VectorXd w = VectorXd::Constant(40, 10.0);
-  const elastiqp::Solution ref = das::Solve(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, w);
+  const elastiqp::Solution ref =
+      das::Solve(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, w);
   Run r;
   r.s.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, w);
   r.Update([&] { r.s.set_warm_start(ref.x, ref.y, ref.z); });
