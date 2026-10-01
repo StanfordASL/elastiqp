@@ -299,7 +299,9 @@ NB_MODULE(_core, m) {
         .def_rw("check_eq_consistency", &S::check_eq_consistency)
         .def_rw("progress_tol", &S::progress_tol)
         .def_rw("cycle_tol", &S::cycle_tol)
-        .def_rw("refactor_tol", &S::refactor_tol);
+        .def_rw("refactor_tol", &S::refactor_tol)
+        .def_rw("relax_reg", &S::relax_reg)
+        .def_rw("relax_factor_retries", &S::relax_factor_retries);
 
     using Sv = elastiqp::das::Solver;
     nb::enum_<Sv::RowState>(das, "RowState")
@@ -311,6 +313,7 @@ NB_MODULE(_core, m) {
     auto cls =
         nb::class_<Sv>(das, "Solver", "Dual active-set backend (default)");
     def_common(cls);
+    def_relax(cls, 50);
     cls.def("row_state", &Sv::row_state, nb::arg("i"),
             "RowState of inequality row i")
         .def("proximal", &Sv::proximal, "True if Q is proximally shifted")
@@ -487,7 +490,7 @@ NB_MODULE(_core, m) {
       "method: 'das' (default), 'pdal' or 'ipm'. eps_abs, max_iter (outer "
       "budget) and ruiz override the backend defaults; settings= passes a "
       "full Settings object for that method.\n\n"
-      "For gradients use pdal.Solver or ipm.Solver with relax().";
+      "For gradients use a Solver object with relax().";
 
   m.def(
       "solve",
@@ -542,11 +545,6 @@ NB_MODULE(_core, m) {
          bool ruiz, double target_kappa, const std::string& method) {
         const Method mth = parse_method(method);
         const bool want_relax = target_kappa > 0 && h.size() > 0;
-        if (want_relax && mth == Method::kDAS) {
-          throw std::invalid_argument(
-              "method='das' has no kappa relaxation (not differentiable); "
-              "use method='pdal' or 'ipm' for gradients");
-        }
         Solution sol, rsol;
         // Gradient accuracy is set by the relax residual, so cap it at 1e-6.
         const double rtol = std::min(eps_abs, 1e-6);
@@ -555,7 +553,7 @@ NB_MODULE(_core, m) {
           apply_options(solver.settings, eps_abs, max_iter, ruiz);
           solver.setup(Q, q, A, b, G, h, penalty);
           sol = solver.solve();
-          rsol = sol;
+          rsol = want_relax ? solver.relax(target_kappa, rtol, 50) : sol;
         } else if (mth == Method::kPDAL) {
           elastiqp::pdal::Solver solver;
           apply_options(solver.settings, eps_abs, max_iter, ruiz);

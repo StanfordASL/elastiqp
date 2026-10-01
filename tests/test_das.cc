@@ -21,6 +21,11 @@
 //    same answers as a full refactorization and only those rows re-solved.
 // 5. The pinch/release ticks of test_gap_creep: saturated -> active ->
 //    inactive on a warm working set.
+// 6. relax(kappa), the differentiation point: the same kappa-relaxed central
+//    point as the PDAL and IPM relax (hard rows against a stiff elastic
+//    IPM), the working set left untouched, the KKT VJP against finite
+//    differences of the relaxed map, and data gradients equal to those of
+//    the other backends.
 
 #include <algorithm>
 #include <chrono>
@@ -43,10 +48,12 @@ using drift_traj::Trajectory;
 using Eigen::MatrixXd;
 using Eigen::VectorXd;
 using problem_gen::QPData;
+using test_util::Backend;
 using test_util::Check;
 using test_util::InfNorm;
 using test_util::SolveWith;
 namespace das = elastiqp::das;
+namespace ipm = elastiqp::ipm;
 namespace pdal = elastiqp::pdal;
 
 namespace {
@@ -602,12 +609,288 @@ void GapCreep() {
         rel.z.maxCoeff(), "zmax");
 }
 
+// ---------------------------------------------------------------- part 6
+
+// Tight solve, then relax, with one backend.
+template <class Solver>
+elastiqp::Solution Relaxed(const QPData& qp, const VectorXd& penalty,
+                           double kappa, double tol, int max_iter = 100) {
+  Solver s;
+  s.settings = Backend<Solver>::Tight();
+  s.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
+  const elastiqp::Solution tight = s.solve();
+  return tight.converged == 1 ? s.relax(kappa, tol, max_iter) : tight;
+}
+
+void RelaxCentralPoint(std::mt19937& rng) {
+  std::printf("relax(kappa): the kappa-relaxed central point\n");
+  // These instances are dual degenerate (more tight rows than the working
+  // set holds), so the active-set duals sit on a vertex of the optimal face
+  // and the Newton walk to its analytic center is the long one: ~16
+  // iterations at kappa = 1e-6, 4-5 at the default 1e-3.
+  for (const double kappa : {1e-2, 1e-3, 1e-6}) {
+    for (const bool mixed : {false, true}) {
+      const int p = 60;
+      const QPData qp = problem_gen::InfeasibleEq(rng, 14, 4, p, 15);
+      VectorXd penalty = VectorXd::Constant(p, 10.0);
+      if (mixed)
+        for (int i = 0; i < p; ++i) penalty[i] = (i % 3 == 0) ? 1e4 : 1.0;
+      const elastiqp::Solution rel =
+          Relaxed<das::Solver>(qp, penalty, kappa, 1e-10, 50);
+      // References as tight as the 1e4 penalty's roundoff floor allows.
+      const double ref_tol = mixed ? 1e-10 : 1e-12;
+      const elastiqp::Solution pref =
+          Relaxed<pdal::Solver>(qp, penalty, kappa, ref_tol);
+      const elastiqp::Solution iref =
+          Relaxed<ipm::Solver>(qp, penalty, kappa, ref_tol);
+      const double dx =
+          std::max(InfNorm(rel.x - pref.x), InfNorm(rel.x - iref.x));
+      const double dz =
+          std::max(InfNorm(rel.z - pref.z), InfNorm(rel.z - iref.z)) /
+          std::max(1.0, InfNorm(iref.z));
+      // Complementarity through the reported certificate (s_t = t,
+      // s_ineq = h + t - G x), relative to the dual scale.
+      const VectorXd s_ineq = qp.h + rel.t - qp.G * rel.x;
+      double comp = 0;
+      for (int i = 0; i < p; ++i) {
+        comp = std::max(comp, std::abs(rel.t[i] * rel.z_t[i] - kappa));
+        comp = std::max(comp, std::abs(s_ineq[i] * rel.z[i] - kappa));
+      }
+      comp /= penalty.maxCoeff();
+      char name[96];
+      std::snprintf(name, sizeof(name),
+                    "kappa=%.0e %s: matches pdal and ipm relax (it=%d)", kappa,
+                    mixed ? "w=1/1e4" : "w=10", rel.iters);
+      Check(name,
+            rel.converged == 1 && pref.converged == 1 && iref.converged == 1 &&
+                dx < 1e-7 && dz < 1e-6 && comp < 1e-8 && rel.iters <= 20,
+            std::max(dx, dz), "|dx|,|dz|");
+    }
+  }
+
+  // Hard rows: t = 0 and z_t = inf are kept, the row itself is relaxed
+  // (s.z = kappa). The reference is the IPM with a stiff elastic penalty in
+  // their place, whose slack kappa / (w - z) vanishes with w.
+  {
+    const double inf = std::numeric_limits<double>::infinity();
+    const double kappa = 1e-3;
+    const int p = 30;
+    const QPData qp = problem_gen::Infeasible(rng, 12, p, 3);
+    VectorXd w = VectorXd::Constant(p, 10.0), w_stiff = w;
+    for (int i = 6; i < p; i += 2) {
+      w[i] = inf;
+      w_stiff[i] = 1e7;
+    }
+    const elastiqp::Solution rel =
+        Relaxed<das::Solver>(qp, w, kappa, 1e-10, 50);
+    const elastiqp::Solution iref =
+        Relaxed<ipm::Solver>(qp, w_stiff, kappa, 1e-10);
+    const VectorXd s_ineq = qp.h + rel.t - qp.G * rel.x;
+    bool hard_ok = true;
+    double comp = 0;
+    for (int i = 6; i < p; i += 2) {
+      hard_ok &= rel.t[i] == 0.0 && rel.z_t[i] == inf && s_ineq[i] > 0;
+      comp = std::max(comp, std::abs(s_ineq[i] * rel.z[i] - kappa));
+    }
+    const double dx = InfNorm(rel.x - iref.x);
+    Check("hard rows: matches ipm relax at w=1e7",
+          rel.converged == 1 && iref.converged == 1 && dx < 1e-6, dx, "|dx|");
+    Check("hard rows: t = 0, z_t = inf, s.z = kappa",
+          hard_ok && comp < 1e-8 && std::isfinite(rel.primal_obj), comp,
+          "comp");
+  }
+
+  // Rank-deficient Q (proximal rounds in solve(), none in relax).
+  {
+    QPData qp = problem_gen::Infeasible(rng, 20, 40, 3);
+    const MatrixXd B = problem_gen::Randn(rng, 10, 20);
+    qp.Q = B.transpose() * B;
+    const VectorXd w = VectorXd::Constant(40, 10.0);
+    const elastiqp::Solution rel = Relaxed<das::Solver>(qp, w, 1e-3, 1e-10, 50);
+    const elastiqp::Solution pref = Relaxed<pdal::Solver>(qp, w, 1e-3, 1e-10);
+    const double dx = InfNorm(rel.x - pref.x);
+    Check("rank-deficient Q: matches pdal relax",
+          rel.converged == 1 && pref.converged == 1 && dx < 1e-7, dx, "|dx|");
+  }
+}
+
+void RelaxState(std::mt19937& rng) {
+  std::printf("relax(kappa): solver state\n");
+  const QPData qp = problem_gen::InfeasibleEq(rng, 20, 5, 80, 20);
+  const VectorXd penalty = VectorXd::Constant(80, 10.0);
+  das::Solver s;
+  s.settings = Backend<das::Solver>::Tight();
+  s.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
+  const elastiqp::Solution unsolved = s.relax(1e-3);
+  Check(
+      "relax before solve: unsolved",
+      unsolved.status == elastiqp::Status::kUnsolved && unsolved.converged == 0,
+      static_cast<int>(unsolved.status), "status");
+  const elastiqp::Solution tight = s.solve();
+  const elastiqp::Solution rel = s.relax(1e-3, 1e-10);
+  const double moved = InfNorm(rel.x - tight.x);
+  Check("relax keeps the solve()'s row counts",
+        rel.converged == 1 && moved > 1e-8 && rel.n_active == tight.n_active &&
+            rel.n_saturated == tight.n_saturated,
+        moved, "|dx|");
+  const elastiqp::Solution again = s.solve();
+  const double dx = InfNorm(again.x - tight.x);
+  Check("re-solve after relax: working set untouched",
+        again.converged == 1 && again.iters <= 1 && dx < 1e-12, dx, "|dx|");
+  // relax() reads the solve()'s factors: data newer than the solve is refused.
+  VectorXd q = qp.q;
+  q[0] += 0.1;
+  s.set_q(q);
+  const elastiqp::Solution stale = s.relax(1e-3);
+  Check("relax on data newer than the solve: unsolved",
+        stale.status == elastiqp::Status::kUnsolved && stale.converged == 0,
+        static_cast<int>(stale.status), "status");
+  s.solve();
+  const elastiqp::Solution fresh = s.relax(1e-3, 1e-10);
+  QPData qp2 = qp;
+  qp2.q = q;
+  const elastiqp::Solution ref =
+      Relaxed<das::Solver>(qp2, penalty, 1e-3, 1e-10);
+  Check("relax after a warm re-solve matches a fresh solver",
+        fresh.converged == 1 && InfNorm(fresh.x - ref.x) < 1e-9,
+        InfNorm(fresh.x - ref.x), "|dx|");
+}
+
+// Largest entry of |a - b| over every data-gradient block, relative to the
+// largest gradient entry.
+double GradDiff(const elastiqp::DataGrads& a, const elastiqp::DataGrads& b) {
+  const auto mx = [](const MatrixXd& m) {
+    return m.size() > 0 ? m.cwiseAbs().maxCoeff() : 0.0;
+  };
+  const double diff =
+      std::max({mx(a.Q - b.Q), mx(a.q - b.q), mx(a.A - b.A), mx(a.b - b.b),
+                mx(a.G - b.G), mx(a.h - b.h), mx(a.penalty - b.penalty)});
+  const double scale = std::max({1.0, mx(b.Q), mx(b.q), mx(b.A), mx(b.b),
+                                 mx(b.G), mx(b.h), mx(b.penalty)});
+  return diff / scale;
+}
+
+void Gradients() {
+  std::printf("Gradients at the relaxed point\n");
+  const double inf = std::numeric_limits<double>::infinity();
+  const double kappa = 1e-3;
+  // Pinned instances: the finite-difference step balances truncation
+  // (~eps^2 / kappa^2) against relax-tolerance noise (~tol / eps), which
+  // is sensitive to the instance's conditioning (see test_pdal.cc).
+  std::mt19937 rng(14);
+  for (int cell = 0; cell < 3; ++cell) {
+    const bool with_eq = cell == 1, with_hard = cell == 2;
+    const int n = 8, m = with_eq ? 3 : 0, p = 20;
+    const QPData qp = with_eq ? problem_gen::RandomFeasible(rng, n, m, p)
+                              : problem_gen::Infeasible(rng, n, p, p / 4);
+    VectorXd pen = VectorXd::Constant(p, 10.0);
+    if (with_hard)
+      for (int i = 10; i < p; i += 3) pen[i] = inf;
+
+    elastiqp::Cotangents ct;
+    ct.x = problem_gen::Randn(rng, n, 1);
+    ct.t = problem_gen::Randn(rng, p, 1);
+    ct.y = problem_gen::Randn(rng, m, 1);
+    ct.z_t = problem_gen::Randn(rng, p, 1);
+    ct.z = problem_gen::Randn(rng, p, 1);
+
+    // Linear loss on the relaxed certificate (z_t = inf on hard rows is
+    // left out), so the VJP and the finite difference see the same map.
+    const auto loss = [&](const QPData& d, const VectorXd& w,
+                          elastiqp::Solution* out) {
+      const elastiqp::Solution r =
+          Relaxed<das::Solver>(d, w, kappa, 1e-11, 100);
+      if (r.converged != 1) return std::numeric_limits<double>::quiet_NaN();
+      if (out != nullptr) *out = r;
+      double L = ct.x.dot(r.x) + ct.t.dot(r.t) + ct.z.dot(r.z);
+      for (int i = 0; i < p; ++i)
+        if (std::isfinite(w[i])) L += ct.z_t[i] * r.z_t[i];
+      if (m > 0) L += ct.y.dot(r.y);
+      return L;
+    };
+
+    elastiqp::Solution rsol;
+    loss(qp, pen, &rsol);
+    const elastiqp::DataGrads g =
+        elastiqp::Vjp(qp.Q, qp.A, qp.G, qp.h, rsol, ct);
+
+    const double eps = 3e-6;
+    double worst = 0.0;
+    for (int dir = 0; dir < 3; ++dir) {
+      MatrixXd dQ = problem_gen::Randn(rng, n, n);
+      dQ = 0.5 * (dQ + dQ.transpose());
+      const MatrixXd dA = problem_gen::Randn(rng, m, n);
+      const MatrixXd dG = problem_gen::Randn(rng, p, n);
+      const VectorXd dq = problem_gen::Randn(rng, n, 1);
+      const VectorXd db = problem_gen::Randn(rng, m, 1);
+      const VectorXd dh = problem_gen::Randn(rng, p, 1);
+      const VectorXd dw = problem_gen::Randn(rng, p, 1);
+      double l[2];
+      for (int side = 0; side < 2; ++side) {
+        const double e = side == 0 ? eps : -eps;
+        QPData d = qp;
+        d.Q += e * dQ;
+        d.q += e * dq;
+        d.A += e * dA;
+        d.b += e * db;
+        d.G += e * dG;
+        d.h += e * dh;
+        l[side] = loss(d, pen + e * dw, nullptr);
+      }
+      const double fd = (l[0] - l[1]) / (2.0 * eps);
+      double an = (g.Q.array() * dQ.array()).sum() + g.q.dot(dq) +
+                  (g.G.array() * dG.array()).sum() + g.h.dot(dh) +
+                  g.penalty.dot(dw);
+      if (m > 0) an += (g.A.array() * dA.array()).sum() + g.b.dot(db);
+      const double err = std::abs(fd - an) / std::max(1.0, std::abs(fd));
+      worst = std::isfinite(err) ? std::max(worst, err) : err;
+      if (!std::isfinite(err)) break;
+    }
+    const char* label = with_hard ? "hard rows"
+                        : with_eq ? "feasible+eq"
+                                  : "infeasible";
+    char name[96];
+    std::snprintf(name, sizeof(name), "%s: KktVjp vs finite differences",
+                  label);
+    Check(name, std::isfinite(worst) && worst < 1e-4, worst, "relerr");
+    if (with_hard) {
+      double hard_pen = 0.0;
+      for (int i = 10; i < p; i += 3)
+        hard_pen = std::max(hard_pen, std::abs(g.penalty[i]));
+      Check("hard rows: finite gradients, zero d/d penalty",
+            g.Q.allFinite() && g.q.allFinite() && g.G.allFinite() &&
+                g.h.allFinite() && g.penalty.allFinite() && hard_pen == 0.0,
+            hard_pen, "|g_w|");
+      continue;
+    }
+    // Same relaxed point, same VJP: every data gradient must agree with the
+    // differentiable backends'.
+    for (int ref = 0; ref < 2; ++ref) {
+      const elastiqp::Solution other =
+          ref == 0 ? Relaxed<pdal::Solver>(qp, pen, kappa, 1e-11)
+                   : Relaxed<ipm::Solver>(qp, pen, kappa, 1e-11);
+      const elastiqp::DataGrads go =
+          elastiqp::Vjp(qp.Q, qp.A, qp.G, qp.h, other, ct);
+      const double diff = GradDiff(g, go);
+      std::snprintf(name, sizeof(name), "%s: gradients match %s", label,
+                    ref == 0 ? "pdal" : "ipm");
+      Check(name, other.converged == 1 && diff < 1e-6, diff, "rel");
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
   RandomSuite();
   CreepSuite();
   GapCreep();
+  {
+    std::mt19937 rng(42);
+    RelaxCentralPoint(rng);
+    RelaxState(rng);
+  }
+  Gradients();
   std::printf(test_util::g_all_ok ? "\nAll active-set tests passed.\n"
                                   : "\nFAILURES\n");
   return test_util::g_all_ok ? 0 : 1;

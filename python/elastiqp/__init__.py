@@ -79,8 +79,8 @@ def Solver(method="das"):
     method is "das" (dual active set, the default), "pdal" (primal-dual
     augmented Lagrangian) or "ipm" (interior point); the returned object is
     an elastiqp.das.Solver / pdal.Solver / ipm.Solver. All three share
-    setup(), update(), set_*(), solve() and the Solution type; relax() (the
-    differentiation point) exists on pdal.Solver and ipm.Solver only.
+    setup(), update(), set_*(), solve(), relax() (the differentiation point)
+    and the Solution type.
     """
     return _lookup(_BACKENDS, method).Solver()
 

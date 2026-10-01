@@ -3,7 +3,7 @@
 Supported:
 - Different methods (das, pdal, ipm)
 - torch.compile, functorch transforms
-- backward/grad (currently, only for ipm and pdal)
+- backward/grad
 - batch dimensions
 
 Notes:
@@ -44,10 +44,6 @@ class Result(NamedTuple):
 _NOT_DIFFERENTIABLE_MSG = (
     "elastiqp.torch.solve is not differentiable with target_kappa=0: "
     "Set target_kappa > 0  (e.g. 1e-3) for smoothed gradients"
-)
-_DAS_NOT_DIFFERENTIABLE_MSG = (
-    "elastiqp.torch.solve is not differentiable with method='das': "
-    "See method='ipm' or 'pdal' instead"
 )
 
 
@@ -275,8 +271,6 @@ def _(Q, A, G, h, xr, tr, yr, z_t_r, z_r, ct_x, ct_t, ct_y, ct_z_t, ct_z):
 
 
 def _backward(ctx, grads, vjp):
-    if ctx.method == "das":
-        raise RuntimeError(_DAS_NOT_DIFFERENTIABLE_MSG)
     if not ctx.target_kappa > 0:
         raise RuntimeError(_NOT_DIFFERENTIABLE_MSG)
     saved = ctx.saved_tensors
@@ -431,12 +425,11 @@ def solve(
     problem per entry; the batch shapes of the arguments broadcast against
     each other, so a single Q may be shared across a batch of q.
 
-    Every call here is a cold solve. With method "pdal" or "ipm" it is
-    differentiable in reverse mode w.r.t. all tensor arguments when
-    target_kappa > 0 (the default); a solve with method="das" or with an
-    explicit target_kappa=0 raises when some input requires grad (the
-    active-set backend has no relaxation; the certificate sits exactly on
-    the constraint boundary, where the exact KKT derivative is undefined). `ruiz=True` enables Ruiz equilibration for badly-scaled
+    Every call here is a cold solve. It is differentiable in reverse mode
+    w.r.t. all tensor arguments, with every backend, when target_kappa > 0
+    (the default); a solve with an explicit target_kappa=0 raises when some
+    input requires grad (the tight certificate sits exactly on the
+    constraint boundary, where the exact KKT derivative is undefined). `ruiz=True` enables Ruiz equilibration for badly-scaled
     data; the solver terminates on and returns unscaled quantities, so it
     does not affect gradients.
 
@@ -499,8 +492,6 @@ def solve(
 
     args = (Q, q, A, b, G, h, penalty)
     differentiating = torch.is_grad_enabled() and any(_requires_grad(x) for x in args)
-    if differentiating and method == "das":
-        raise TypeError(_DAS_NOT_DIFFERENTIABLE_MSG)
     if differentiating and not target_kappa > 0:
         raise TypeError(_NOT_DIFFERENTIABLE_MSG)
     # Tight solution only when not differentiating: no relaxation runs.

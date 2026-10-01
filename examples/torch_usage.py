@@ -57,9 +57,6 @@ def main():
     print("\nAs in solvers like qpax, we relax the solution to some kappa > 0")
     print("smoothed value for well-conditioned gradients")
 
-    print("\nNote: Currently, differentiation is only supported in the `ipm`")
-    print("and `pdal` backends")
-
     def loss(q_, kappa=1e-6):
         sol = elastiqp.torch.solve(
             Q,

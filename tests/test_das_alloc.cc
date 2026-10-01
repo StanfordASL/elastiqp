@@ -4,7 +4,8 @@
 // the solver's code paths (cold / warm, full refactorization / row update /
 // vectors only, Ruiz on / off / refresh, saturated rows, hard rows and
 // infeasibility, dependent and inconsistent equalities, dependent working
-// sets, proximal rounds, explicit warm start, no constraints).
+// sets, proximal rounds, explicit warm start, no constraints). relax() sizes
+// its workspace on its first call and is allocation-free after that.
 //
 // Eigen heap allocations are caught through EIGEN_RUNTIME_NO_MALLOC, whose
 // check goes through eigen_assert (redefined here to count instead of
@@ -304,6 +305,30 @@ void ExplicitWarm(std::mt19937& rng) {
   r.Report("explicit warm start");
 }
 
+// relax() sizes its workspace on the first call after setup(); later calls
+// (and the solves in between) are allocation-free.
+void Relax(std::mt19937& rng) {
+  const double inf = std::numeric_limits<double>::infinity();
+  QPData qp = problem_gen::InfeasibleEq(rng, 20, 4, 50, 4);
+  VectorXd w = VectorXd::Constant(50, 10.0);
+  w[10] = inf;
+  Run r;
+  r.s.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, w);
+  r.Solve();
+  bool relaxed = r.s.relax(1e-3).converged == 1;  // sizes the workspace
+  for (int tick = 0; tick < 10; ++tick) {
+    Perturb(rng, qp.q, 0.05);
+    Perturb(rng, qp.h, 0.05);
+    r.Update([&] {
+      r.s.set_q(qp.q);
+      r.s.set_h(qp.h);
+    });
+    r.Solve();
+    r.Update([&] { relaxed &= r.s.relax(1e-3).converged == 1; });
+  }
+  r.Report("relax after its first call", relaxed);
+}
+
 void Unconstrained(std::mt19937& rng) {
   const QPData qp = problem_gen::Feasible(rng, 8, 0);
   Run r;
@@ -326,6 +351,7 @@ int main() {
   Proximal(rng);
   RuizRefresh(rng);
   ExplicitWarm(rng);
+  Relax(rng);
   Unconstrained(rng);
   for (const auto& [site, k] : alloc_guard::Sites())
     std::printf("  [eigen_assert] %6ld x %s\n", k, site.c_str());

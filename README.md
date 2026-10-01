@@ -125,7 +125,7 @@ sol = solver.solve()
 ### JAX / PyTorch
 
 > [!WARNING]  
-> Differentiability support is still in beta, and is not implemented in the default (active set) backend
+> Differentiability support is still in beta
 
 ```python
 import jax
@@ -135,9 +135,9 @@ import elastiqp.jax
 # Same API as Python, just with elastiqp.jax
 sol = elastiqp.jax.solve(Q, q, G, h, penalty, A=A, b=b)
 
-# Compatible with jax.grad and vjp on the pdal / ipm backends
+# Compatible with jax.grad and vjp
 def loss(q_):
-    sol = elastiqp.jax.solve(Q, q_, G, h, penalty, A=A, b=b, method="ipm")
+    sol = elastiqp.jax.solve(Q, q_, G, h, penalty, A=A, b=b)
     return jnp.sum(sol.x**2)
 
 grad_q = jax.grad(loss)(q)

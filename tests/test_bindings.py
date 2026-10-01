@@ -523,6 +523,20 @@ def main():
         and a1.n_saturated > 0,
         f"active={a1.n_active} saturated={a1.n_saturated}",
     )
+    ars = asol.relax(kappa, 1e-10)
+    comp = relaxed_comp(ars)
+    rdx = np.abs(ars.x - rsol.x).max()
+    check(
+        "das relax reaches the same relaxed point as pdal",
+        ars.converged == 1 and np.abs(comp - kappa).max() < 1e-8 and rdx < 1e-7,
+        f"comp_err={np.abs(comp - kappa).max():.1e} |dx|={rdx:.1e}",
+    )
+    a3 = asol.solve()
+    check(
+        "relax leaves the working set untouched",
+        a3.converged == 1 and a3.iters <= 1 and np.abs(a3.x - a1.x).max() < 1e-12,
+        f"iters={a3.iters}",
+    )
     asol.update(q=qp_ + 1e-3)
     a2 = asol.solve()
     check(

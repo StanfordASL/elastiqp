@@ -539,7 +539,7 @@ def main():
     dpi = float(jnp.abs(g_pd - g_ip).max())
     check("pdal and ipm smoothed d/dq agree", dpi < 1e-5, f"|dg|={dpi:.1e}")
 
-    print("Active-set backend: forward only")
+    print("Active-set backend: forward and gradients")
     a_sol = elastiqp.jax.solve(Qx, qx, Gx, hx, 10.0, A=Ax, b=bx, method="das")
     a_ref = elastiqp.solve(Qx, qx, Gx, hx, 10.0, A=Ax, b=bx, method="das")
     da = float(jnp.abs(a_sol.x - jnp.asarray(a_ref.x)).max())
@@ -552,19 +552,62 @@ def main():
         lambda q_: elastiqp.jax.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx, method="das").x
     )(qx)
     check("as under jit", float(jnp.abs(a_jit - a_sol.x).max()) == 0.0, "")
-    try:
+    # Gradients: das relaxes to the same kappa point as pdal / ipm and
+    # shares their backward pass, so every input gradient must agree.
+    def loss_das(Q_, q_, A_, b_, G_, h_, penalty_):
+        s = elastiqp.jax.solve(
+            Q_,
+            q_,
+            G_,
+            h_,
+            penalty_,
+            A=A_,
+            b=b_,
+            method="das",
+            eps_abs=1e-9,
+            target_kappa=kappa,
+        )
+        return w_loss @ s.x + w_t @ s.t
+
+    g_das = jax.jit(jax.grad(loss_das, argnums=tuple(range(7))))(*args)
+    dg = max(float(jnp.abs(a - b_).max()) for a, b_ in zip(g_das, grads))
+    check("das gradients (all inputs) match pdal", dg < 1e-6, f"|dg|={dg:.1e}")
+    dgi = float(jnp.abs(g_das[1] - g_ip).max())
+    check("das smoothed d/dq matches ipm", dgi < 1e-5, f"|dg|={dgi:.1e}")
+    qs_d = args[1] + 0.05 * jnp.asarray(rngd.standard_normal((3, 12)))
+    g_vd = jax.vmap(jax.grad(lambda q_: loss_das(args[0], q_, *args[2:])))(qs_d)
+    g_vp = jax.vmap(jax.grad(lambda q_: loss_smooth(args[0], q_, *args[2:])))(qs_d)
+    dgv = float(jnp.abs(g_vd - g_vp).max())
+    check("das vmap(grad) matches pdal", dgv < 1e-6, f"|dg|={dgv:.1e}")
+    # The default call (method="das", target_kappa=1e-3) is differentiable.
+    g_def, g_ref = (
         jax.grad(
             lambda q_: jnp.sum(
-                elastiqp.jax.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx, method="das").x
+                elastiqp.jax.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx, **kw).x
             )
         )(qx)
-        msg = None
-    except TypeError as e:
-        msg = str(e)
+        for kw in ({}, {"method": "pdal", "eps_abs": 1e-9})
+    )
+    dgd = float(jnp.abs(g_def - g_ref).max())
     check(
-        "grad with method='das' raises, pointing at pdal/ipm",
-        msg is not None and "pdal" in msg and "not differentiable" in msg,
-        "",
+        "grad with the default method and target_kappa",
+        bool(jnp.all(jnp.isfinite(g_def))) and dgd < 1e-4,
+        f"|dg|={dgd:.1e}",
+    )
+    # Hard rows (penalty = inf, das only): finite gradients, none w.r.t. the
+    # hard row's penalty, close to a stiff elastic penalty in its place.
+    pen_hard = args[6].at[5].set(jnp.inf)
+    g_hard = jax.grad(loss_das, argnums=tuple(range(7)))(*args[:6], pen_hard)
+    g_stiff = jax.grad(loss_das, argnums=tuple(range(7)))(
+        *args[:6], args[6].at[5].set(1e7)
+    )
+    dgh = max(float(jnp.abs(a - b_).max()) for a, b_ in zip(g_hard[:6], g_stiff[:6]))
+    check(
+        "hard row: finite gradients, zero d/dpenalty, match a stiff row",
+        all(bool(jnp.all(jnp.isfinite(g))) for g in g_hard)
+        and float(g_hard[6][5]) == 0.0
+        and dgh < 1e-5,
+        f"|dg|={dgh:.1e}",
     )
 
     print("Explicit warm start: drifting sequence, every backend")

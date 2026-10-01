@@ -8,10 +8,9 @@
 //
 // method: 0 = das, 1 = pdal, 2 = ipm. max_iter is the backend's outer budget.
 // The *r block is the kappa-relaxed point the Python wrappers differentiate
-// at; it copies the tight solution when target_kappa <= 0, and das cannot
-// relax. info = [converged, iters, relax_converged], without the last entry
-// for the warm handler. A has 0 rows and b 0 entries when there are no
-// equalities.
+// at; it copies the tight solution when target_kappa <= 0. info = [converged,
+// iters, relax_converged], without the last entry for the warm handler. A has 0
+// rows and b 0 entries when there are no equalities.
 
 #include <algorithm>
 #include <cstdint>
@@ -81,13 +80,9 @@ void run_solver(double eps_abs, int64_t max_iter, int64_t ruiz,
   }
   sol = solver.solve();
   // Gradient accuracy is set by the relax residual, so cap it at 1e-6.
-  if constexpr (std::is_same_v<SolverT, elastiqp::das::Solver>) {
-    rsol = sol;
-  } else {
-    rsol = (target_kappa > 0 && p > 0)
-               ? solver.relax(target_kappa, std::min(eps_abs, 1e-6), 50)
-               : sol;
-  }
+  rsol = (target_kappa > 0 && p > 0)
+             ? solver.relax(target_kappa, std::min(eps_abs, 1e-6), 50)
+             : sol;
 }
 
 ffi::Error dispatch(int64_t method, double eps_abs, int64_t max_iter,
@@ -99,11 +94,6 @@ ffi::Error dispatch(int64_t method, double eps_abs, int64_t max_iter,
                     elastiqp::Solution& rsol) {
   switch (method) {
     case 0:
-      if (target_kappa > 0 && p > 0) {
-        return ffi::Error(ffi::ErrorCode::kInvalidArgument,
-                          "method='das' has no kappa relaxation (not "
-                          "differentiable); use method='pdal' or 'ipm'");
-      }
       run_solver<elastiqp::das::Solver>(eps_abs, max_iter, ruiz, target_kappa,
                                         n, m, p, Q, q, A, b, G, h, penalty, x0,
                                         y0, z0, sol, rsol);

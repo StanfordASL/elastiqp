@@ -3,7 +3,7 @@
 Supported:
 - Different methods (das, pdal, ipm)
 - jit, vmap, scan
-- grad (currently, only for ipm and pdal)
+- grad
 
 Notes:
 - vmap is sequential mode
@@ -254,7 +254,8 @@ def _kkt_bwd(res, ct):
     E = D - z * t / z_t
 
     # Eliminating the t, z_t, z rows reduces the adjoint system to (x, y).
-    rt = -z_t * z_tb + t * tb
+    # Hard rows (penalty = inf: t = 0, z_t = inf) have no t block.
+    rt = jnp.where(jnp.isfinite(z_t), -z_t * z_tb + t * tb, 0.0)
     rh = z * zb + z * rt / z_t
     rhs_x = xb - mv(Gt, rh / E)
 
@@ -330,11 +331,6 @@ def _solve_fwd(
     target_kappa,
     method,
 ):
-    if method == "das":
-        raise TypeError(
-            "elastiqp.jax.solve is not differentiable with method='das': "
-            "See method='ipm' or 'pdal' instead"
-        )
     if not target_kappa > 0:
         raise TypeError(
             "elastiqp.jax.solve is not differentiable with target_kappa=0: "

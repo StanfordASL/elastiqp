@@ -2,6 +2,7 @@
 
 #include <Eigen/Core>
 #include <Eigen/LU>
+#include <cmath>
 
 #include "elastiqp/common.hpp"
 
@@ -21,7 +22,8 @@ struct DataGrads {
 // Reverse-mode derivative of the QP solution map via the implicit function
 // theorem. Solves one (n+m) reduced KKT system per call; setup() preallocates.
 // Evaluate at a relax()ed solution (z_t > 0, so the divisions are safe) with
-// data in the user frame. Mirrors _kkt_bwd in python/elastiqp/jax.py.
+// data in the user frame; hard rows (z_t = inf) get a zero penalty gradient.
+// Mirrors _kkt_bwd in python/elastiqp/jax.py.
 class KktVjp {
  public:
   void setup(Eigen::Index n, Eigen::Index m, Eigen::Index p) {
@@ -68,6 +70,10 @@ class KktVjp {
     rt_.setZero();
     if (ct.z_t.size() > 0) rt_ -= zt.cwiseProduct(ct.z_t);
     if (ct.t.size() > 0) rt_ += t.cwiseProduct(ct.t);
+    // Hard rows (penalty = inf: t = 0, z_t = inf) have no t block.
+    for (Eigen::Index i = 0; i < p_; ++i) {
+      if (!std::isfinite(zt[i])) rt_[i] = 0.0;
+    }
     rh_ = z.cwiseProduct(rt_).cwiseQuotient(zt);
     if (ct.z.size() > 0) rh_ += z.cwiseProduct(ct.z);
 

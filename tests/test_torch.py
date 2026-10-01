@@ -491,7 +491,7 @@ def main():
     dpi = maxabs(g_ipm - grads[1])
     check("pdal and ipm smoothed d/dq agree", dpi < 1e-5, f"|dg|={dpi:.1e}")
 
-    print("Active-set backend: forward only")
+    print("Active-set backend: forward and gradients")
     a_sol = elastiqp.torch.solve(Qx, qx, Gx, hx, 10.0, A=Ax, b=bx, method="das")
     a_ref = elastiqp.solve(Qx, qx, Gx, hx, 10.0, A=Ax, b=bx, method="das")
     check(
@@ -508,16 +508,49 @@ def main():
         tuple(a_b.x.shape) == (3, 14) and maxabs(a_b.x[1] - a_sol.x) == 0.0,
         "",
     )
-    try:
+    # Gradients: das relaxes to the same kappa point as pdal / ipm and
+    # shares their backward pass, so every input gradient must agree.
+    def grads_of(base, **kw):
+        lv = tuple(a.clone().requires_grad_(True) for a in base)
+        loss_smooth(*lv, **kw).backward()
+        return tuple(l.grad for l in lv)
+
+    g_das = grads_of(args, method="das")
+    dg = max(maxabs(a - b_) for a, b_ in zip(g_das, grads))
+    check("das gradients (all inputs) match pdal", dg < 1e-6, f"|dg|={dg:.1e}")
+    dgi = maxabs(g_das[1] - g_ipm)
+    check("das smoothed d/dq matches ipm", dgi < 1e-5, f"|dg|={dgi:.1e}")
+    qs_d = (args[1] + 0.05 * T(rngd.standard_normal((3, 12)))).requires_grad_(True)
+    loss_smooth(args[0], qs_d, *args[2:], method="das").sum().backward()
+    g_bp = torch.stack([g_q(kappa, base=(args[0], q_i) + args[2:]) for q_i in qs_d.detach()])
+    dgb = maxabs(qs_d.grad - g_bp)
+    check("das batched backward matches pdal", dgb < 1e-6, f"|dg|={dgb:.1e}")
+    # The default call (method="das", target_kappa=1e-3) is differentiable.
+    g_def = []
+    for kw in ({}, {"method": "pdal", "eps_abs": 1e-9}):
         q_ = T(qx).requires_grad_(True)
-        elastiqp.torch.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx, method="das")
-        msg = None
-    except TypeError as e:
-        msg = str(e)
+        elastiqp.torch.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx, **kw).x.sum().backward()
+        g_def.append(q_.grad)
+    dgd = maxabs(g_def[0] - g_def[1])
     check(
-        "grad with method='das' raises, pointing at pdal/ipm",
-        msg is not None and "pdal" in msg and "not differentiable" in msg,
-        "",
+        "grad with the default method and target_kappa",
+        bool(torch.isfinite(g_def[0]).all()) and dgd < 1e-4,
+        f"|dg|={dgd:.1e}",
+    )
+    # Hard rows (penalty = inf, das only): finite gradients, none w.r.t. the
+    # hard row's penalty, close to a stiff elastic penalty in its place.
+    pen_hard, pen_stiff = args[6].clone(), args[6].clone()
+    pen_hard[5] = float("inf")
+    pen_stiff[5] = 1e7
+    g_hard = grads_of(args[:6] + (pen_hard,), method="das")
+    g_stiff = grads_of(args[:6] + (pen_stiff,), method="das")
+    dgh = max(maxabs(a - b_) for a, b_ in zip(g_hard[:6], g_stiff[:6]))
+    check(
+        "hard row: finite gradients, zero d/dpenalty, match a stiff row",
+        all(bool(torch.isfinite(g).all()) for g in g_hard)
+        and float(g_hard[6][5]) == 0.0
+        and dgh < 1e-5,
+        f"|dg|={dgh:.1e}",
     )
 
     g_rz = g_q(kappa, ruiz=True)

@@ -55,6 +55,10 @@ struct Settings {
   // At optimality, refactor once if the smallest pivot is below this.
   double refactor_tol = 1e-9;
 
+  // relax(): Newton regularization, and x100 retries on a failed factorization.
+  double relax_reg = 1e-9;
+  int relax_factor_retries = 10;
+
   double prox_tol() const { return eta_prox > 0 ? eta_prox : eps_abs; }
 };
 
@@ -152,6 +156,7 @@ class Solver {
     sol_.t.setZero(p_);
     sol_.z_t.setZero(p_);
     sol_.status = Status::kUnsolved;
+    rw_.ready = false;
   }
   void setup(const MatrixXd& Q, const VectorXd& q, const MatrixXd& A,
              const VectorXd& b, const MatrixXd& G, const VectorXd& h,
@@ -330,7 +335,299 @@ class Solver {
     return finish(st);
   }
 
+  // Moves the solve() result to the kappa-relaxed central point (s.z = kappa
+  // on both slack blocks; hard rows keep t = 0), the differentiation point read
+  // by kkt_vjp.hpp. Newton on the smoothed KKT system, seeded from the working
+  // set. Needs a solve() on the current data; leaves the working set and warm
+  // start untouched. The first call after setup() allocates its workspace.
+  const Solution& relax(double kappa, double tol = 1e-6, int max_iter = 50) {
+    if (p_ == 0 || kappa <= 0.0) return sol_;
+    bool stale = Q_dirty_ || penalty_dirty_ || rhs_dirty_;
+    for (char c : col_dirty_) stale |= c != 0;
+    if (stale && have_solution_) {
+      sol_.status = Status::kUnsolved;
+      sol_.converged = 0;
+    }
+    if (stale || !have_solution_) return sol_;
+    if (!rw_.ready) relax_alloc();
+    RelaxWork& w = rw_;
+    const double kappa_s = c_ * kappa;
+    const auto Gt = Cts_.rightCols(p_);
+    const auto At = Cts_.leftCols(m_);
+    relax_seed();
+    if (m_ > 0) {
+      w.AtA.setZero();
+      w.AtA.selfadjointView<Eigen::Lower>().rankUpdate(At);
+    }
+
+    double rho = settings.relax_reg;
+    double delta = settings.relax_reg;
+    int iter = 0;
+    Status status = Status::kMaxIter;
+    double res = relax_residual(kappa_s);
+    while (true) {
+      if (!std::isfinite(res)) {
+        status = Status::kNumerics;
+        break;
+      }
+      if (res < tol) {
+        status = Status::kSolved;
+        break;
+      }
+      if (iter >= max_iter) break;
+      iter++;
+
+      // Eliminate (t, v_t, v_in) onto x; see relax_factor.
+      for (int i = 0; i < p_; ++i) {
+        w.d_in[i] = w.z_in[i] / w.s_in[i];
+        w.d_t[i] = w.hard[static_cast<size_t>(i)] ? 0.0 : w.z_t[i] / w.s_t[i];
+      }
+      bool ok = relax_factor(rho, delta);
+      for (int retries = 0; !ok && retries < settings.relax_factor_retries;
+           ++retries) {
+        rho *= 100;
+        delta *= 100;
+        ok = relax_factor(rho, delta);
+      }
+      if (!ok) {
+        status = Status::kNumerics;
+        break;
+      }
+
+      for (int i = 0; i < p_; ++i) {
+        if (w.hard[static_cast<size_t>(i)]) {
+          w.w[i] = 0.0;
+          w.pv[i] = w.d_in[i] * w.f5[i];
+        } else {
+          w.w[i] = w.d_t[i] * w.f4[i] + w.d_in[i] * w.f5[i] - w.f2[i];
+          w.pv[i] = w.d_in[i] * (w.f5[i] - w.einv[i] * w.w[i]);
+        }
+      }
+      w.dx = -w.f1;
+      w.dx.noalias() -= Gt * w.pv;
+      if (m_ > 0) w.dx.noalias() -= (1.0 / delta) * (At * w.f3);
+      w.llt.solveInPlace(w.dx);
+      w.Gdx.noalias() = Gt.transpose() * w.dx;
+      for (int i = 0; i < p_; ++i) {
+        const bool hard = w.hard[static_cast<size_t>(i)];
+        w.dt[i] = w.einv[i] * (w.d_in[i] * w.Gdx[i] + w.w[i]);
+        w.dv_t[i] =
+            hard ? 0.0
+                 : (w.f4[i] - w.dt[i]) / retraction_dcomp(w.v_t[i], kappa_s);
+        w.dv_in[i] = (w.f5[i] + w.Gdx[i] - w.dt[i]) /
+                     retraction_dcomp(w.v_in[i], kappa_s);
+      }
+      if (m_ > 0) {
+        w.dy.noalias() = At.transpose() * w.dx;
+        w.dy += w.f3;
+        w.dy /= delta;
+      }
+
+      // Backtrack on the 2-norm merit.
+      const double merit_prev = w.merit;
+      double alpha = 1.0;
+      relax_step(alpha);
+      res = relax_residual(kappa_s);
+      for (int bt = 0;
+           bt < 12 && !(std::isfinite(w.merit) && w.merit <= merit_prev);
+           ++bt) {
+        alpha *= 0.5;
+        relax_step(-alpha);
+        res = relax_residual(kappa_s);
+      }
+    }
+    relax_finish(status, iter);
+    return sol_;
+  }
+
  private:
+  // relax() workspace, in the scaled frame.
+  struct RelaxWork {
+    bool ready = false;
+    std::vector<char> hard;  // penalty = inf: no elastic slack
+    VectorXd x, t, y, v_t, v_in;
+    VectorXd z_t, z_in, s_t, s_in;
+    VectorXd f1, f2, f3, f4, f5;
+    VectorXd d_t, d_in, einv, lam, w, pv, Gx, Gdx;
+    VectorXd dx, dt, dy, dv_t, dv_in;
+    MatrixXd K, GS, AtA;
+    Eigen::LLT<MatrixXd, Eigen::Lower> llt;
+    double primal_res = 0.0, dual_res = 0.0, merit = 0.0;
+  };
+
+  void relax_alloc() {
+    RelaxWork& w = rw_;
+    w.hard.resize(static_cast<size_t>(p_));
+    w.x.resize(n_);
+    w.y.resize(m_);
+    for (VectorXd* v :
+         {&w.t,  &w.v_t, &w.v_in, &w.z_t, &w.z_in, &w.s_t,  &w.s_in,
+          &w.f2, &w.f4,  &w.f5,   &w.d_t, &w.d_in, &w.einv, &w.lam,
+          &w.w,  &w.pv,  &w.Gx,   &w.Gdx, &w.dt,   &w.dv_t, &w.dv_in})
+      v->setZero(p_);
+    w.f1.resize(n_);
+    w.f3.resize(m_);
+    w.dx.resize(n_);
+    w.dy.resize(m_);
+    w.K.resize(n_, n_);
+    w.GS.resize(n_, p_);
+    w.AtA.resize(n_, n_);
+    w.llt = Eigen::LLT<MatrixXd, Eigen::Lower>(n_);
+    w.ready = true;
+  }
+
+  // Smoothed complementarity: retraction(v) * retraction(-v) = kappa.
+  static double retraction(double v, double kappa) {
+    const double r = std::sqrt(v * v + 4.0 * kappa);
+    return v >= 0.0 ? 0.5 * (v + r) : 2.0 * kappa / (r - v);
+  }
+  // 1 - retraction'(v).
+  static double retraction_dcomp(double v, double kappa) {
+    const double r = std::sqrt(v * v + 4.0 * kappa);
+    const double small = 2.0 * kappa / (r * (r + std::abs(v)));
+    return v >= 0.0 ? small : 1.0 - small;
+  }
+
+  // Retraction coordinates v = z - s of the solve() point, duals read off the
+  // row states.
+  void relax_seed() {
+    RelaxWork& w = rw_;
+    w.x = x_;
+    for (int i = 0; i < m_; ++i)
+      w.y[i] = state_[static_cast<size_t>(i)] == RowState::kEquality
+                   ? lam_full_[i] * scale_[i]
+                   : 0.0;
+    w.Gx.noalias() = Cts_.rightCols(p_).transpose() * x_;
+    for (int i = 0; i < p_; ++i) {
+      const int row = m_ + i;
+      const double r = w.Gx[i] - rhss_[row];
+      const double pen = ws_[i];
+      const bool hard = !std::isfinite(pen);
+      w.hard[static_cast<size_t>(i)] = hard;
+      double z = 0.0;
+      if (state_[static_cast<size_t>(row)] == RowState::kSaturated)
+        z = pen;
+      else if (state_[static_cast<size_t>(row)] == RowState::kActive)
+        z = std::min(std::max(lam_full_[row] * scale_[row], 0.0), pen);
+      const double t = hard ? 0.0 : std::max(r, 0.0);
+      w.t[i] = t;
+      w.v_t[i] = hard ? 0.0 : (pen - z) - t;
+      w.v_in[i] = z - std::max(t - r, 0.0);
+    }
+  }
+
+  // Smoothed-KKT residual in user units; fills f1..f5 (x-stationarity,
+  // t-stationarity, equalities, t >= 0, G x - h <= t) in the scaled frame.
+  double relax_residual(double kappa_s) {
+    RelaxWork& w = rw_;
+    const auto Gt = Cts_.rightCols(p_);
+    for (int i = 0; i < p_; ++i) {
+      w.z_in[i] = retraction(w.v_in[i], kappa_s);
+      w.s_in[i] = retraction(-w.v_in[i], kappa_s);
+      if (w.hard[static_cast<size_t>(i)]) continue;
+      w.z_t[i] = retraction(w.v_t[i], kappa_s);
+      w.s_t[i] = retraction(-w.v_t[i], kappa_s);
+    }
+    double dual = 0.0, primal = 0.0, merit = 0.0;
+    const auto fold = [&merit](double& worst, double v) {
+      worst = std::max(worst, std::abs(v));
+      merit += v * v;
+    };
+    w.f1.noalias() = Qs_ * w.x;
+    w.f1 += qs_;
+    w.f1.noalias() += Gt * w.z_in;
+    if (m_ > 0) {
+      const auto At = Cts_.leftCols(m_);
+      w.f1.noalias() += At * w.y;
+      w.f3.noalias() = At.transpose() * w.x;
+      w.f3 -= rhss_.head(m_);
+      for (int i = 0; i < m_; ++i) fold(primal, w.f3[i] / dr_[i]);
+    }
+    for (int k = 0; k < n_; ++k) fold(dual, w.f1[k] / (c_ * dx_[k]));
+    w.Gx.noalias() = Gt.transpose() * w.x;
+    for (int i = 0; i < p_; ++i) {
+      const double d = dr_[m_ + i];
+      if (w.hard[static_cast<size_t>(i)]) {
+        w.f2[i] = 0.0;
+        w.f4[i] = 0.0;
+        w.f5[i] = w.s_in[i] + w.Gx[i] - rhss_[m_ + i];
+      } else {
+        w.f2[i] = ws_[i] - w.z_t[i] - w.z_in[i];
+        w.f4[i] = w.s_t[i] - w.t[i];
+        w.f5[i] = w.s_in[i] + w.Gx[i] - rhss_[m_ + i] - w.t[i];
+        fold(dual, w.f2[i] * d / c_);
+        fold(primal, w.f4[i] / d);
+      }
+      fold(primal, w.f5[i] / d);
+    }
+    w.dual_res = dual;
+    w.primal_res = primal;
+    w.merit = merit;
+    return std::max(dual, primal);
+  }
+
+  // Reduced Newton matrix Q + rho I + G' Lam G + A'A / delta after eliminating
+  // (t, v_t, v_in).
+  bool relax_factor(double rho, double delta) {
+    RelaxWork& w = rw_;
+    for (int i = 0; i < p_; ++i) {
+      if (w.hard[static_cast<size_t>(i)]) {
+        w.einv[i] = 0.0;
+        w.lam[i] = w.d_in[i];
+      } else {
+        w.einv[i] = 1.0 / (w.d_t[i] + w.d_in[i] + rho);
+        w.lam[i] = w.d_in[i] * (w.d_t[i] + rho) * w.einv[i];
+      }
+    }
+    w.GS.noalias() = Cts_.rightCols(p_) * w.lam.cwiseSqrt().asDiagonal();
+    w.K.triangularView<Eigen::Lower>() = Qs_;
+    w.K.diagonal().array() += rho;
+    if (m_ > 0) w.K.triangularView<Eigen::Lower>() += (1.0 / delta) * w.AtA;
+    w.K.selfadjointView<Eigen::Lower>().rankUpdate(w.GS);
+    w.llt.compute(w.K);
+    return w.llt.info() == Eigen::Success &&
+           std::isfinite(w.K.diagonal().sum());
+  }
+
+  void relax_step(double alpha) {
+    RelaxWork& w = rw_;
+    w.x += alpha * w.dx;
+    w.t += alpha * w.dt;
+    if (m_ > 0) w.y += alpha * w.dy;
+    w.v_t += alpha * w.dv_t;
+    w.v_in += alpha * w.dv_in;
+  }
+
+  // Unscales the relaxed point into sol_; row-state counts stay those of the
+  // solve().
+  void relax_finish(Status status, int iters) {
+    const RelaxWork& w = rw_;
+    const double inf = std::numeric_limits<double>::infinity();
+    sol_.x = dx_.cwiseProduct(w.x);
+    for (int i = 0; i < m_; ++i) sol_.y[i] = w.y[i] * dr_[i] / c_;
+    double pen_t = 0.0;
+    for (int i = 0; i < p_; ++i) {
+      const double d = dr_[m_ + i];
+      const bool hard = w.hard[static_cast<size_t>(i)];
+      sol_.z[i] = w.z_in[i] * d / c_;
+      sol_.t[i] = hard ? 0.0 : w.t[i] / d;
+      sol_.z_t[i] = hard ? inf : w.z_t[i] * d / c_;
+      if (!hard) pen_t += penalty_[i] * sol_.t[i];
+    }
+    sol_.status = status;
+    sol_.converged = status == Status::kSolved ? 1 : 0;
+    sol_.iters = iters;
+    sol_.outer_iters = 0;
+    wQx_.noalias() = Q_ * sol_.x;
+    const double xQx = sol_.x.dot(wQx_);
+    sol_.primal_obj = 0.5 * xQx + q_.dot(sol_.x) + pen_t;
+    double dual_obj = -0.5 * xQx - rhs_.tail(p_).dot(sol_.z);
+    if (m_ > 0) dual_obj -= rhs_.head(m_).dot(sol_.y);
+    sol_.duality_gap = std::abs(sol_.primal_obj - dual_obj);
+    sol_.primal_res = w.primal_res;
+    sol_.dual_res = w.dual_res;
+  }
+
   // Cholesky of Q_s, doubling the prox shift until pivots are acceptable; then
   // M = L^{-1} C_s^T.
   bool factor(double eps_start = 0.0) {
@@ -1038,6 +1335,7 @@ class Solver {
   int rows_updated_ = 0, refactors_ = 0;
   bool refactored_ = false, rescaled_ = false;
   VectorXd res_, wQx_;
+  RelaxWork rw_;
   Solution sol_;
 };
 

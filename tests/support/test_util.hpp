@@ -54,7 +54,7 @@ template <>
 struct Backend<elastiqp::das::Solver> {
   using Settings = elastiqp::das::Settings;
   static constexpr const char* name = "das";
-  static constexpr bool has_relax = false;
+  static constexpr bool has_relax = true;
   static constexpr bool has_refresh = true;       // drift-gated Ruiz refresh
   static constexpr bool has_warm_start = true;
   static constexpr double slack_tol = 1e-10;      // t at a feasible solution
