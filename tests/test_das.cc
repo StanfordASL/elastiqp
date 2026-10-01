@@ -232,6 +232,42 @@ void DegenerateCase(std::mt19937& rng) {
         InfNorm(sol.x - ref.x), "err");
 }
 
+// Rows equal up to sign share one M row (twins). G = [B; -B; B; -B] as a warm
+// chain on a reused factorization, where one copy of a row alternately drifts
+// away from its twins and is restored: each tick must match a cold solve.
+void TwinRowsCase() {
+  const int n = 20, pb = 15, p = 4 * pb, ticks = 60;
+  std::mt19937 rng(23);
+  const QPData base = problem_gen::Infeasible(rng, n, pb, 3);
+  QPData qp = base;
+  qp.G.resize(p, n);
+  qp.G << base.G, -base.G, base.G, -base.G;
+  qp.h = VectorXd::Random(p).cwiseAbs();
+  const VectorXd w = VectorXd::Constant(p, 10.0);
+  das::Solver s;
+  s.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, w);
+  std::normal_distribution<double> nd;
+  double xdiff = 0;
+  int refactors = 0;
+  for (int k = 0; k < ticks; ++k) {
+    const int row = 2 * pb + k % pb;
+    if (k % 2 == 0)
+      for (int j = 0; j < n; ++j) qp.G(row, j) += 1e-2 * nd(rng);
+    else
+      qp.G.row(row) = qp.G.row(k % pb);
+    s.set_G(qp.G);
+    const elastiqp::Solution& sol = s.solve();
+    refactors += s.refactored() ? 1 : 0;
+    const elastiqp::Solution ref =
+        das::Solve(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, w);
+    xdiff = std::max(xdiff, sol.converged == 1 ? InfNorm(sol.x - ref.x) : 1e9);
+  }
+  Check("twin rows: split / restored copies match cold solves", xdiff <= 1e-8,
+        xdiff, "err");
+  Check("twin rows: on the reused factorization", refactors == 1, refactors,
+        "refactors");
+}
+
 // Proximal-point loop: singular Q with no constraints and q in its null
 // space is unbounded, so the loop cannot reach a fixed point and must not
 // report kSolved; a positive definite Q takes exactly one round.
@@ -447,6 +483,7 @@ void RandomSuite() {
   ScaledCase(rng);
   EqualityCases(rng);
   DegenerateCase(rng);
+  TwinRowsCase();
   ProxLoop(rng);
   RuizRefresh(rng);
   ReuseBench();

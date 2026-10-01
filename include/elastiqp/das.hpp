@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <numeric>
 #include <vector>
 #ifdef ELASTIQP_DAS_DEBUG
 #include <cstdio>
@@ -95,6 +96,7 @@ class Solver {
     eq_infeas_ = 0.0;
 
     Mt_.resize(n_, mp_);
+    twin_.clear();
     scale_.resize(mp_);
     hi_.resize(mp_);
     d_.resize(mp_);
@@ -334,23 +336,87 @@ class Solver {
       eps_ = eps_ > 0 ? 2.0 * eps_ : settings.eps_prox * std::max(1.0, scale);
       if (tries == 17) return false;
     }
-    Mt_ = llt_.matrixL().solve(Cts_);
+    if (!twins_hold()) find_twins();
+    std::vector<int> rows;
+    for (int i = 0; i < mp_; ++i)
+      if (twin_[i] < 0) rows.push_back(i);
+    solve_rows(rows);
     for (int i = 0; i < mp_; ++i) normalize_row(i);
     rows_updated_ = mp_;
     refactored_ = true;
     rhs_dirty_ = true;
     return true;
   }
+
+  // twin_[i]: an earlier row whose scaled row equals +-row i (sign in
+  // twin_sign_), else -1. A twin's M row is a copy, not another solve.
+  // Twins come from how the constraints are stacked, so they are searched for
+  // after setup() and again only when a known pair stops matching (new twins
+  // are found then too). Twins have equal 1-norms, so sorting by (norm, index)
+  // makes them adjacent.
+  bool twins_hold() const {
+    if (static_cast<int>(twin_.size()) != mp_) return false;
+    for (int i = 0; i < mp_; ++i) {
+      const int j = twin_[i];
+      if (j >= 0 && Cts_.col(i) != twin_sign_[i] * Cts_.col(j)) return false;
+    }
+    return true;
+  }
+  void find_twins() {
+    VectorXd norm1 = Cts_.cwiseAbs().colwise().sum().transpose();
+    std::vector<int> order(static_cast<size_t>(mp_));
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [&](int a, int b) {
+      return norm1[a] != norm1[b] ? norm1[a] < norm1[b] : a < b;
+    });
+    twin_.assign(static_cast<size_t>(mp_), -1);
+    twin_sign_.assign(static_cast<size_t>(mp_), 1.0);
+    for (size_t p = 1; p < order.size(); ++p) {
+      const int i = order[p];
+      for (size_t q = p; q-- > 0 && norm1[order[q]] == norm1[i];) {
+        const int j = order[q];
+        if (twin_[j] >= 0) continue;
+        if (Cts_.col(i) == Cts_.col(j)) {
+          twin_[i] = j;
+          break;
+        }
+        if (Cts_.col(i) == -Cts_.col(j)) {
+          twin_[i] = j;
+          twin_sign_[i] = -1.0;
+          break;
+        }
+      }
+    }
+  }
+
+  // Mt_(:, rows) = L^-1 Cts_(:, rows), in one batched solve (several times
+  // faster than per-column solves).
+  void solve_rows(const std::vector<int>& rows) {
+    MatrixXd rhs(n_, static_cast<Eigen::Index>(rows.size()));
+    for (size_t j = 0; j < rows.size(); ++j)
+      rhs.col(static_cast<Eigen::Index>(j)) = Cts_.col(rows[j]);
+    llt_.matrixL().solveInPlace(rhs);
+    for (size_t j = 0; j < rows.size(); ++j)
+      Mt_.col(rows[j]) = rhs.col(static_cast<Eigen::Index>(j));
+  }
+
+  // Twins must come after their twin row (find_twins() guarantees j < i).
   void normalize_row(int i) {
-    const double nrm = Mt_.col(i).norm();
-    scale_[i] = nrm > 1e-300 ? 1.0 / nrm : 1.0;
-    Mt_.col(i) *= scale_[i];
+    const int j = twin_[i];
+    if (j >= 0) {
+      Mt_.col(i) = twin_sign_[i] * Mt_.col(j);
+      scale_[i] = scale_[j];
+    } else {
+      const double nrm = Mt_.col(i).norm();
+      scale_[i] = nrm > 1e-300 ? 1.0 / nrm : 1.0;
+      Mt_.col(i) *= scale_[i];
+    }
     if (i < m_) {
       hi_[i] = std::numeric_limits<double>::infinity();
     } else {
       const double w = ws_[i - m_];
-      hi_[i] =
-          std::isfinite(w) ? w * nrm : std::numeric_limits<double>::infinity();
+      hi_[i] = std::isfinite(w) ? w / scale_[i]
+                                : std::numeric_limits<double>::infinity();
     }
   }
 
@@ -378,17 +444,18 @@ class Solver {
       drift_ = ruiz_drift(fr, ruiz_drift(fx));
       if (drift_ > settings.ruiz_refresh_ratio) return false;
     }
-    std::vector<int> changed;
-    for (int i = 0; i < mp_; ++i)
-      if (col_dirty_[static_cast<size_t>(i)]) changed.push_back(i);
-    MatrixXd rhs(n_, static_cast<Eigen::Index>(changed.size()));
-    for (size_t j = 0; j < changed.size(); ++j)
-      rhs.col(static_cast<Eigen::Index>(j)) = Cts_.col(changed[j]);
-    llt_.matrixL().solveInPlace(rhs);
+    // A clean row keeps its M row even if its twin changed, so only dirty
+    // rows without a twin are solved.
+    if (!twins_hold()) find_twins();
+    std::vector<int> changed, solve;
+    for (int i = 0; i < mp_; ++i) {
+      if (!col_dirty_[static_cast<size_t>(i)]) continue;
+      changed.push_back(i);
+      if (twin_[i] < 0) solve.push_back(i);
+    }
+    solve_rows(solve);
     bool sat_changed = false;
-    for (size_t j = 0; j < changed.size(); ++j) {
-      const int i = changed[j];
-      Mt_.col(i) = rhs.col(static_cast<Eigen::Index>(j));
+    for (const int i : changed) {
       normalize_row(i);
       rows_updated_++;
       const RowState st = state_[static_cast<size_t>(i)];
@@ -994,6 +1061,8 @@ class Solver {
   Eigen::LLT<MatrixXd, Eigen::Upper> llt_;
   double eps_ = 0.0;
   MatrixXd Mt_;
+  std::vector<int> twin_;
+  std::vector<double> twin_sign_;
   VectorXd scale_, hi_, d_, v_, u_, uS_, mu_, x_, xc_, lam_full_;
   std::vector<RowState> state_;
   // Working set and LDL^T of its Gram matrix.
