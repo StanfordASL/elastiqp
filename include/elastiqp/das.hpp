@@ -254,6 +254,10 @@ class Solver {
         hi_[m_ + i] = std::isfinite(ws_[i])
                           ? ws_[i] / scale_[m_ + i]
                           : std::numeric_limits<double>::infinity();
+        // A saturated row turned hard has no cap left: active at its old one.
+        RowState& s = state_[static_cast<size_t>(m_ + i)];
+        if (s == RowState::kSaturated && !std::isfinite(ws_[i]))
+          s = RowState::kActive;
       }
       penalty_dirty_ = false;
       rebuild = true;
@@ -551,7 +555,8 @@ class Solver {
     w.dual_res = dual;
     w.primal_res = primal;
     w.merit = merit;
-    return std::max(dual, primal);
+    // std::max drops NaN; the sum of squares does not.
+    return std::isfinite(merit) ? std::max(dual, primal) : merit;
   }
 
   // Reduced Newton matrix Q + rho I + G' Lam G + A'A / delta after eliminating
