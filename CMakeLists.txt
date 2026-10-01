@@ -55,6 +55,9 @@ if(ELASTIQP_BUILD_TESTS)
   elastiqp_test(test_das)
   add_test(NAME elastiqp.das COMMAND test_das)
 
+  elastiqp_test(test_das_alloc)
+  add_test(NAME elastiqp.das_alloc COMMAND test_das_alloc)
+
   elastiqp_test(test_pdal)
   add_test(NAME elastiqp.pdal COMMAND test_pdal)
 

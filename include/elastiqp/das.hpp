@@ -94,6 +94,23 @@ class Solver {
     scaled_valid_ = false;
     eq_infeas_ = 0.0;
 
+    // Every buffer solve() touches is sized here, so solve() and the set_*
+    // updates do not allocate (beyond the scratch Eigen's blocked triangular
+    // solves may take from the heap on large problems).
+    Qs_.resize(n_, n_);
+    Cts_.resize(n_, mp_);
+    llt_ = Eigen::LLT<MatrixXd, Eigen::Upper>(n_);
+    qs_.resize(n_);
+    rhss_.resize(mp_);
+    ws_.resize(p_);
+    fx_.resize(n_);
+    fr_.resize(mp_);
+    xu_.resize(n_);
+    changed_.reserve(static_cast<size_t>(mp_));
+    changed_cols_.resize(n_, mp_);
+    warm_x_.setZero(n_);
+    warm_y_.setZero(m_);
+    warm_z_.setZero(p_);
     Mt_.resize(n_, mp_);
     scale_.resize(mp_);
     hi_.resize(mp_);
@@ -111,6 +128,7 @@ class Solver {
     const int kmax = n_ + 1;
     W_.clear();
     W_.reserve(static_cast<size_t>(kmax));
+    rows_.reserve(static_cast<size_t>(kmax));
     L_.setZero(kmax, kmax);
     D_.setZero(kmax);
     Gram_.setZero(kmax, kmax);
@@ -129,6 +147,11 @@ class Solver {
     tol_.resize(mp_);
     res_.resize(mp_);
     wQx_.resize(n_);
+    sol_.x.resize(n_);
+    sol_.y.resize(m_);
+    sol_.z.resize(p_);
+    sol_.t.resize(p_);
+    sol_.z_t.resize(p_);
     sol_.status = Status::kUnsolved;
   }
   void setup(const MatrixXd& Q, const VectorXd& q, const MatrixXd& A,
@@ -316,9 +339,10 @@ class Solver {
     for (int i = 0; i < n_; ++i) scale = std::max(scale, std::abs(Qs_(i, i)));
     eps_ = eps_start;
     for (int tries = 0; tries < 18; ++tries) {
-      MatrixXd Qe = Qs_;
-      if (eps_ > 0) Qe.diagonal().array() += eps_;
-      llt_.compute(Qe);
+      if (eps_ > 0)
+        llt_.compute(Qs_ + eps_ * MatrixXd::Identity(n_, n_));
+      else
+        llt_.compute(Qs_);
       bool ok = llt_.info() == Eigen::Success;
       if (ok) {
         double pmin = std::numeric_limits<double>::infinity(), pmax = 0.0;
@@ -334,7 +358,8 @@ class Solver {
       eps_ = eps_ > 0 ? 2.0 * eps_ : settings.eps_prox * std::max(1.0, scale);
       if (tries == 17) return false;
     }
-    Mt_ = llt_.matrixL().solve(Cts_);
+    Mt_ = Cts_;
+    llt_.matrixL().solveInPlace(Mt_);
     for (int i = 0; i < mp_; ++i) normalize_row(i);
     rows_updated_ = mp_;
     refactored_ = true;
@@ -373,21 +398,20 @@ class Solver {
       Cts_.col(i) = dr_[i] * dx_.cwiseProduct(Ct_.col(i));
     }
     if (settings.ruiz && settings.ruiz_refresh_ratio > 0) {
-      VectorXd fx(n_), fr(mp_);
-      scaling_pass(fx, fr);
-      drift_ = ruiz_drift(fr, ruiz_drift(fx));
+      scaling_pass(fx_, fr_);
+      drift_ = ruiz_drift(fr_, ruiz_drift(fx_));
       if (drift_ > settings.ruiz_refresh_ratio) return false;
     }
-    std::vector<int> changed;
+    changed_.clear();
     for (int i = 0; i < mp_; ++i)
-      if (col_dirty_[static_cast<size_t>(i)]) changed.push_back(i);
-    MatrixXd rhs(n_, static_cast<Eigen::Index>(changed.size()));
-    for (size_t j = 0; j < changed.size(); ++j)
-      rhs.col(static_cast<Eigen::Index>(j)) = Cts_.col(changed[j]);
+      if (col_dirty_[static_cast<size_t>(i)]) changed_.push_back(i);
+    auto rhs = changed_cols_.leftCols(static_cast<Eigen::Index>(changed_.size()));
+    for (size_t j = 0; j < changed_.size(); ++j)
+      rhs.col(static_cast<Eigen::Index>(j)) = Cts_.col(changed_[j]);
     llt_.matrixL().solveInPlace(rhs);
     bool sat_changed = false;
-    for (size_t j = 0; j < changed.size(); ++j) {
-      const int i = changed[j];
+    for (size_t j = 0; j < changed_.size(); ++j) {
+      const int i = changed_[j];
       Mt_.col(i) = rhs.col(static_cast<Eigen::Index>(j));
       normalize_row(i);
       rows_updated_++;
@@ -408,10 +432,11 @@ class Solver {
 
   // Recomputes v and d after q, rhs, or the prox center change.
   void form_rhs() {
-    VectorXd qe = qs_;
-    if (eps_ > 0) qe -= eps_ * xc_;
-    v_ = llt_.matrixL().solve(qe);
-    d_ = scale_.cwiseProduct(rhss_) + Mt_.transpose() * v_;
+    v_ = qs_;
+    if (eps_ > 0) v_ -= eps_ * xc_;
+    llt_.matrixL().solveInPlace(v_);
+    d_.noalias() = Mt_.transpose() * v_;
+    d_ += scale_.cwiseProduct(rhss_);
     rhs_dirty_ = false;
   }
 
@@ -431,24 +456,22 @@ class Solver {
     if (!settings.ruiz) return;
     bool refresh = !scaled_valid_;
     if (!refresh && settings.ruiz_refresh_ratio > 0) {
-      VectorXd fx(n_), fr(mp_);
-      scaling_pass(fx, fr);
-      drift_ = ruiz_drift(fr, ruiz_drift(fx));
+      scaling_pass(fx_, fr_);
+      drift_ = ruiz_drift(fr_, ruiz_drift(fx_));
       refresh = drift_ > settings.ruiz_refresh_ratio;
     }
     if (refresh) {
-      const VectorXd x_user = dx_.cwiseProduct(x_);
+      xu_ = dx_.cwiseProduct(x_);  // x in the user frame, kept across
       dx_.setOnes();
       dr_.setOnes();
       c_ = 1.0;
       apply_matrix_scaling();
-      VectorXd fx(n_), fr(mp_);
       for (int it = 0; it < settings.ruiz_max_iter; ++it) {
-        if (scaling_pass(fx, fr) <= settings.ruiz_tol) break;
-        Qs_ = fx.asDiagonal() * Qs_ * fx.asDiagonal();
-        Cts_ = fx.asDiagonal() * Cts_ * fr.asDiagonal();
-        dx_ = dx_.cwiseProduct(fx);
-        dr_ = dr_.cwiseProduct(fr);
+        if (scaling_pass(fx_, fr_) <= settings.ruiz_tol) break;
+        Qs_ = fx_.asDiagonal() * Qs_ * fx_.asDiagonal();
+        Cts_ = fx_.asDiagonal() * Cts_ * fr_.asDiagonal();
+        dx_ = dx_.cwiseProduct(fx_);
+        dr_ = dr_.cwiseProduct(fr_);
         const double gamma = ruiz_cost_gamma(Qs_);
         Qs_ *= gamma;
         c_ *= gamma;
@@ -456,7 +479,7 @@ class Solver {
       drift_ = 1.0;
       scaled_valid_ = true;
       rescaled_ = true;
-      x_ = x_user.cwiseQuotient(dx_);
+      x_ = xu_.cwiseQuotient(dx_);
       for (int i = 0; i < p_; ++i) ws_[i] = c_ * penalty_[i] / dr_[m_ + i];
     }
     rhs_dirty_ = true;
@@ -464,7 +487,6 @@ class Solver {
   void apply_matrix_scaling() {
     Qs_ = c_ * dx_.asDiagonal() * Q_ * dx_.asDiagonal();
     Cts_ = dx_.asDiagonal() * Ct_ * dr_.asDiagonal();
-    ws_.resize(p_);
     for (int i = 0; i < p_; ++i) ws_[i] = c_ * penalty_[i] / dr_[m_ + i];
   }
   void rescale_vectors() {
@@ -478,13 +500,13 @@ class Solver {
     const int k = n_eq_;
     for (int i = 0; i < k; ++i) work_[i] = -d_[W_[static_cast<size_t>(i)]];
     ldl_solve(k, work_, dir_);
-    VectorXd uE = VectorXd::Zero(n_);
+    xu_.setZero();  // u of the kept equalities alone
     for (int i = 0; i < k; ++i)
-      uE -= dir_[i] * Mt_.col(W_[static_cast<size_t>(i)]);
+      xu_ -= dir_[i] * Mt_.col(W_[static_cast<size_t>(i)]);
     double worst = 0.0, worst_kept = 0.0;
     for (int i = 0; i < m_; ++i) {
       const double r =
-          std::abs((Mt_.col(i).dot(uE) - d_[i]) / (scale_[i] * dr_[i]));
+          std::abs((Mt_.col(i).dot(xu_) - d_[i]) / (scale_[i] * dr_[i]));
       if (state_[static_cast<size_t>(i)] == RowState::kDropped)
         worst = std::max(worst, r);
       else
@@ -659,11 +681,11 @@ class Solver {
     refactors_++;
     for (int i = 0; i < static_cast<int>(W_.size()); ++i)
       lam_full_[W_[static_cast<size_t>(i)]] = lam_[i];
-    std::vector<int> rows(W_.begin(), W_.end());
-    std::sort(rows.begin(), rows.end());
+    rows_.assign(W_.begin(), W_.end());
+    std::sort(rows_.begin(), rows_.end());
     W_.clear();
     n_eq_ = 0;
-    for (int row : rows) {
+    for (int row : rows_) {
       const bool eq = row < m_;
       if (!add_row(row, lam_full_[row])) {
         W_.pop_back();
@@ -812,7 +834,8 @@ class Solver {
       u_ = uS_;
       for (int i = 0; i < static_cast<int>(W_.size()); ++i)
         u_ -= lam_[i] * Mt_.col(W_[static_cast<size_t>(i)]);
-      mu_ = Mt_.transpose() * u_ - d_;
+      mu_.noalias() = Mt_.transpose() * u_;
+      mu_ -= d_;
       // Up to two refinement solves so working-set rows are tight to 0.1 tol.
       for (int round = 0; round < 2; ++round) {
         const int k = static_cast<int>(W_.size());
@@ -828,7 +851,8 @@ class Solver {
           lam_[i] += dir_[i];
           u_ -= dir_[i] * Mt_.col(W_[static_cast<size_t>(i)]);
         }
-        mu_ = Mt_.transpose() * u_ - d_;
+        mu_.noalias() = Mt_.transpose() * u_;
+      mu_ -= d_;
       }
       {
         double dual = -0.5 * u_.squaredNorm();
@@ -930,8 +954,6 @@ class Solver {
   const Solution& finish(Status st) {
     sol_.status = st;
     sol_.x = dx_.cwiseProduct(x_);
-    sol_.y.resize(m_);
-    sol_.z.resize(p_);
     sol_.n_active = sol_.n_saturated = 0;
     for (int i = 0; i < mp_; ++i) {
       double lam = 0.0;
@@ -957,14 +979,12 @@ class Solver {
     }
     sol_.converged = st == Status::kSolved ? 1 : 0;
     have_solution_ = st == Status::kSolved;
-    res_.noalias() = Ct_.transpose() * sol_.x - rhs_;
+    res_.noalias() = Ct_.transpose() * sol_.x;
+    res_ -= rhs_;
     if (p_ > 0) {
       const auto r = res_.tail(p_);
       sol_.t = r.cwiseMax(0.0);
       sol_.z_t = penalty_ - sol_.z;
-    } else {
-      sol_.t.resize(0);
-      sol_.z_t.resize(0);
     }
     wQx_.noalias() = Q_ * sol_.x;
     const double xQx = sol_.x.dot(wQx_);
@@ -995,6 +1015,11 @@ class Solver {
   double eps_ = 0.0;
   MatrixXd Mt_;
   VectorXd scale_, hi_, d_, v_, u_, uS_, mu_, x_, xc_, lam_full_;
+  // Scratch: Ruiz factors, a user-frame / unscaled n-vector, the columns
+  // update_rows re-solves, and the rows refactor_working_set re-adds.
+  VectorXd fx_, fr_, xu_;
+  MatrixXd changed_cols_;
+  std::vector<int> changed_, rows_;
   std::vector<RowState> state_;
   // Working set and LDL^T of its Gram matrix.
   std::vector<int> W_;
