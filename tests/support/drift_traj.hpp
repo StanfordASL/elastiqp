@@ -1,5 +1,5 @@
 // Shared drifting-trajectory generator for the warm-start benchmarks
-// (bench_relax_warm, bench_fwd_warm): random control-loop-style QP
+// (bench_fwd_warm, bench_bcl_strategies): random control-loop-style QP
 // sequences with a relative-sigma random walk per tick over a chosen
 // subset of the data.
 #pragma once

@@ -418,7 +418,7 @@ def main():
     rq.reequilibrate()
     check("reequilibrate() no-op when equilibrated", rq.solve().iters == 0, "")
     # Objective scale through set_Q: x invariant, duals scale, refresh fires;
-    # and the relax() warm iterate is carried through the refresh
+    # and relax() through the refresh matches a fresh setup
     rq.set_G(Gp)
     rq.set_h(hp)
     rq.set_penalty(np.full(60, 10.0))

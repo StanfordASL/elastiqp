@@ -68,10 +68,8 @@ struct Settings {
     return eps_duality_gap_abs < 0 ? eps_abs : eps_duality_gap_abs;
   }
 
-  // relax(): regularization and warm-start policy (flip_tol < 0: always warm).
+  // relax(): Newton regularization.
   double relax_reg = 1e-9;
-  int relax_warm_budget = 15;
-  int relax_warm_flip_tol = 0;
 };
 
 class Solver {
@@ -96,7 +94,6 @@ class Solver {
     penalty_ = penalty;
 
     have_warm_ = false;
-    relax_have_warm_ = false;
     explicit_warm_ = false;
     matrix_dirty_ = true;
     factored_ = false;
@@ -256,18 +253,6 @@ class Solver {
     }
     z_ = z_.cwiseProduct(zf);
     zk_ = zk_.cwiseProduct(zf);
-    if (relax_have_warm_) {
-      xr_ = xr_.cwiseQuotient(dx);
-      if (m_ > 0) yr_ = yr_.cwiseProduct(yf);
-      tr_ = tr_.cwiseProduct(di);
-      for (Eigen::Index i = 0; i < p_; ++i) {
-        v_t_r_[i] = zf[i] * retraction(v_t_r_[i], relax_kappa_s_) -
-                    di[i] * retraction(-v_t_r_[i], relax_kappa_s_);
-        v_in_r_[i] = zf[i] * retraction(v_in_r_[i], relax_kappa_s_) -
-                     di[i] * retraction(-v_in_r_[i], relax_kappa_s_);
-      }
-      relax_kappa_s_ *= gamma;
-    }
     update_unscale_vectors();
     compute_AtA();
     matrix_dirty_ = true;
@@ -452,39 +437,12 @@ class Solver {
   }
 
   // Re-solve the KKT system with complementarity smoothed at barrier kappa
-  // (differentiable); see paper.
-  const Solution& relax(double kappa, double tol = 1e-6, int max_iter = 50,
-                        bool warm = true) {
-    if (p_ == 0 || kappa <= 0.0 || (!have_warm_ && !relax_have_warm_)) {
-      return sol_;
-    }
+  // (differentiable), starting from the solve() point; see paper.
+  const Solution& relax(double kappa, double tol = 1e-6, int max_iter = 50) {
+    if (p_ == 0 || kappa <= 0.0 || !have_warm_) return sol_;
     if (!relax_ready_) relax_alloc();
-    const double kappa_s = c_s_ * kappa;
-
-    // Reuse the last relax point only if few retraction sign flips are
-    // predicted.
-    bool use_warm = warm && relax_have_warm_;
-    if (use_warm && have_warm_ && settings.relax_warm_flip_tol >= 0) {
-      use_warm = relax_predict_flips(kappa_s) <= settings.relax_warm_flip_tol;
-    }
-
-    if (use_warm) {
-      relax_run(kappa_s, tol, std::min(max_iter, settings.relax_warm_budget));
-      // Warm attempt failed within budget: fall back to a cold start from
-      // solve().
-      if (sol_.converged != 1 && have_warm_) {
-        const int warm_iters = sol_.iters;
-        relax_init_retraction();
-        relax_run(kappa_s, tol, max_iter);
-        sol_.iters += warm_iters;
-      }
-    } else {
-      if (!have_warm_) return sol_;
-      relax_init_retraction();
-      relax_run(kappa_s, tol, max_iter);
-    }
-    relax_have_warm_ = sol_.converged == 1;
-    relax_kappa_s_ = kappa_s;
+    relax_init_retraction();
+    relax_run(c_s_ * kappa, tol, max_iter);
     return sol_;
   }
 
@@ -1029,26 +987,6 @@ class Solver {
     return std::max(relax_dual_res_, relax_primal_res_);
   }
 
-  // Retraction variables whose sign differs between the solve() point and the
-  // last relax() point.
-  int relax_predict_flips(double kappa_s) {
-    const double corner2 = 100.0 * kappa_s;
-    wGx_.noalias() = G_ * x_;
-    int flips = 0;
-    for (Eigen::Index i = 0; i < p_; ++i) {
-      const RowRetraction rr = row_retraction(i, wGx_[i] - h_[i]);
-      if ((rr.v_t > 0) != (v_t_r_[i] > 0) &&
-          std::abs(rr.v_t * v_t_r_[i]) > corner2) {
-        flips++;
-      }
-      if ((rr.v_in > 0) != (v_in_r_[i] > 0) &&
-          std::abs(rr.v_in * v_in_r_[i]) > corner2) {
-        flips++;
-      }
-    }
-    return flips;
-  }
-
   // Seed relax from the solve() point.
   void relax_init_retraction() {
     xr_ = x_;
@@ -1291,7 +1229,7 @@ class Solver {
   Eigen::LLT<MatrixXd, Eigen::Lower> llt_;
   std::vector<double> bp_;
 
-  // relax() workspace and warm-start state.
+  // relax() workspace.
   VectorXd xr_, tr_, yr_, v_t_r_, v_in_r_;
   VectorXd z_t_r_, z_in_r_, s_t_r_, s_in_r_;
   VectorXd rf1_, rf2_, rf3_, rf4_, rf5_;
@@ -1300,8 +1238,6 @@ class Solver {
   Eigen::LLT<MatrixXd, Eigen::Lower> llt_r_;
   double relax_primal_res_ = 0, relax_dual_res_ = 0;
   double relax_merit_ = 0;
-  bool relax_have_warm_ = false;
-  double relax_kappa_s_ = 0;
   bool relax_ready_ = false;
 
   Solution sol_;

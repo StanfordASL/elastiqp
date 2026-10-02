@@ -7,12 +7,11 @@
 //     and incremental updates must reach the same point as full
 //     refactorizations with fewer of them;
 // (2) the explicit set_warm_start() hook and its Ruiz roundtrip;
-// (3) Ruiz re-equilibration: the exact remap of the solve() and relax()
-//     warm iterates into the refreshed frame;
+// (3) Ruiz re-equilibration: the exact remap of the solve() warm iterate
+//     into the refreshed frame, and relax() through the refresh;
 // (4) relax(kappa): agreement with the IPM's kappa-relaxed central point,
-//     the tight iterate left untouched, the warm relax chain across data
-//     updates, and the KKT VJP against finite differences of the relaxed
-//     solution map.
+//     the tight iterate left untouched, and the KKT VJP against finite
+//     differences of the relaxed solution map.
 
 #include <cmath>
 #include <cstdio>
@@ -212,7 +211,7 @@ int main() {
   {
     // Matrix updates keep the setup()-time scaling exact but let it drift;
     // solve() must re-equilibrate past settings.ruiz_refresh_ratio and
-    // carry the warm-start iterate (solve + relax) into the new frame.
+    // carry the warm-start iterate into the new frame.
     const int n = 30, m = 8, p = 200, ticks = 24;
     const double kappa = 1e-4;
     QPData qp0 = problem_gen::InfeasibleEq(rng, n, m, p, p / 4);
@@ -289,9 +288,6 @@ int main() {
           worst_drift, "drift");
     Check("solve matches fresh setup",
           all_conv && worst_dx < 1e-4 && worst_kkt < 1e-8, worst_dx, "|dx|");
-    // (The relax warm chain is mostly rejected by the flip gate on these
-    // 1.5x row jumps, so only accuracy is checked here; the exact remap of
-    // the relax iterate is checked below.)
     Check("relax matches fresh setup", worst_rdx < 1e-4, worst_rdx, "|dx|");
     // Manual call on equilibrated data is a no-op
     warm.reequilibrate();
@@ -301,8 +297,9 @@ int main() {
           warm.scaling_drift(), "drift");
     // Exact remap check: re-equilibrate with the problem UNCHANGED (the
     // setup-time scaling was deliberately left half-converged), so the
-    // remapped solve() and relax() warm iterates must still be converged,
-    // and the refreshed scaling must be the one a fresh setup() computes
+    // remapped solve() warm iterate must still be converged, relax() must
+    // land on the same point from it, and the refreshed scaling must be the
+    // one a fresh setup() computes
     {
       pdal::Solver fresh;
       fresh.settings = TightSettings();
@@ -333,10 +330,9 @@ int main() {
                 drift_after <= fresh.scaling_drift() * (1 + 1e-9) &&
                 hs2.converged == 1 && hs2.iters == 0,
             hs2.iters, "iters");
-      Check("remap keeps relax() warm iterate",
-            hr.converged == 1 && hr2.converged == 1 && hr2.iters == 0 &&
-                rdx < 1e-9,
-            rdx, "|dx|");
+      Check("relax after the remap lands on the same point",
+            hr.converged == 1 && hr2.converged == 1 && rdx < 1e-8, rdx,
+            "|dx|");
     }
     // Drifted problem: from the same user-frame iterate, the re-equilibrated
     // solver must reach the same solution as one left on the stale scaling
@@ -367,7 +363,7 @@ int main() {
           ss3.converged == 1 && ws3.converged == 1 && dx3 < 1e-6 &&
               ws3.iters <= 2 * ss3.iters,
           dx3, "|dx|");
-    Check("remapped warm relax matches stale",
+    Check("relax after the remap matches stale",
           sr3.converged == 1 && wr3.converged == 1 && rdx3 < 1e-6, rdx3,
           "|dx|");
   }
@@ -473,73 +469,6 @@ int main() {
           tight.converged == 1 && rel.converged == 1 && moved > 1e-8 &&
               again.converged == 1 && again.iters <= 2 && dx < 1e-9,
           dx, "|dx|");
-  }
-
-  std::printf("PDAL: relax(warm) chains across data updates\n");
-  {
-    // Warm-started relax (the default): on a drifting problem the next
-    // call continues from the previous relaxed point, whose offset is
-    // dominated by LINEAR residual drift that Newton removes
-    // quadratically; the tight-retraction start instead re-pays the
-    // linear-rate barrier-curvature walk on every call. The chain must
-    // land on the cold-start point and never cost more total iterations.
-    // Dedicated rng: keeps the shared stream's downstream instances
-    // intact (see the fd_rng note below).
-    std::mt19937 wrng(7);
-    QPData qp = problem_gen::InfeasibleEq(wrng, 16, 4, 50, 12);
-    const VectorXd penalty = VectorXd::Constant(50, 10.0);
-    pdal::Solver solver;
-    solver.settings = TightSettings();
-    solver.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
-    bool ok = true;
-    double dmax = 0;
-    int warm_iters = 0, cold_iters = 0;
-    for (int tick = 0; tick < 8; ++tick) {
-      if (tick > 0) {  // smooth heterogeneous control-loop-scale drift
-        for (Eigen::Index i = 0; i < qp.q.size(); ++i) {
-          qp.q[i] += 1e-3 * std::sin(0.7 * tick + static_cast<double>(i));
-        }
-        for (Eigen::Index i = 0; i < qp.h.size(); ++i) {
-          qp.h[i] += 1e-3 * std::cos(0.3 * tick + static_cast<double>(i));
-        }
-        solver.set_q(qp.q);
-        solver.set_h(qp.h);
-      }
-      ok = ok && solver.solve().converged == 1;
-      const elastiqp::Solution w = solver.relax(1e-3, 1e-10, 50);  // warm
-      const elastiqp::Solution c =
-          solver.relax(1e-3, 1e-10, 50, /*warm=*/false);
-      ok = ok && w.converged == 1 && c.converged == 1;
-      warm_iters += w.iters;
-      cold_iters += c.iters;
-      dmax = std::max(dmax, (w.x - c.x).lpNorm<Eigen::Infinity>());
-    }
-    // At control-loop drift the chain wins (measured here ~40 vs ~60
-    // iterations; ~5x wall time at robot scale, see bench_diff_robot).
-    // The margin below is deliberate slack, not the expectation: when a
-    // data step flips the activity of many weakly-active rows (drift
-    // ~1e-2 on this instance does), the warm start re-pays the barrier
-    // curvature on the flipped rows and can cost MORE than the
-    // retraction start -- the chain's advantage is regime-dependent, and
-    // this check only pins "same point, no blow-up".
-    std::printf("  warm iters=%d cold iters=%d\n", warm_iters, cold_iters);
-    Check("warm chain lands on the cold-start point",
-          ok && dmax < 1e-7 && warm_iters <= cold_iters + 8, dmax, "|dx|");
-
-    // Gradient-only pattern: a data update followed by relax() with NO
-    // intervening solve() must still converge from the chain (Ruiz
-    // scaling is fixed at setup, so the frame is unchanged).
-    qp.q.array() += 1e-2;
-    solver.set_q(qp.q);
-    const elastiqp::Solution g = solver.relax(1e-3, 1e-10, 50);
-    pdal::Solver ref;
-    ref.settings = TightSettings();
-    ref.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, penalty);
-    ref.solve();
-    const elastiqp::Solution rc = ref.relax(1e-3, 1e-10, 50);
-    const double dg = (g.x - rc.x).lpNorm<Eigen::Infinity>();
-    Check("gradient-only relax (no solve) matches",
-          g.converged == 1 && rc.converged == 1 && dg < 1e-7, dg, "|dx|");
   }
 
   std::printf("PDAL: Ruiz + explicit warm start roundtrip\n");

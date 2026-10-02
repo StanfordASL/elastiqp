@@ -371,14 +371,13 @@ NB_MODULE(_core, m) {
         .def_rw("ruiz_max_iter", &S::ruiz_max_iter)
         .def_rw("ruiz_tol", &S::ruiz_tol)
         .def_rw("ruiz_refresh_ratio", &S::ruiz_refresh_ratio)
-        .def_rw("relax_reg", &S::relax_reg)
-        .def_rw("relax_warm_budget", &S::relax_warm_budget)
-        .def_rw("relax_warm_flip_tol", &S::relax_warm_flip_tol);
+        .def_rw("relax_reg", &S::relax_reg);
 
     using Sv = elastiqp::pdal::Solver;
     auto cls = nb::class_<Sv>(pdal, "Solver",
                               "Primal-dual augmented Lagrangian backend");
     def_common(cls);
+    def_relax(cls, 50);
     cls.def(
            "solution", [](const Sv& s) -> Solution { return s.solution(); },
            "Result of the last solve() or relax()")
@@ -389,16 +388,6 @@ NB_MODULE(_core, m) {
              "drift exceeds settings.ruiz_refresh_ratio")
         .def("scaling_drift", &Sv::scaling_drift,
              "Largest factor a scaled row/column max-norm has drifted from 1")
-        .def(
-            "relax",
-            [](Sv& s, double kappa, double tol, int max_iter, bool warm)
-                -> Solution { return s.relax(kappa, tol, max_iter, warm); },
-            nb::arg("kappa"), nb::arg("tol") = 1e-6, nb::arg("max_iter") = 50,
-            nb::arg("warm") = true,
-            "Move the solve() result to the kappa-relaxed point (s.z = kappa) "
-            "for differentiation; the solver's own iterate stays tight. With "
-            "warm=True, repeated calls continue from the previous relaxed "
-            "point.")
         .def(
             "set_warm_start",
             [](Sv& s, const Eigen::VectorXd& x, const Eigen::VectorXd& y,
