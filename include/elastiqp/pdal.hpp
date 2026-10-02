@@ -442,7 +442,7 @@ class Solver {
     if (p_ == 0 || kappa <= 0.0 || !have_warm_) return sol_;
     if (!relax_ready_) relax_alloc();
     relax_init_retraction();
-    relax_run(c_s_ * kappa, tol, max_iter);
+    relax_run(c_s_ * kappa, relax_tolerance(tol, kappa), max_iter);
     return sol_;
   }
 

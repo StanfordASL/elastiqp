@@ -570,6 +570,28 @@ def main():
     dg = float(torch.linalg.norm(g_rz - grads[1]))
     check("smoothed gradients invariant to ruiz", dg < 1e-5, f"|dg|={dg:.1e}")
 
+    print("Near-exact gradients (target_kappa below the relax tolerance)")
+    # An exactly active bound from the das active-set solve: relax() must
+    # still move off it, or the VJP divides by a zero slack (NaN).
+    nb = 4
+    Qb = torch.eye(nb, dtype=torch.float64)
+    qb = -torch.tensor([2.0, -0.3, 0.1, 0.4], dtype=torch.float64)
+    Ab = torch.ones((1, nb), dtype=torch.float64)
+    bb = torch.tensor([0.5], dtype=torch.float64)
+    Gb = torch.cat([torch.eye(nb), -torch.eye(nb)]).double()
+    for method in ["das", "pdal", "ipm"]:
+        h0 = torch.tensor(1.0, dtype=torch.float64, requires_grad=True)
+        hb = torch.cat([h0.reshape(1), torch.ones(2 * nb - 1, dtype=torch.float64)])
+        elastiqp.torch.solve(
+            Qb, qb, Gb, hb, 10.0, A=Ab, b=bb, method=method, target_kappa=1e-9
+        ).x[0].backward()
+        g = float(h0.grad)
+        check(
+            f"d(x0)/d(h0) on active bound, kappa=1e-9 [{method}]",
+            np.isfinite(g) and abs(g - 1.0) < 1e-6,
+            f"g={g:.10f}",
+        )
+
     n_fail = RESULTS.count(False)
     print(f"\n{'All torch tests passed.' if n_fail == 0 else f'{n_fail} FAILURES'}")
     return 1 if n_fail else 0

@@ -418,6 +418,7 @@ class Solver {
 
     // Row scaling cancels in each s.z pair; only the cost scale remains.
     const double kappa_s = c_s_ * kappa;
+    tol = relax_tolerance(tol, kappa);
     int iter = 0;
     Status status = Status::kMaxIter;
     while (iter < max_iter) {

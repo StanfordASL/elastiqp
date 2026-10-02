@@ -307,4 +307,11 @@ inline double retraction_dcomp(double v, double kappa) {
   return v >= 0.0 ? small : 1.0 - small;
 }
 
+// relax() stopping tolerance. The smoothed slacks are O(kappa) and kkt_vjp.hpp
+// divides by them, so an absolute tol >= kappa would accept the unrelaxed
+// solve() point (slack exactly 0 on active rows of an active-set solve).
+inline double relax_tolerance(double tol, double kappa) {
+  return std::min(tol, 1e-2 * kappa);
+}
+
 }  // namespace elastiqp

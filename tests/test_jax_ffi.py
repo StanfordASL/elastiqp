@@ -812,6 +812,31 @@ def main():
     dg = float(jnp.linalg.norm(g_rz - grads[1]))
     check("smoothed gradients invariant to ruiz", dg < 1e-5, f"|dg|={dg:.1e}")
 
+    print("Near-exact gradients (target_kappa below the relax tolerance)")
+    # An exactly active bound from the das active-set solve: relax() must
+    # still move off it, or the VJP divides by a zero slack (NaN).
+    nb = 4
+    Qb = jnp.eye(nb)
+    qb = -jnp.array([2.0, -0.3, 0.1, 0.4])
+    Ab = jnp.ones((1, nb))
+    bb = jnp.array([0.5])
+    Gb = jnp.vstack([jnp.eye(nb), -jnp.eye(nb)])
+    hb = jnp.ones(2 * nb)
+
+    def x0_of_h0(h0, method):
+        return elastiqp.jax.solve(
+            Qb, qb, Gb, hb.at[0].set(h0), 10.0, A=Ab, b=bb,
+            method=method, target_kappa=1e-9,
+        ).x[0]
+
+    for method in ["das", "pdal", "ipm"]:
+        g = float(jax.grad(x0_of_h0)(1.0, method))
+        check(
+            f"d(x0)/d(h0) on active bound, kappa=1e-9 [{method}]",
+            np.isfinite(g) and abs(g - 1.0) < 1e-6,
+            f"g={g:.10f}",
+        )
+
     n_fail = RESULTS.count(False)
     print(f"\n{'All jax ffi tests passed.' if n_fail == 0 else f'{n_fail} FAILURES'}")
     return 1 if n_fail else 0

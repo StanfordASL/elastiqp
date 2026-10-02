@@ -356,6 +356,7 @@ class Solver {
     if (!rw_.ready) relax_alloc();
     RelaxWork& w = rw_;
     const double kappa_s = c_ * kappa;
+    tol = relax_tolerance(tol, kappa);
     const auto Gt = Cts_.rightCols(p_);
     const auto At = Cts_.leftCols(m_);
     relax_seed();

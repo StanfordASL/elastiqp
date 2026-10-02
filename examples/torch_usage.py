@@ -66,7 +66,6 @@ def main():
             penalty,
             A=A,
             b=b,
-            method="pdal",
             target_kappa=kappa,
             eps_abs=1e-10,
         )
@@ -114,7 +113,7 @@ def main():
         h0 = torch.tensor(h0, requires_grad=True)
         h_mod = torch.cat([h0.reshape(1), h[1:]])
         x0 = elastiqp.torch.solve(
-            Q, q, G, h_mod, penalty, A=A, b=b, method="pdal", target_kappa=kappa
+            Q, q, G, h_mod, penalty, A=A, b=b, target_kappa=kappa
         ).x[0]
         x0.backward()
         return float(h0.grad)

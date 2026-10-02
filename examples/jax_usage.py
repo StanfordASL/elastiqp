@@ -77,7 +77,6 @@ def main():
             penalty,
             A=A,
             b=b,
-            method="pdal",
             target_kappa=kappa,
             eps_abs=1e-10,
         )
@@ -105,7 +104,7 @@ def main():
     def x0(h0, kappa):
         h_mod = h.at[0].set(h0)
         return elastiqp.jax.solve(
-            Q, q, G, h_mod, penalty, A=A, b=b, method="pdal", target_kappa=kappa
+            Q, q, G, h_mod, penalty, A=A, b=b, target_kappa=kappa
         ).x[0]
 
     print("\nTo see this, let's compare d(x0)/d(h0): the sensitivity of x0 to its")

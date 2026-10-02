@@ -531,6 +531,19 @@ def main():
         ars.converged == 1 and np.abs(comp - kappa).max() < 1e-8 and rdx < 1e-7,
         f"comp_err={np.abs(comp - kappa).max():.1e} |dx|={rdx:.1e}",
     )
+    # kappa below the default relax tol: the solve() point already passes an
+    # absolute test, so relax() must tighten its tol relative to kappa or it
+    # returns the unrelaxed point (zero slack on active rows -> NaN VJP).
+    tiny = 1e-9
+    for name, s in [("das", asol), ("pdal", pdal), ("ipm", ipm)]:
+        s.solve()
+        r = s.relax(tiny)
+        comp_err = np.abs(relaxed_comp(r) - tiny).max() / tiny
+        check(
+            f"{name} relax at kappa=1e-9 < default tol",
+            r.converged == 1 and comp_err < 0.1,
+            f"rel_comp_err={comp_err:.1e}",
+        )
     a3 = asol.solve()
     check(
         "relax leaves the working set untouched",
