@@ -1273,10 +1273,15 @@ class Solver {
     have_solution_ = st == Status::kSolved;
     res_.noalias() = Ct_.transpose() * sol_.x;
     res_ -= rhs_;
-    if (p_ > 0) {
-      const auto r = res_.tail(p_);
-      sol_.t = r.cwiseMax(0.0);
-      sol_.z_t = penalty_ - sol_.z;
+    // Hard rows (penalty = inf) have no elastic slack: t = 0, z_t = inf, and
+    // they stay out of the penalty term (inf * 0 would poison the objective).
+    const double inf = std::numeric_limits<double>::infinity();
+    double pen_t = 0.0;
+    for (int i = 0; i < p_; ++i) {
+      const bool hard = !std::isfinite(penalty_[i]);
+      sol_.t[i] = hard ? 0.0 : std::max(res_[m_ + i], 0.0);
+      sol_.z_t[i] = hard ? inf : penalty_[i] - sol_.z[i];
+      if (!hard) pen_t += penalty_[i] * sol_.t[i];
     }
     wQx_.noalias() = Q_ * sol_.x;
     const double xQx = sol_.x.dot(wQx_);
@@ -1285,8 +1290,7 @@ class Solver {
     if (p_ > 0) wQx_.noalias() += Ct_.rightCols(p_) * sol_.z;
     sol_.dual_res = wQx_.lpNorm<Eigen::Infinity>();
     sol_.primal_res = m_ > 0 ? res_.head(m_).lpNorm<Eigen::Infinity>() : 0.0;
-    sol_.primal_obj =
-        0.5 * xQx + q_.dot(sol_.x) + (p_ > 0 ? penalty_.dot(sol_.t) : 0.0);
+    sol_.primal_obj = 0.5 * xQx + q_.dot(sol_.x) + pen_t;
     double dual_obj = -0.5 * xQx;
     if (m_ > 0) dual_obj -= rhs_.head(m_).dot(sol_.y);
     if (p_ > 0) dual_obj -= rhs_.tail(p_).dot(sol_.z);

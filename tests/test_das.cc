@@ -116,6 +116,13 @@ void HardRows(std::mt19937& rng) {
         InfNorm(s.x - ref.x) <= 1e-6 && (s.z_t.array() == inf).all() &&
             s.t.maxCoeff() <= 1e-10,
         InfNorm(s.x - ref.x), "err");
+  // Hard rows stay out of the penalty term (inf * 0 used to give NaN).
+  const double obj_strict = 0.5 * s.x.dot(qp.Q * s.x) + qp.q.dot(s.x);
+  Check("hard rows, feasible: finite objective and gap",
+        std::isfinite(s.duality_gap) && (s.t.array() == 0.0).all() &&
+            std::abs(s.primal_obj - obj_strict) <=
+                1e-12 * std::max(1.0, std::abs(obj_strict)),
+        s.primal_obj, "obj");
 
   QPData c = problem_gen::Infeasible(rng, 12, 30, 1);  // rows 0/1 conflict
   const elastiqp::Solution bad = das::Solve(c.Q, c.q, c.G, c.h, w_inf);
@@ -131,6 +138,14 @@ void HardRows(std::mt19937& rng) {
         mix.converged == 1 && r[1] > 0.5 && r.head(1).maxCoeff() <= 1e-9 &&
             r.tail(28).maxCoeff() <= 1e-9,
         r[1], "viol");
+  const double obj_mix = 0.5 * mix.x.dot(c.Q * mix.x) + c.q.dot(mix.x) +
+                         w_mix[1] * std::max(r[1], 0.0);
+  Check("hard vs elastic conflict: objective counts only the elastic slack",
+        std::isfinite(mix.duality_gap) &&
+            std::abs(mix.primal_obj - obj_mix) <=
+                1e-9 * std::max(1.0, std::abs(obj_mix)) &&
+            mix.z_t[0] == inf && std::isfinite(mix.z_t[1]),
+        mix.primal_obj, "obj");
 }
 
 // Same problem in a badly scaled parametrization x = S x', rows scaled by e
