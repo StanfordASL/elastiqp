@@ -420,6 +420,12 @@ def main():
     q_c = args[1].clone().requires_grad_(True)
     torch.compile(lambda q_: loss_smooth(args[0], q_, *args[2:]))(q_c).backward()
     check("compiled backward matches eager", maxabs(q_c.grad - grads[1]) < 1e-12, "")
+    # ...w.r.t. every input: the matrix gradients exercise the kkt_vjp
+    # fake kernel's output strides.
+    lv_c = tuple(a.clone().requires_grad_(True) for a in args)
+    torch.compile(loss_smooth, fullgraph=True)(*lv_c).backward()
+    dgc = max(maxabs(l.grad - g) for l, g in zip(lv_c, grads))
+    check("compiled backward (all inputs) matches eager", dgc < 1e-12, f"|dg|={dgc:.1e}")
 
     # No equality constraints: (n+m) saddle system degenerates to n x n.
     Q0, q0, _, _, G0, h0, _ = random_qp(30, 12, 0, 8)

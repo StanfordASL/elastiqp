@@ -225,7 +225,9 @@ def _vjp_impl(
             _np(ct_z_t),
             _np(ct_z),
         )
-        return tuple(torch.from_numpy(r) for r in res)
+        # Eigen matrices come back column-major; the fake kernel (and so
+        # torch.compile's stride asserts) promises contiguous outputs.
+        return tuple(torch.from_numpy(np.ascontiguousarray(r)) for r in res)
     n, m, p = Q.shape[-1], A.shape[-2], G.shape[-2]
     nb = int(np.prod(batch))
     flat = lambda x, d: _np(x).reshape((nb,) + d)
