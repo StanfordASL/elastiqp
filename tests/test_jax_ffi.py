@@ -181,7 +181,7 @@ def main():
     w_t = jnp.asarray(0.3 * rngd.standard_normal(8))
     args = tuple(jnp.asarray(v) for v in (Qf, qf, Af, bf, Gf, hf, pen))
 
-    def loss_smooth(Q_, q_, A_, b_, G_, h_, penalty_, kap=kappa):
+    def loss_smooth(Q_, q_, A_, b_, G_, h_, penalty_, kap=kappa, method="das"):
         s = elastiqp.jax.solve(
             Q_,
             q_,
@@ -190,14 +190,14 @@ def main():
             penalty_,
             A=A_,
             b=b_,
-            method="pdal",
+            method=method,
             eps_abs=1e-11,
             max_iter=300,
             target_kappa=kap,
         )
         return w_loss @ s.x + w_t @ s.t
 
-    def loss_relaxed(Q_, q_, A_, b_, G_, h_, penalty_, kap=kappa):
+    def loss_relaxed(Q_, q_, A_, b_, G_, h_, penalty_, kap=kappa, method="das"):
         out = elastiqp.jax._ffi_solve(
             Q_,
             q_,
@@ -210,7 +210,7 @@ def main():
             300,
             False,
             kap,
-            "pdal",
+            method,
         )
         xr, tr = out[5], out[6]
         return w_loss @ xr + w_t @ tr
@@ -261,7 +261,6 @@ def main():
             args[6],
             A=args[2],
             b=args[3],
-            method="pdal",
             eps_abs=1e-11,
             max_iter=300,
         )
@@ -318,7 +317,7 @@ def main():
     # relaxation would otherwise mean silently wrong gradients). s_t = t and
     # s_in = h + t - Gx are the slacks of t >= 0 and Gx - t <= h; s_in is
     # reconstructed from x, so it carries the O(tol) primal residual.
-    out = elastiqp.jax._ffi_solve(*args, 1e-11, 300, False, kappa, "pdal")
+    out = elastiqp.jax._ffi_solve(*args, 1e-11, 300, False, kappa, "das")
     xr, tr, z_t_r, z_r, info = out[5], out[6], out[8], out[9], out[10]
     s_in_r = args[5] + tr - args[4] @ xr
     comp = max(
@@ -335,7 +334,7 @@ def main():
     # silently: an absurd kappa converges the solve (info[0]) but stalls the
     # relaxation (info[2]), and solve() folds that into converged on the
     # differentiated path.
-    out = elastiqp.jax._ffi_solve(*args, 1e-11, 300, False, 1e8, "pdal")
+    out = elastiqp.jax._ffi_solve(*args, 1e-11, 300, False, 1e8, "das")
     tight_ok, relax_bad = float(out[10][0]) == 1.0, float(out[10][2]) == 0.0
 
     def conv_smooth(q_):
@@ -347,7 +346,6 @@ def main():
             args[6],
             A=args[2],
             b=args[3],
-            method="pdal",
             eps_abs=1e-11,
             max_iter=300,
             target_kappa=1e8,
@@ -471,7 +469,7 @@ def main():
         jax.grad(
             lambda q_: jnp.sum(
                 elastiqp.jax.solve(
-                    Qx, q_, Gx, hx, 10.0, A=Ax, b=bx, method="pdal", target_kappa=0.0
+                    Qx, q_, Gx, hx, 10.0, A=Ax, b=bx, target_kappa=0.0
                 ).x
             )
         )(qx)
@@ -485,9 +483,9 @@ def main():
         "",
     )
 
-    # With the default target_kappa (1e-3), grad works out of the box on the
-    # pdal and ipm backends.
-    for method in ("pdal", "ipm"):
+    # With the default target_kappa (1e-3), grad works out of the box on
+    # every backend.
+    for method in elastiqp.jax.METHODS:
         g_def = jax.grad(
             lambda q_: jnp.sum(
                 elastiqp.jax.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx, method=method).x
@@ -498,88 +496,52 @@ def main():
             bool(jnp.all(jnp.isfinite(g_def))),
             "",
         )
-    # ...and the two backends agree on it (same relaxed KKT point).
-    g_pd, g_ip = (
-        jax.grad(
-            lambda q_: (
-                loss_smooth(args[0], q_, *args[2:])
-                if m == "pdal"
-                else w_loss
-                @ elastiqp.jax.solve(
-                    args[0],
-                    q_,
-                    args[4],
-                    args[5],
-                    args[6],
-                    A=args[2],
-                    b=args[3],
-                    method="ipm",
-                    eps_abs=1e-11,
-                    max_iter=300,
-                    target_kappa=kappa,
-                ).x
-                + w_t
-                @ elastiqp.jax.solve(
-                    args[0],
-                    q_,
-                    args[4],
-                    args[5],
-                    args[6],
-                    A=args[2],
-                    b=args[3],
-                    method="ipm",
-                    eps_abs=1e-11,
-                    max_iter=300,
-                    target_kappa=kappa,
-                ).t
-            )
-        )(args[1])
-        for m in ("pdal", "ipm")
-    )
-    dpi = float(jnp.abs(g_pd - g_ip).max())
-    check("pdal and ipm smoothed d/dq agree", dpi < 1e-5, f"|dg|={dpi:.1e}")
 
-    print("Active-set backend: forward and gradients")
-    a_sol = elastiqp.jax.solve(Qx, qx, Gx, hx, 10.0, A=Ax, b=bx, method="das")
-    a_ref = elastiqp.solve(Qx, qx, Gx, hx, 10.0, A=Ax, b=bx, method="das")
-    da = float(jnp.abs(a_sol.x - jnp.asarray(a_ref.x)).max())
-    check(
-        "as forward matches nanobind",
-        int(a_sol.converged) == 1 and da < FFI_NB_TOL,
-        f"|dx|={da:.1e}",
-    )
-    a_jit = jax.jit(
-        lambda q_: elastiqp.jax.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx, method="das").x
-    )(qx)
-    check("as under jit", float(jnp.abs(a_jit - a_sol.x).max()) == 0.0, "")
-    # Gradients: das relaxes to the same kappa point as pdal / ipm and
-    # shares their backward pass, so every input gradient must agree.
-    def loss_das(Q_, q_, A_, b_, G_, h_, penalty_):
-        s = elastiqp.jax.solve(
-            Q_,
-            q_,
-            G_,
-            h_,
-            penalty_,
-            A=A_,
-            b=b_,
-            method="das",
-            eps_abs=1e-9,
-            target_kappa=kappa,
+    print("Backend agreement: das vs pdal vs ipm")
+    # Every backend relaxes to the same kappa point and shares the KKT
+    # backward pass, so forward values, relaxed points and every input
+    # gradient must agree across backends (the reference above is das).
+    x_tight = {
+        m: elastiqp.jax.solve(
+            args[0],
+            args[1],
+            args[4],
+            args[5],
+            args[6],
+            A=args[2],
+            b=args[3],
+            method=m,
+            eps_abs=1e-11,
+            max_iter=300,
+        ).x
+        for m in elastiqp.jax.METHODS
+    }
+    relaxed = {
+        m: elastiqp.jax._ffi_solve(*args, 1e-11, 300, False, kappa, m)
+        for m in elastiqp.jax.METHODS
+    }
+    for m in ("pdal", "ipm"):
+        dx = float(jnp.abs(x_tight[m] - x_tight["das"]).max())
+        check(f"tight x: das vs {m}", dx < 1e-8, f"|dx|={dx:.1e}")
+        dr = max(
+            float(jnp.abs(relaxed[m][i] - relaxed["das"][i]).max()) for i in (5, 6)
         )
-        return w_loss @ s.x + w_t @ s.t
-
-    g_das = jax.jit(jax.grad(loss_das, argnums=tuple(range(7))))(*args)
-    dg = max(float(jnp.abs(a - b_).max()) for a, b_ in zip(g_das, grads))
-    check("das gradients (all inputs) match pdal", dg < 1e-6, f"|dg|={dg:.1e}")
-    dgi = float(jnp.abs(g_das[1] - g_ip).max())
-    check("das smoothed d/dq matches ipm", dgi < 1e-5, f"|dg|={dgi:.1e}")
+        check(f"relaxed (x, t): das vs {m}", dr < 1e-8, f"|dx|={dr:.1e}")
+        g_m = jax.jit(
+            jax.grad(lambda *a: loss_smooth(*a, method=m), argnums=tuple(range(7)))
+        )(*args)
+        dg = max(float(jnp.abs(a - b_).max()) for a, b_ in zip(g_m, grads))
+        check(f"gradients (all inputs, jit): das vs {m}", dg < 1e-8, f"|dg|={dg:.1e}")
     qs_d = args[1] + 0.05 * jnp.asarray(rngd.standard_normal((3, 12)))
-    g_vd = jax.vmap(jax.grad(lambda q_: loss_das(args[0], q_, *args[2:])))(qs_d)
-    g_vp = jax.vmap(jax.grad(lambda q_: loss_smooth(args[0], q_, *args[2:])))(qs_d)
+    g_vd, g_vp = (
+        jax.vmap(jax.grad(lambda q_: loss_smooth(args[0], q_, *args[2:], method=m)))(
+            qs_d
+        )
+        for m in ("das", "pdal")
+    )
     dgv = float(jnp.abs(g_vd - g_vp).max())
-    check("das vmap(grad) matches pdal", dgv < 1e-6, f"|dg|={dgv:.1e}")
-    # The default call (method="das", target_kappa=1e-3) is differentiable.
+    check("vmap(grad): das vs pdal", dgv < 1e-8, f"|dg|={dgv:.1e}")
+    # Default call (das, default eps_abs / target_kappa) vs a tight pdal solve.
     g_def, g_ref = (
         jax.grad(
             lambda q_: jnp.sum(
@@ -590,15 +552,29 @@ def main():
     )
     dgd = float(jnp.abs(g_def - g_ref).max())
     check(
-        "grad with the default method and target_kappa",
-        bool(jnp.all(jnp.isfinite(g_def))) and dgd < 1e-4,
+        "default-call d/dq: das vs pdal",
+        bool(jnp.all(jnp.isfinite(g_def))) and dgd < 1e-6,
         f"|dg|={dgd:.1e}",
     )
+
+    print("Active-set backend specifics")
+    a_sol = elastiqp.jax.solve(Qx, qx, Gx, hx, 10.0, A=Ax, b=bx)
+    a_ref = elastiqp.solve(Qx, qx, Gx, hx, 10.0, A=Ax, b=bx)
+    da = float(jnp.abs(a_sol.x - jnp.asarray(a_ref.x)).max())
+    check(
+        "das forward matches nanobind (infeasible)",
+        int(a_sol.converged) == 1 and da < FFI_NB_TOL,
+        f"|dx|={da:.1e}",
+    )
+    a_jit = jax.jit(
+        lambda q_: elastiqp.jax.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx).x
+    )(qx)
+    check("das under jit", float(jnp.abs(a_jit - a_sol.x).max()) == 0.0, "")
     # Hard rows (penalty = inf, das only): finite gradients, none w.r.t. the
     # hard row's penalty, close to a stiff elastic penalty in its place.
     pen_hard = args[6].at[5].set(jnp.inf)
-    g_hard = jax.grad(loss_das, argnums=tuple(range(7)))(*args[:6], pen_hard)
-    g_stiff = jax.grad(loss_das, argnums=tuple(range(7)))(
+    g_hard = jax.grad(loss_smooth, argnums=tuple(range(7)))(*args[:6], pen_hard)
+    g_stiff = jax.grad(loss_smooth, argnums=tuple(range(7)))(
         *args[:6], args[6].at[5].set(1e7)
     )
     dgh = max(float(jnp.abs(a - b_).max()) for a, b_ in zip(g_hard[:6], g_stiff[:6]))
@@ -783,7 +759,7 @@ def main():
         jax.grad(
             lambda q_: jnp.sum(
                 elastiqp.jax.solve(
-                    Qw, q_, Gw, h_k, 10.0, A=Aw, b=b_k, method="pdal", warm_start=p_sol
+                    Qw, q_, Gw, h_k, 10.0, A=Aw, b=b_k, warm_start=p_sol
                 ).x
             )
         )(q_k)
@@ -825,10 +801,9 @@ def main():
             args[6],
             A=args[2],
             b=args[3],
-            method="pdal",
             eps_abs=1e-11,
             max_iter=300,
-            ruiz=True,
+            ruiz=False,  # default is ruiz=True
             target_kappa=kappa,
         )
         return w_loss @ s.x + w_t @ s.t
