@@ -190,6 +190,15 @@ class Solver {
     rhs_dirty_ = true;
   }
   void set_G(const MatrixXd& G) { set_rows(G, m_); }
+  // Replace rows [first, first + R.rows()); read R in place.
+  template <class Derived>
+  void set_A_rows(int first, const Eigen::MatrixBase<Derived>& R) {
+    set_rows(R, first);
+  }
+  template <class Derived>
+  void set_G_rows(int first, const Eigen::MatrixBase<Derived>& R) {
+    set_rows(R, m_ + first);
+  }
   void set_h(const VectorXd& h) {
     rhs_.tail(p_) = h;
     rhs_dirty_ = true;
@@ -670,7 +679,8 @@ class Solver {
   }
 
   // Marks only rows that actually changed.
-  void set_rows(const MatrixXd& R, int offset) {
+  template <class Derived>
+  void set_rows(const Eigen::MatrixBase<Derived>& R, int offset) {
     for (int i = 0; i < R.rows(); ++i) {
       bool same = true;
       for (int k = 0; k < n_ && same; ++k) same = Ct_(k, offset + i) == R(i, k);

@@ -18,8 +18,10 @@ else()
 endif()
 option(ELASTIQP_BUILD_TESTS "Build the elastiqp test suite" ${_elastiqp_top_level})
 option(ELASTIQP_BUILD_PYTHON "Build the Python bindings and JAX FFI" ${_elastiqp_top_level})
+option(ELASTIQP_BUILD_C "Build the C interface library (elastiqp_c)" ${_elastiqp_top_level})
 if(SKBUILD)  # pip wheel build: bindings only, no install/export
   set(ELASTIQP_BUILD_TESTS OFF)
+  set(ELASTIQP_BUILD_C OFF)
   set(ELASTIQP_BUILD_PYTHON ON)
 endif()
 
@@ -33,6 +35,27 @@ target_include_directories(elastiqp INTERFACE
   $<INSTALL_INTERFACE:include>)
 target_link_libraries(elastiqp INTERFACE Eigen3::Eigen)
 target_compile_features(elastiqp INTERFACE cxx_std_17)
+
+# C interface library
+if(ELASTIQP_BUILD_C)
+  enable_language(C)
+  add_library(elastiqp_c src/elastiqp_c.cc)
+  add_library(elastiqp::elastiqp_c ALIAS elastiqp_c)
+  target_link_libraries(elastiqp_c PRIVATE elastiqp::elastiqp)
+  target_include_directories(elastiqp_c PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>)
+  target_compile_definitions(elastiqp_c PRIVATE ELASTIQP_C_BUILDING)
+  if(BUILD_SHARED_LIBS)
+    target_compile_definitions(elastiqp_c PUBLIC ELASTIQP_C_SHARED)
+  endif()
+  set_target_properties(elastiqp_c PROPERTIES
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+    POSITION_INDEPENDENT_CODE ON
+    VERSION ${PROJECT_VERSION}
+    SOVERSION ${PROJECT_VERSION_MAJOR})
+endif()
 
 # Headers for tests (never installed)
 add_library(elastiqp_testing INTERFACE)
@@ -75,6 +98,19 @@ if(ELASTIQP_BUILD_TESTS)
 
   elastiqp_test(test_lp)
   add_test(NAME elastiqp.lp COMMAND test_lp)
+
+  if(ELASTIQP_BUILD_C)
+    add_executable(test_c_api tests/test_c_api.c)
+    target_link_libraries(test_c_api PRIVATE elastiqp::elastiqp_c)
+    if(NOT MSVC)
+      target_link_libraries(test_c_api PRIVATE m)
+    endif()
+    add_test(NAME elastiqp.c_api COMMAND test_c_api)
+
+    elastiqp_test(test_c_parity)
+    target_link_libraries(test_c_parity PRIVATE elastiqp::elastiqp_c)
+    add_test(NAME elastiqp.c_parity COMMAND test_c_parity)
+  endif()
 endif()
 
 # Python bindings and JAX FFI

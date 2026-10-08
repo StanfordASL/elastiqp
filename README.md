@@ -94,7 +94,7 @@ Note: if using UV, you can directly replace the above `pip` commands with `uv pi
 elastiqp::Solution sol = elastiqp::Solve(Q, q, A, b, G, h, penalty);
 // or without equalities: elastiqp::Solve(Q, q, G, h, penalty)
 
-// If you are solving multiple times in a control loop:
+// Repeated solves
 elastiqp::Solver solver;
 solver.setup(Q, q, A, b, G, h, penalty);
 while (running) {
@@ -103,6 +103,34 @@ while (running) {
   const elastiqp::Solution& sol = solver.solve();
 }
 ```
+
+### C
+
+The C interface uses the active-set backend. Build `elastiqp_c` with `-DELASTIQP_BUILD_C=ON` (default for top-level builds); add `-DBUILD_SHARED_LIBS=ON` for a shared library. Matrices are dense row-major; only the upper triangle of `Q` is read. Exit flags: `> 0` success, `0` unsolved, `< 0` failure. See [`elastiqp_c.h`](include/elastiqp/elastiqp_c.h) for the API.
+
+```c
+#include "elastiqp/elastiqp_c.h"
+
+// One-shot solve; penalty >= ELASTIQP_INF makes a row hard.
+ElastiQPProblem qp = {.n = n, .m = m, .p = p, .Q = Q, .q = q, .A = A, .b = b,
+                      .G = G, .h = h, .penalty = penalty};
+ElastiQPResult res = {.x = x, .z = z};  // caller-owned outputs; NULL ones are skipped
+elastiqp_quadprog(&res, &qp, NULL);     // NULL: default settings
+
+// Repeated solves
+ElastiQPWorkspace* work;
+elastiqp_setup(&work, &qp, NULL);
+while (running) {
+  elastiqp_update_q(work, q_k); elastiqp_update_h(work, h_k); elastiqp_update_b(work, b_k);
+  elastiqp_update_G_rows(work, first, count, rows_k);  // changed rows
+  if (elastiqp_solve(&res, work) < 0) { /* ... */ }
+}
+elastiqp_free(work);
+```
+
+Pass settings as an `ElastiQPSettings` struct or set them by name: `elastiqp_set_option(work, "eps_abs", 1e-8)`. Use `elastiqp_num_options` and `elastiqp_option_info` to list names, types, defaults, ranges, and descriptions.
+
+With CMake: `find_package(elastiqp)` and link `elastiqp::elastiqp_c`.
 
 ### Python
 
