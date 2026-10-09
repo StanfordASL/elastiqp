@@ -106,7 +106,7 @@ while (running) {
 
 ### C
 
-The C interface uses the active-set backend. Build `elastiqp_c` with `-DELASTIQP_BUILD_C=ON` (default for top-level builds); add `-DBUILD_SHARED_LIBS=ON` for a shared library. Matrices are dense row-major; only the upper triangle of `Q` is read. Status codes: `> 0` success, `0` unsolved, `< 0` failure. See [`elastiqp_c.h`](include/elastiqp/elastiqp_c.h) for the API.
+The C interface uses the active-set backend. Build `elastiqp_c` with `-DELASTIQP_BUILD_C=ON` (default for top-level builds); add `-DBUILD_SHARED_LIBS=ON` for a shared library. Matrices are dense row-major; only the upper triangle of `Q` is read. Status codes match `elastiqp::Status` (`ELASTIQP_SOLVED`, `ELASTIQP_MAX_ITER`, ...); API errors are negative. See [`elastiqp_c.h`](include/elastiqp/elastiqp_c.h) for the API.
 
 ```c
 #include "elastiqp/elastiqp_c.h"
@@ -123,7 +123,7 @@ elastiqp_setup(&work, &qp, NULL);
 while (running) {
   elastiqp_set_q(work, q_k); elastiqp_set_h(work, h_k); elastiqp_set_b(work, b_k);
   elastiqp_set_G_rows(work, first, count, rows_k);  // changed rows
-  if (elastiqp_solve(&res, work) < 0) { /* ... */ }
+  if (elastiqp_solve(&res, work) != ELASTIQP_SOLVED) { /* ... */ }
 }
 elastiqp_free(work);
 ```

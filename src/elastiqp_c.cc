@@ -35,21 +35,13 @@ double Seconds(Clock::time_point since) {
   return std::chrono::duration<double>(Clock::now() - since).count();
 }
 
-int StatusCode(elastiqp::Status s) {
-  switch (s) {
-    case elastiqp::Status::kSolved:
-      return ELASTIQP_SOLVED;
-    case elastiqp::Status::kUnsolved:
-      return ELASTIQP_UNSOLVED;
-    case elastiqp::Status::kMaxIter:
-      return ELASTIQP_MAX_ITER;
-    case elastiqp::Status::kNumerics:
-      return ELASTIQP_NUMERICS;
-    case elastiqp::Status::kInfeasible:
-      return ELASTIQP_INFEASIBLE;
-  }
-  return ELASTIQP_ERR_INTERNAL;
-}
+static_assert(
+    ELASTIQP_UNSOLVED == static_cast<int>(elastiqp::Status::kUnsolved) &&
+        ELASTIQP_SOLVED == static_cast<int>(elastiqp::Status::kSolved) &&
+        ELASTIQP_MAX_ITER == static_cast<int>(elastiqp::Status::kMaxIter) &&
+        ELASTIQP_NUMERICS == static_cast<int>(elastiqp::Status::kNumerics) &&
+        ELASTIQP_INFEASIBLE == static_cast<int>(elastiqp::Status::kInfeasible),
+    "C status codes must equal elastiqp::Status");
 
 // Shared metadata for settings conversion, validation, and named options.
 // Add new fields here and in tests/test_c_parity.cc.
@@ -259,7 +251,7 @@ int Extract(ElastiQPSolution* res, const elastiqp::Solution& sol) {
   if (res->z) Map<VectorXd>(res->z, sol.z.size()) = sol.z;
   if (res->t) Map<VectorXd>(res->t, sol.t.size()) = sol.t;
   if (res->z_t) Map<VectorXd>(res->z_t, sol.z_t.size()) = sol.z_t;
-  res->status = StatusCode(sol.status);
+  res->status = static_cast<int>(sol.status);
   res->iters = sol.iters;
   res->outer_iters = sol.outer_iters;
   res->n_active = sol.n_active;
@@ -369,7 +361,7 @@ int elastiqp_solve_once(ElastiQPSolution* res, const ElastiQPProblem* qp,
     solve_time = Seconds(t1);
     return Extract(res, sol);
   });
-  if (flag <= ELASTIQP_ERR_INVALID_ARG) return Fail(res, flag);
+  if (flag < 0) return Fail(res, flag);
   res->setup_time = setup_time;
   res->solve_time = solve_time;
   return flag;
@@ -404,7 +396,7 @@ int elastiqp_solve(ElastiQPSolution* res, ElastiQPWorkspace* work) {
     return Extract(res, sol);
   });
   work->solved = flag == ELASTIQP_SOLVED;
-  if (flag <= ELASTIQP_ERR_INVALID_ARG) return Fail(res, flag);
+  if (flag < 0) return Fail(res, flag);
   res->setup_time = 0.0;
   res->solve_time = solve_time;
   return flag;
@@ -590,7 +582,7 @@ int elastiqp_relax(ElastiQPSolution* res, ElastiQPWorkspace* work, double kappa,
     solve_time = Seconds(t0);
     return Extract(res, sol);
   });
-  if (flag <= ELASTIQP_ERR_INVALID_ARG) return Fail(res, flag);
+  if (flag < 0) return Fail(res, flag);
   res->setup_time = 0.0;
   res->solve_time = solve_time;
   return flag;

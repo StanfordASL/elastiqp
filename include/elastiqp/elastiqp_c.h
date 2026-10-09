@@ -11,7 +11,7 @@
  * Q is symmetric; only its upper triangle is read.
  * Two-sided constraints and variable bounds use two rows of G (g and -g).
  * Penalties must be > 0; values >= ELASTIQP_INF make the row hard (t = 0).
- * Status codes: > 0 success, 0 unsolved, < 0 failure.
+ * Solver status codes match elastiqp::Status (0-4); API errors are < 0.
  *
  * Use elastiqp_solve_once() for one-shot solves, or setup/set_X/solve/free
  * for repeated solves. Input data is copied; caller buffers can be reused.
@@ -42,16 +42,18 @@ extern "C" {
 /* Hard-row penalty threshold. */
 #define ELASTIQP_INF 1e30
 
-/* Status codes. */
+/* Solver status codes, equal to elastiqp::Status. */
+#define ELASTIQP_UNSOLVED 0   /* no solve yet */
 #define ELASTIQP_SOLVED 1
-#define ELASTIQP_UNSOLVED 0     /* no solve yet */
-#define ELASTIQP_MAX_ITER (-1)  /* iteration limit reached */
-#define ELASTIQP_NUMERICS (-2)  /* numerical failure */
-#define ELASTIQP_INFEASIBLE (-3) /* inconsistent equalities or hard rows */
-#define ELASTIQP_ERR_INVALID_ARG (-10) /* NULL, bad dimension, value, name */
-#define ELASTIQP_ERR_NOT_SOLVED (-11)  /* relax() without a current solve */
-#define ELASTIQP_ERR_ALLOC (-12)       /* out of memory */
-#define ELASTIQP_ERR_INTERNAL (-13)    /* unexpected C++ exception */
+#define ELASTIQP_MAX_ITER 2   /* iteration limit reached */
+#define ELASTIQP_NUMERICS 3   /* numerical failure */
+#define ELASTIQP_INFEASIBLE 4 /* inconsistent equalities or hard rows */
+
+/* API errors. */
+#define ELASTIQP_ERR_INVALID_ARG (-1) /* NULL, bad dimension, value, name */
+#define ELASTIQP_ERR_NOT_SOLVED (-2)  /* relax() without a current solve */
+#define ELASTIQP_ERR_ALLOC (-3)       /* out of memory */
+#define ELASTIQP_ERR_INTERNAL (-4)    /* unexpected C++ exception */
 
 typedef struct {
   int n; /* number of variables, >= 1 */

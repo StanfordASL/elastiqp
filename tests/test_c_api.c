@@ -148,7 +148,7 @@ static void workspace(void) {
     elastiqp_set_warm_start(work, xw, NULL, NULL);
     elastiqp_solve(&res, work);
     check("set_settings: max_iter = 0 fails",
-          res.status == ELASTIQP_MAX_ITER && res.status < 0);
+          res.status == ELASTIQP_MAX_ITER);
     elastiqp_set_settings(work, &s);
     elastiqp_solve(&res, work);
     check("set_settings: restored", res.status == ELASTIQP_SOLVED);
