@@ -23,8 +23,6 @@ struct ElastiQPWorkspace {
   das::Solver solver;
   MatrixXd Q;
   VectorXd q, b, h, penalty, x, y, z;
-  // Successful solve on current data; required by relax().
-  bool solved = false;
 };
 
 namespace {
@@ -395,7 +393,6 @@ int elastiqp_solve(ElastiQPSolution* res, ElastiQPWorkspace* work) {
     solve_time = Seconds(t0);
     return Extract(res, sol);
   });
-  work->solved = flag == ELASTIQP_SOLVED;
   if (flag < 0) return Fail(res, flag);
   res->setup_time = 0.0;
   res->solve_time = solve_time;
@@ -466,7 +463,6 @@ int elastiqp_set_Q(ElastiQPWorkspace* work, const double* Q) {
   if (work == nullptr) return ELASTIQP_ERR_INVALID_ARG;
   StageQ(work->Q, Q, work->solver.n());
   work->solver.set_Q(work->Q);
-  work->solved = false;
   return 0;
 }
 
@@ -478,7 +474,6 @@ int elastiqp_set_q(ElastiQPWorkspace* work, const double* q) {
     work->q.setZero();
   }
   work->solver.set_q(work->q);
-  work->solved = false;
   return 0;
 }
 
@@ -494,7 +489,6 @@ int elastiqp_set_b(ElastiQPWorkspace* work, const double* b) {
   if (b == nullptr) return ELASTIQP_ERR_INVALID_ARG;
   work->b = VectorMap(b, m);
   work->solver.set_b(work->b);
-  work->solved = false;
   return 0;
 }
 
@@ -510,7 +504,6 @@ int elastiqp_set_h(ElastiQPWorkspace* work, const double* h) {
   if (h == nullptr) return ELASTIQP_ERR_INVALID_ARG;
   work->h = VectorMap(h, p);
   work->solver.set_h(work->h);
-  work->solved = false;
   return 0;
 }
 
@@ -523,7 +516,6 @@ int elastiqp_set_penalty(ElastiQPWorkspace* work, const double* penalty) {
   }
   StagePenalty(work->penalty, penalty);
   work->solver.set_penalty(work->penalty);
-  work->solved = false;
   return 0;
 }
 
@@ -534,7 +526,6 @@ int elastiqp_set_A_rows(ElastiQPWorkspace* work, int first, int count,
   }
   if (count == 0) return 0;
   work->solver.set_A_rows(first, RowMajorMap(rows, count, work->solver.n()));
-  work->solved = false;
   return 0;
 }
 
@@ -545,7 +536,6 @@ int elastiqp_set_G_rows(ElastiQPWorkspace* work, int first, int count,
   }
   if (count == 0) return 0;
   work->solver.set_G_rows(first, RowMajorMap(rows, count, work->solver.n()));
-  work->solved = false;
   return 0;
 }
 
@@ -574,7 +564,7 @@ int elastiqp_relax(ElastiQPSolution* res, ElastiQPWorkspace* work, double kappa,
   if (work == nullptr || !(kappa > 0.0) || !(tol > 0.0) || max_iter < 0) {
     return Fail(res, ELASTIQP_ERR_INVALID_ARG);
   }
-  if (!work->solved) return Fail(res, ELASTIQP_ERR_NOT_SOLVED);
+  if (!work->solver.can_relax()) return Fail(res, ELASTIQP_ERR_NOT_SOLVED);
   double solve_time = 0.0;
   const int flag = Guard([&] {
     const Clock::time_point t0 = Clock::now();

@@ -258,6 +258,17 @@ static void relax(void) {
   elastiqp_solve(&res, work);
   check("relax after re-solve",
         elastiqp_relax(&res, work, 1e-3, 1e-8, 50) == ELASTIQP_SOLVED);
+  elastiqp_set_G(work, G);
+  check("relax after re-sending identical rows",
+        elastiqp_relax(&res, work, 1e-3, 1e-8, 50) == ELASTIQP_SOLVED);
+  ElastiQPSettings s;
+  elastiqp_get_settings(work, &s);
+  s.max_iter = 0;
+  elastiqp_set_settings(work, &s);
+  elastiqp_set_q(work, q);
+  check("solve hits max_iter", elastiqp_solve(&res, work) == ELASTIQP_MAX_ITER);
+  check("relax after a failed solve: not_solved",
+        elastiqp_relax(&res, work, 1e-3, 1e-8, 50) == ELASTIQP_ERR_NOT_SOLVED);
   elastiqp_free(work);
 }
 

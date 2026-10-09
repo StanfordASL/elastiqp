@@ -219,6 +219,17 @@ class Solver {
     explicit_warm_ = true;
   }
 
+  // Can relax/differentiate if the last solve succeeded and no data changed
+  bool can_relax() const {
+    if (!have_solution_ || Q_dirty_ || penalty_dirty_ || rhs_dirty_) {
+      return false;
+    }
+    for (char c : col_dirty_) {
+      if (c != 0) return false;
+    }
+    return true;
+  }
+
   RowState row_state(int i) const {
     return state_[static_cast<size_t>(m_ + i)];
   }
@@ -355,13 +366,13 @@ class Solver {
   // start untouched. The first call after setup() allocates its workspace.
   const Solution& relax(double kappa, double tol = 1e-6, int max_iter = 50) {
     if (p_ == 0 || kappa <= 0.0) return sol_;
-    bool stale = Q_dirty_ || penalty_dirty_ || rhs_dirty_;
-    for (char c : col_dirty_) stale |= c != 0;
-    if (stale && have_solution_) {
-      sol_.status = Status::kUnsolved;
-      sol_.converged = 0;
+    if (!can_relax()) {
+      if (have_solution_) {  // data changed since the solve
+        sol_.status = Status::kUnsolved;
+        sol_.converged = 0;
+      }
+      return sol_;
     }
-    if (stale || !have_solution_) return sol_;
     if (!rw_.ready) relax_alloc();
     RelaxWork& w = rw_;
     const double kappa_s = c_ * kappa;
