@@ -106,7 +106,7 @@ while (running) {
 
 ### C
 
-The C interface uses the active-set backend. Build `elastiqp_c` with `-DELASTIQP_BUILD_C=ON` (default for top-level builds); add `-DBUILD_SHARED_LIBS=ON` for a shared library. Matrices are dense row-major; only the upper triangle of `Q` is read. Exit flags: `> 0` success, `0` unsolved, `< 0` failure. See [`elastiqp_c.h`](include/elastiqp/elastiqp_c.h) for the API.
+The C interface uses the active-set backend. Build `elastiqp_c` with `-DELASTIQP_BUILD_C=ON` (default for top-level builds); add `-DBUILD_SHARED_LIBS=ON` for a shared library. Matrices are dense row-major; only the upper triangle of `Q` is read. Status codes: `> 0` success, `0` unsolved, `< 0` failure. See [`elastiqp_c.h`](include/elastiqp/elastiqp_c.h) for the API.
 
 ```c
 #include "elastiqp/elastiqp_c.h"
@@ -114,15 +114,15 @@ The C interface uses the active-set backend. Build `elastiqp_c` with `-DELASTIQP
 // One-shot solve; penalty >= ELASTIQP_INF makes a row hard.
 ElastiQPProblem qp = {.n = n, .m = m, .p = p, .Q = Q, .q = q, .A = A, .b = b,
                       .G = G, .h = h, .penalty = penalty};
-ElastiQPResult res = {.x = x, .z = z};  // caller-owned outputs; NULL ones are skipped
-elastiqp_quadprog(&res, &qp, NULL);     // NULL: default settings
+ElastiQPSolution res = {.x = x, .z = z};  // caller-owned outputs; NULL ones are skipped
+elastiqp_solve_once(&res, &qp, NULL);     // NULL: default settings
 
 // Repeated solves
 ElastiQPWorkspace* work;
 elastiqp_setup(&work, &qp, NULL);
 while (running) {
-  elastiqp_update_q(work, q_k); elastiqp_update_h(work, h_k); elastiqp_update_b(work, b_k);
-  elastiqp_update_G_rows(work, first, count, rows_k);  // changed rows
+  elastiqp_set_q(work, q_k); elastiqp_set_h(work, h_k); elastiqp_set_b(work, b_k);
+  elastiqp_set_G_rows(work, first, count, rows_k);  // changed rows
   if (elastiqp_solve(&res, work) < 0) { /* ... */ }
 }
 elastiqp_free(work);

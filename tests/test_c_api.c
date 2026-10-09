@@ -35,18 +35,18 @@ static void one_shot(void) {
   const double x_ref[] = {0.5, 0.5}, z_ref[] = {0.5}, t_ref[] = {0};
   double x[2], z[1], t[1];
   ElastiQPProblem qp = {2, 0, 1, Q, q, NULL, NULL, G, h, w};
-  ElastiQPResult res = {x, NULL, z, t};
+  ElastiQPSolution res = {x, NULL, z, t};
   ElastiQPSettings s = tight();
-  int flag = elastiqp_quadprog(&res, &qp, &s);
-  check("one-shot: solved", flag == ELASTIQP_SOLVED && res.exitflag == flag);
+  int flag = elastiqp_solve_once(&res, &qp, &s);
+  check("one-shot: solved", flag == ELASTIQP_SOLVED && res.status == flag);
   check("one-shot: x, z, t", near(x, x_ref, 2, 1e-8) &&
                                  near(z, z_ref, 1, 1e-8) &&
                                  near(t, t_ref, 1, 1e-12));
   check("one-shot: active row counted", res.n_active == 1 &&
                                             res.n_saturated == 0);
-  check("one-shot: objective", fabs(res.fval + 0.75) < 1e-8);
+  check("one-shot: objective", fabs(res.primal_obj + 0.75) < 1e-8);
   check("one-shot: default settings (NULL)",
-        elastiqp_quadprog(&res, &qp, NULL) == ELASTIQP_SOLVED &&
+        elastiqp_solve_once(&res, &qp, NULL) == ELASTIQP_SOLVED &&
             near(x, x_ref, 2, 1e-5));
 }
 
@@ -61,16 +61,16 @@ static void elastic_and_hard(void) {
   const double t_ref[] = {1, 1}, z_ref[] = {0.5, 0.5};
   const double t_hard[] = {2, 0};
   ElastiQPProblem qp = {1, 0, 2, Q, NULL, NULL, NULL, G, h, w};
-  ElastiQPResult res = {x, NULL, z, t};
+  ElastiQPSolution res = {x, NULL, z, t};
   ElastiQPSettings s = tight();
-  int flag = elastiqp_quadprog(&res, &qp, &s);
+  int flag = elastiqp_solve_once(&res, &qp, &s);
   check("conflict: solved", flag == ELASTIQP_SOLVED);
   check("conflict: x = 0, t = 1, z at penalty",
         fabs(x[0]) < 1e-8 && near(t, t_ref, 2, 1e-8) &&
             near(z, z_ref, 2, 1e-8));
   check("conflict: both rows saturated", res.n_saturated == 2);
   w[1] = INFINITY;
-  flag = elastiqp_quadprog(&res, &qp, &s);
+  flag = elastiqp_solve_once(&res, &qp, &s);
   check("hard row: solved", flag == ELASTIQP_SOLVED);
   check("hard row: x = 1, hard slack 0",
         fabs(x[0] - 1) < 1e-8 && near(t, t_hard, 2, 1e-8));
@@ -84,7 +84,7 @@ static void workspace(void) {
   double h[] = {0.8};
   double x[2], y[1], z[1], t[1];
   ElastiQPProblem qp = {2, 1, 1, Q, q, A, b, G, h, w};
-  ElastiQPResult res = {x, y, z, t};
+  ElastiQPSolution res = {x, y, z, t};
   ElastiQPSettings s = tight();
   ElastiQPWorkspace* work = NULL;
   int n = 0, m = 0, p = 0, flag;
@@ -103,41 +103,40 @@ static void workspace(void) {
   h[0] = 2.0; /* workspace retains its copy */
   elastiqp_solve(&res, work);
   check("data copied at setup", near(x, x1, 2, 1e-8));
-  check("update_h", elastiqp_update_h(work, h) == 0);
+  check("set_h", elastiqp_set_h(work, h) == 0);
   elastiqp_solve(&res, work);
-  check("update_h: constraint released",
+  check("set_h: constraint released",
         near(x, x2, 2, 1e-8) && near(z, z2, 1, 1e-8));
 
   {
     const double b2[] = {-0.5};
-    elastiqp_update_b(work, b2);
+    elastiqp_set_b(work, b2);
     elastiqp_solve(&res, work);
-    check("update_b", res.exitflag == ELASTIQP_SOLVED && near(x, x3, 2, 1e-8));
+    check("set_b", res.status == ELASTIQP_SOLVED && near(x, x3, 2, 1e-8));
   }
   {
     const double q2[] = {-1, -3}, x4[] = {-0.5, 2.0};
-    elastiqp_update_q(work, q2);
+    elastiqp_set_q(work, q2);
     elastiqp_solve(&res, work);
-    check("update_q (row active at h = 2)", near(x, x4, 2, 1e-8));
+    check("set_q (row active at h = 2)", near(x, x4, 2, 1e-8));
   }
   {
     /* Penalty 0.5 < marginal cost 1 at x2 = 2: the row gives way. */
     const double w2[] = {0.5}, x5[] = {-0.5, 2.5}, t5[] = {0.5};
-    elastiqp_update_penalty(work, w2);
+    elastiqp_set_penalty(work, w2);
     elastiqp_solve(&res, work);
-    check("update_penalty: row saturates",
-          near(x, x5, 2, 1e-8) && near(t, t5, 1, 1e-8) &&
-              res.n_saturated == 1);
+    check("set_penalty: row saturates",
+          near(x, x5, 2, 1e-8) && near(t, t5, 1, 1e-8) && res.n_saturated == 1);
   }
   {
     const double Q2[] = {2, 0, 0, 2}, A2[] = {0, 1}, G2[] = {1, 0};
     const double x6[] = {0.5, -0.5};
     /* min |x|^2 - x1 - 3 x2 s.t. x2 = -0.5, x1 <= 2 (inactive). */
-    elastiqp_update_Q(work, Q2);
-    elastiqp_update_A(work, A2);
-    elastiqp_update_G(work, G2);
+    elastiqp_set_Q(work, Q2);
+    elastiqp_set_A(work, A2);
+    elastiqp_set_G(work, G2);
     elastiqp_solve(&res, work);
-    check("update_Q/A/G", near(x, x6, 2, 1e-8));
+    check("set_Q/A/G", near(x, x6, 2, 1e-8));
   }
   {
     ElastiQPSettings got;
@@ -149,10 +148,10 @@ static void workspace(void) {
     elastiqp_set_warm_start(work, xw, NULL, NULL);
     elastiqp_solve(&res, work);
     check("set_settings: max_iter = 0 fails",
-          res.exitflag == ELASTIQP_MAX_ITER && res.exitflag < 0);
+          res.status == ELASTIQP_MAX_ITER && res.status < 0);
     elastiqp_set_settings(work, &s);
     elastiqp_solve(&res, work);
-    check("set_settings: restored", res.exitflag == ELASTIQP_SOLVED);
+    check("set_settings: restored", res.status == ELASTIQP_SOLVED);
   }
   elastiqp_free(work);
 }
@@ -169,11 +168,11 @@ static void row_major(void) {
   const double x_ref[] = {1 - 6.0 / 14, 1 - 12.0 / 14, 1 - 18.0 / 14};
   double x[3];
   ElastiQPProblem qp = {3, 0, 2, Q, q, NULL, NULL, G, h, w};
-  ElastiQPResult res = {x, NULL, NULL, NULL};
+  ElastiQPSolution res = {x, NULL, NULL, NULL};
   ElastiQPSettings s = tight();
-  elastiqp_quadprog(&res, &qp, &s);
-  check("row-major G", res.exitflag == ELASTIQP_SOLVED &&
-                           near(x, x_ref, 3, 1e-8));
+  elastiqp_solve_once(&res, &qp, &s);
+  check("row-major G",
+        res.status == ELASTIQP_SOLVED && near(x, x_ref, 3, 1e-8));
 }
 
 /* Only the upper triangle of Q is read: full and upper-only Q agree. */
@@ -182,12 +181,12 @@ static void q_upper_triangle(void) {
   const double q[] = {-1, 0};
   double x1[2], x2[2];
   ElastiQPProblem qp = {2, 0, 0, Qfull, q, NULL, NULL, NULL, NULL, NULL};
-  ElastiQPResult r1 = {x1}, r2 = {x2};
+  ElastiQPSolution r1 = {x1}, r2 = {x2};
   /* 2 x1 + x2 = 1, x1 + 2 x2 = 0 */
   const double x_ref[] = {2.0 / 3, -1.0 / 3};
-  elastiqp_quadprog(&r1, &qp, NULL);
+  elastiqp_solve_once(&r1, &qp, NULL);
   qp.Q = Qupper;
-  elastiqp_quadprog(&r2, &qp, NULL);
+  elastiqp_solve_once(&r2, &qp, NULL);
   check("Q: full matrix", near(x1, x_ref, 2, 1e-10));
   check("Q: upper triangle only, lower ignored", near(x2, x_ref, 2, 1e-10));
 }
@@ -198,10 +197,10 @@ static void inf_convention(void) {
   const double w[] = {0.5, ELASTIQP_INF};
   double x[1], t[2], z_t[2];
   ElastiQPProblem qp = {1, 0, 2, Q, NULL, NULL, NULL, G, h, w};
-  ElastiQPResult res = {x, NULL, NULL, t, z_t};
-  elastiqp_quadprog(&res, &qp, NULL);
+  ElastiQPSolution res = {x, NULL, NULL, t, z_t};
+  elastiqp_solve_once(&res, &qp, NULL);
   check("ELASTIQP_INF penalty is a hard row",
-        res.exitflag == ELASTIQP_SOLVED && fabs(x[0] - 1) < 1e-8 &&
+        res.status == ELASTIQP_SOLVED && fabs(x[0] - 1) < 1e-8 &&
             fabs(t[1]) < 1e-12 && isinf(z_t[1]));
 }
 
@@ -213,25 +212,23 @@ static void row_updates(void) {
   const double rows[] = {0.5, 1, 2, 0.5};
   double x[2], x_ref[2];
   ElastiQPProblem qp = {2, 0, 3, Q, q, NULL, NULL, G, h, w};
-  ElastiQPResult res = {x}, ref = {x_ref};
+  ElastiQPSolution res = {x}, ref = {x_ref};
   ElastiQPWorkspace* work = NULL;
   elastiqp_setup(&work, &qp, NULL);
   elastiqp_solve(&res, work);
-  check("update_G_rows: rows 1..2",
-        elastiqp_update_G_rows(work, 1, 2, rows) == 0);
+  check("set_G_rows: rows 1..2", elastiqp_set_G_rows(work, 1, 2, rows) == 0);
   G[2] = 0.5, G[3] = 1, G[4] = 2, G[5] = 0.5;
   elastiqp_solve(&res, work);
-  elastiqp_quadprog(&ref, &qp, NULL);
-  check("update_G_rows: matches a fresh solve",
-        res.exitflag == ELASTIQP_SOLVED && near(x, x_ref, 2, 1e-8));
-  check("update_G_rows: out of range rejected",
-        elastiqp_update_G_rows(work, 2, 2, rows) == ELASTIQP_ERR_INVALID_ARG &&
-            elastiqp_update_G_rows(work, -1, 1, rows) ==
-                ELASTIQP_ERR_INVALID_ARG &&
-            elastiqp_update_A_rows(work, 0, 1, rows) ==
-                ELASTIQP_ERR_INVALID_ARG);
-  check("update_G_rows: count 0 is a no-op",
-        elastiqp_update_G_rows(work, 3, 0, NULL) == 0);
+  elastiqp_solve_once(&ref, &qp, NULL);
+  check("set_G_rows: matches a fresh solve",
+        res.status == ELASTIQP_SOLVED && near(x, x_ref, 2, 1e-8));
+  check(
+      "set_G_rows: out of range rejected",
+      elastiqp_set_G_rows(work, 2, 2, rows) == ELASTIQP_ERR_INVALID_ARG &&
+          elastiqp_set_G_rows(work, -1, 1, rows) == ELASTIQP_ERR_INVALID_ARG &&
+          elastiqp_set_A_rows(work, 0, 1, rows) == ELASTIQP_ERR_INVALID_ARG);
+  check("set_G_rows: count 0 is a no-op",
+        elastiqp_set_G_rows(work, 3, 0, NULL) == 0);
   elastiqp_free(work);
 }
 
@@ -240,7 +237,7 @@ static void relax(void) {
   const double G[] = {1, 1}, h[] = {1}, w[] = {10};
   double x[2], z[1], t[1], z_t[1];
   ElastiQPProblem qp = {2, 0, 1, Q, q, NULL, NULL, G, h, w};
-  ElastiQPResult res = {x, NULL, z, t, z_t};
+  ElastiQPSolution res = {x, NULL, z, t, z_t};
   ElastiQPWorkspace* work = NULL;
   elastiqp_setup(&work, &qp, NULL);
   check("relax before solve: not_solved",
@@ -248,15 +245,14 @@ static void relax(void) {
   elastiqp_solve(&res, work);
   check("solve: z_t = penalty - z", fabs(z_t[0] - (10 - z[0])) < 1e-12);
   check("relax: kappa <= 0 rejected",
-        elastiqp_relax(&res, work, 0.0, 1e-8, 50) ==
-                ELASTIQP_ERR_INVALID_ARG &&
-            res.iter == 0);
+        elastiqp_relax(&res, work, 0.0, 1e-8, 50) == ELASTIQP_ERR_INVALID_ARG &&
+            res.iters == 0);
   elastiqp_relax(&res, work, 1e-3, 1e-8, 50);
   /* At the relaxed point the inequality slack s = h - Gx + t is O(kappa). */
   check("relax: solved, interior point",
-        res.exitflag == ELASTIQP_SOLVED && 1 - x[0] - x[1] + t[0] > 0 &&
+        res.status == ELASTIQP_SOLVED && 1 - x[0] - x[1] + t[0] > 0 &&
             z[0] > 0 && z[0] < 10 && z_t[0] > 0);
-  elastiqp_update_q(work, q2);
+  elastiqp_set_q(work, q2);
   check("relax after an update: not_solved",
         elastiqp_relax(&res, work, 1e-3, 1e-8, 50) == ELASTIQP_ERR_NOT_SOLVED);
   elastiqp_solve(&res, work);
@@ -271,7 +267,7 @@ static void options(void) {
   const double G[] = {1, 1}, h[] = {1}, w[] = {10};
   double x[2], v = 0, def = 0, lo = 0, hi = 0;
   ElastiQPProblem qp = {2, 0, 1, Q, q, NULL, NULL, G, h, w};
-  ElastiQPResult res = {x};
+  ElastiQPSolution res = {x};
   ElastiQPSettings s;
   ElastiQPWorkspace* work = NULL;
   const char *name = NULL, *name2 = NULL, *desc = NULL;
@@ -341,7 +337,7 @@ static void options(void) {
   elastiqp_free(work);
   check("setup: out-of-range settings rejected",
         elastiqp_setup(&work, &qp, &s) == ELASTIQP_ERR_INVALID_ARG &&
-            elastiqp_quadprog(&res, &qp, &s) == ELASTIQP_ERR_INVALID_ARG);
+            elastiqp_solve_once(&res, &qp, &s) == ELASTIQP_ERR_INVALID_ARG);
   elastiqp_default_settings(&s);
   s.warm_start = 5; /* struct booleans are 0 / nonzero */
   elastiqp_setup(&work, &qp, &s);
@@ -356,41 +352,41 @@ static void invalid_args(void) {
   double x[1];
   double bad[] = {0};
   ElastiQPProblem qp = {1, 0, 1, Q, NULL, NULL, NULL, G, h, NULL};
-  ElastiQPResult res = {x};
+  ElastiQPSolution res = {x};
   ElastiQPWorkspace* work = (ElastiQPWorkspace*)&qp;
-  res.iter = 7;
+  res.iters = 7;
   check("missing penalty rejected, stats cleared",
-        elastiqp_quadprog(&res, &qp, NULL) == ELASTIQP_ERR_INVALID_ARG &&
-            res.exitflag == ELASTIQP_ERR_INVALID_ARG && res.iter == 0);
+        elastiqp_solve_once(&res, &qp, NULL) == ELASTIQP_ERR_INVALID_ARG &&
+            res.status == ELASTIQP_ERR_INVALID_ARG && res.iters == 0);
   check("setup: rejects and clears *work",
         elastiqp_setup(&work, &qp, NULL) == ELASTIQP_ERR_INVALID_ARG &&
             work == NULL);
   qp.penalty = bad;
   check("penalty 0 rejected",
-        elastiqp_quadprog(&res, &qp, NULL) == ELASTIQP_ERR_INVALID_ARG);
+        elastiqp_solve_once(&res, &qp, NULL) == ELASTIQP_ERR_INVALID_ARG);
   bad[0] = -1;
   check("negative penalty rejected",
-        elastiqp_quadprog(&res, &qp, NULL) == ELASTIQP_ERR_INVALID_ARG);
+        elastiqp_solve_once(&res, &qp, NULL) == ELASTIQP_ERR_INVALID_ARG);
   bad[0] = NAN;
   check("NaN penalty rejected",
-        elastiqp_quadprog(&res, &qp, NULL) == ELASTIQP_ERR_INVALID_ARG);
+        elastiqp_solve_once(&res, &qp, NULL) == ELASTIQP_ERR_INVALID_ARG);
   {
     const double w[] = {1}, x_ref[] = {0};
     qp.penalty = w;
     elastiqp_setup(&work, &qp, NULL);
-    check("update_penalty: bad penalty rejected",
-          elastiqp_update_penalty(work, bad) == ELASTIQP_ERR_INVALID_ARG);
-    check("update_penalty: rejected update changed nothing",
+    check("set_penalty: bad penalty rejected",
+          elastiqp_set_penalty(work, bad) == ELASTIQP_ERR_INVALID_ARG);
+    check("set_penalty: rejected update changed nothing",
           elastiqp_solve(&res, work) == ELASTIQP_SOLVED &&
               near(x, x_ref, 1, 1e-10));
     elastiqp_free(work);
   }
   qp.n = 0;
   check("n = 0 rejected",
-        elastiqp_quadprog(&res, &qp, NULL) == ELASTIQP_ERR_INVALID_ARG);
+        elastiqp_solve_once(&res, &qp, NULL) == ELASTIQP_ERR_INVALID_ARG);
   check("NULL workspace rejected",
         elastiqp_solve(&res, NULL) == ELASTIQP_ERR_INVALID_ARG &&
-            elastiqp_update_q(NULL, x) == ELASTIQP_ERR_INVALID_ARG);
+            elastiqp_set_q(NULL, x) == ELASTIQP_ERR_INVALID_ARG);
   elastiqp_free(NULL);
   check("status names",
         strcmp(elastiqp_status_name(ELASTIQP_SOLVED), "solved") == 0 &&

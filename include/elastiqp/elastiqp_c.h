@@ -11,11 +11,11 @@
  * Q is symmetric; only its upper triangle is read.
  * Two-sided constraints and variable bounds use two rows of G (g and -g).
  * Penalties must be > 0; values >= ELASTIQP_INF make the row hard (t = 0).
- * Exit flags: > 0 success, 0 unsolved, < 0 failure.
+ * Status codes: > 0 success, 0 unsolved, < 0 failure.
  *
- * Use elastiqp_quadprog() for one-shot solves, or setup/update/solve/free
+ * Use elastiqp_solve_once() for one-shot solves, or setup/set_X/solve/free
  * for repeated solves. Input data is copied; caller buffers can be reused.
- * Allocation-free update/solve coverage: tests/test_das_alloc.cc.
+ * Allocation-free set_X/solve coverage: tests/test_das_alloc.cc.
  *
  * Windows DLL users outside CMake: define ELASTIQP_C_SHARED before including.
  */
@@ -42,7 +42,7 @@ extern "C" {
 /* Hard-row penalty threshold. */
 #define ELASTIQP_INF 1e30
 
-/* Exit flags. */
+/* Status codes. */
 #define ELASTIQP_SOLVED 1
 #define ELASTIQP_UNSOLVED 0     /* no solve yet */
 #define ELASTIQP_MAX_ITER (-1)  /* iteration limit reached */
@@ -109,7 +109,7 @@ typedef struct {
  * Caller-owned output arrays; NULL arrays are skipped.
  * KKT: Q x + q + A'y + G'z = 0, 0 <= z <= penalty, t = max(G x - h, 0).
  * z_t = penalty - z after solve; relax() computes it independently.
- * On API errors, only exitflag is valid; statistics are zeroed.
+ * On API errors, only status is valid; statistics are zeroed.
  */
 typedef struct {
   double* x;   /* n */
@@ -118,32 +118,32 @@ typedef struct {
   double* t;   /* p, elastic slacks */
   double* z_t; /* p, duals of t >= 0 (INFINITY on hard rows) */
 
-  int exitflag;    /* ELASTIQP_SOLVED, ... */
-  int iter;        /* inner active-set (or relax Newton) iterations */
-  int outer_iter;  /* proximal rounds */
+  int status;      /* ELASTIQP_SOLVED, ... */
+  int iters;       /* inner active-set (or relax Newton) iterations */
+  int outer_iters; /* proximal rounds */
   int n_active;    /* rows with t = 0 and z > 0 */
   int n_saturated; /* rows with t > 0 (z at its penalty) */
-  double fval;     /* primal objective, penalty term included */
+  double primal_obj; /* penalty term included */
   double primal_res;
   double dual_res;
   double duality_gap;
 
-  double setup_time; /* seconds; elastiqp_quadprog only */
+  double setup_time; /* seconds; elastiqp_solve_once only */
   double solve_time; /* seconds */
-} ElastiQPResult;
+} ElastiQPSolution;
 
 /* Opaque solver workspace. */
 typedef struct ElastiQPWorkspace ElastiQPWorkspace;
 
 ELASTIQP_C_API void elastiqp_default_settings(ElastiQPSettings* settings);
 
-/* Name of an exit flag ("solved", "max_iter", ..., "invalid_arg"). */
-ELASTIQP_C_API const char* elastiqp_status_name(int exitflag);
+/* Name of a status code ("solved", "max_iter", ..., "invalid_arg"). */
+ELASTIQP_C_API const char* elastiqp_status_name(int status);
 
-/* One-shot solve; settings may be NULL (defaults). Returns res->exitflag. */
-ELASTIQP_C_API int elastiqp_quadprog(ElastiQPResult* res,
-                                     const ElastiQPProblem* qp,
-                                     const ElastiQPSettings* settings);
+/* One-shot solve; settings may be NULL (defaults). Returns res->status. */
+ELASTIQP_C_API int elastiqp_solve_once(ElastiQPSolution* res,
+                                       const ElastiQPProblem* qp,
+                                       const ElastiQPSettings* settings);
 
 /*
  * Creates a workspace for qp (settings may be NULL). Returns 0 and sets *work,
@@ -154,8 +154,9 @@ ELASTIQP_C_API int elastiqp_setup(ElastiQPWorkspace** work,
                                   const ElastiQPSettings* settings);
 
 /* Solves the current problem, warm-started from the previous solve when
- * settings.warm_start is set. Returns res->exitflag. */
-ELASTIQP_C_API int elastiqp_solve(ElastiQPResult* res, ElastiQPWorkspace* work);
+ * settings.warm_start is set. Returns res->status. */
+ELASTIQP_C_API int elastiqp_solve(ElastiQPSolution* res,
+                                  ElastiQPWorkspace* work);
 
 ELASTIQP_C_API void elastiqp_free(ElastiQPWorkspace* work);
 
@@ -197,23 +198,23 @@ ELASTIQP_C_API int elastiqp_option_info(int index, const char** name,
  * Zero-sized updates do nothing. Returns 0 or a negative error;
  * rejected updates leave the workspace unchanged.
  */
-ELASTIQP_C_API int elastiqp_update_Q(ElastiQPWorkspace* work, const double* Q);
-ELASTIQP_C_API int elastiqp_update_q(ElastiQPWorkspace* work, const double* q);
-ELASTIQP_C_API int elastiqp_update_A(ElastiQPWorkspace* work, const double* A);
-ELASTIQP_C_API int elastiqp_update_b(ElastiQPWorkspace* work, const double* b);
-ELASTIQP_C_API int elastiqp_update_G(ElastiQPWorkspace* work, const double* G);
-ELASTIQP_C_API int elastiqp_update_h(ElastiQPWorkspace* work, const double* h);
-ELASTIQP_C_API int elastiqp_update_penalty(ElastiQPWorkspace* work,
-                                           const double* penalty);
+ELASTIQP_C_API int elastiqp_set_Q(ElastiQPWorkspace* work, const double* Q);
+ELASTIQP_C_API int elastiqp_set_q(ElastiQPWorkspace* work, const double* q);
+ELASTIQP_C_API int elastiqp_set_A(ElastiQPWorkspace* work, const double* A);
+ELASTIQP_C_API int elastiqp_set_b(ElastiQPWorkspace* work, const double* b);
+ELASTIQP_C_API int elastiqp_set_G(ElastiQPWorkspace* work, const double* G);
+ELASTIQP_C_API int elastiqp_set_h(ElastiQPWorkspace* work, const double* h);
+ELASTIQP_C_API int elastiqp_set_penalty(ElastiQPWorkspace* work,
+                                        const double* penalty);
 
 /*
  * Replace rows [first, first + count) with a count x n row-major block.
  * Cost: O(count * n).
  */
-ELASTIQP_C_API int elastiqp_update_A_rows(ElastiQPWorkspace* work, int first,
-                                          int count, const double* rows);
-ELASTIQP_C_API int elastiqp_update_G_rows(ElastiQPWorkspace* work, int first,
-                                          int count, const double* rows);
+ELASTIQP_C_API int elastiqp_set_A_rows(ElastiQPWorkspace* work, int first,
+                                       int count, const double* rows);
+ELASTIQP_C_API int elastiqp_set_G_rows(ElastiQPWorkspace* work, int first,
+                                       int count, const double* rows);
 
 /*
  * Seed the next solve with (x, y, z). Requires x; NULL y or z means zero.
@@ -226,10 +227,11 @@ ELASTIQP_C_API int elastiqp_set_warm_start(ElastiQPWorkspace* work,
  * Compute the kappa-relaxed central point for differentiation (kappa > 0).
  * Requires a successful solve on current data, else ELASTIQP_ERR_NOT_SOLVED.
  * Preserves the working set and warm start; p == 0 returns the solution.
- * Suggested: tol = 1e-6, max_iter = 50. Returns res->exitflag.
+ * Suggested: tol = 1e-6, max_iter = 50. Returns res->status.
  */
-ELASTIQP_C_API int elastiqp_relax(ElastiQPResult* res, ElastiQPWorkspace* work,
-                                  double kappa, double tol, int max_iter);
+ELASTIQP_C_API int elastiqp_relax(ElastiQPSolution* res,
+                                  ElastiQPWorkspace* work, double kappa,
+                                  double tol, int max_iter);
 
 #ifdef __cplusplus
 }

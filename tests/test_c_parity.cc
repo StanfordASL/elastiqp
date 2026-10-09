@@ -48,7 +48,7 @@ CData ToC(const QPData& qp, const VectorXd& w) {
 
 struct CSolution {
   VectorXd x, y, z, t, z_t;
-  ElastiQPResult res{};
+  ElastiQPSolution res{};
   CSolution(int n, int m, int p) : x(n), y(m), z(p), t(p), z_t(p) {
     res.x = x.data();
     res.y = y.data();
@@ -68,13 +68,12 @@ double Diff(const CSolution& c, const elastiqp::Solution& s) {
   for (Eigen::Index i = 0; i < s.z_t.size(); ++i) {  // inf on hard rows
     if (c.z_t[i] != s.z_t[i]) d = std::max(d, std::abs(c.z_t[i] - s.z_t[i]));
   }
-  const bool same_meta = std::strcmp(elastiqp_status_name(c.res.exitflag),
-                                     elastiqp::status_name(s.status)) == 0 &&
-                         c.res.iter == s.iters &&
-                         c.res.outer_iter == s.outer_iters &&
-                         c.res.n_active == s.n_active &&
-                         c.res.n_saturated == s.n_saturated &&
-                         c.res.fval == s.primal_obj;
+  const bool same_meta =
+      std::strcmp(elastiqp_status_name(c.res.status),
+                  elastiqp::status_name(s.status)) == 0 &&
+      c.res.iters == s.iters && c.res.outer_iters == s.outer_iters &&
+      c.res.n_active == s.n_active && c.res.n_saturated == s.n_saturated &&
+      c.res.primal_obj == s.primal_obj;
   return same_meta ? d : std::max(d, 1.0);
 }
 
@@ -97,10 +96,10 @@ void OneShot(std::mt19937& rng) {
     const CData cd = ToC(qp, w);
     const ElastiQPProblem cp = cd.Problem();
     CSolution sol(n, m, p);
-    elastiqp_quadprog(&sol.res, &cp, &cs);
+    elastiqp_solve_once(&sol.res, &cp, &cs);
     worst = std::max(worst, Diff(sol, ref));
   }
-  Check("quadprog matches das::Solve (20 problems)", worst == 0.0, worst,
+  Check("solve_once matches das::Solve (20 problems)", worst == 0.0, worst,
         "diff");
 }
 
@@ -130,9 +129,9 @@ void Chain(std::mt19937& rng) {
     ref.set_q(qp.q);
     ref.set_h(qp.h);
     ref.set_b(qp.b);
-    elastiqp_update_q(work, cd.q.data());
-    elastiqp_update_h(work, cd.h.data());
-    elastiqp_update_b(work, cd.b.data());
+    elastiqp_set_q(work, cd.q.data());
+    elastiqp_set_h(work, cd.h.data());
+    elastiqp_set_b(work, cd.b.data());
     if (tick % 4 == 1) {  // a few rows of G and A move, in full
       qp.G.row(tick % p) += 0.1 * problem_gen::Randn(rng, 1, n);
       qp.A.row(tick % m) += 0.01 * problem_gen::Randn(rng, 1, n);
@@ -140,15 +139,15 @@ void Chain(std::mt19937& rng) {
       cd.A = qp.A;
       ref.set_G(qp.G);
       ref.set_A(qp.A);
-      elastiqp_update_G(work, cd.G.data());
-      elastiqp_update_A(work, cd.A.data());
+      elastiqp_set_G(work, cd.G.data());
+      elastiqp_set_A(work, cd.A.data());
     }
-    if (tick % 4 == 3) {  // a block of G rows, through update_G_rows
+    if (tick % 4 == 3) {  // a block of G rows, through set_G_rows
       const int first = tick % (p - 3);
       qp.G.middleRows(first, 3) += 0.1 * problem_gen::Randn(rng, 3, n);
       cd.G = qp.G;
       ref.set_G(qp.G);
-      elastiqp_update_G_rows(work, first, 3, cd.G.row(first).data());
+      elastiqp_set_G_rows(work, first, 3, cd.G.row(first).data());
     }
     if (tick % 10 == 3) {
       const MatrixXd dQ = 0.05 * problem_gen::Randn(rng, n, n);
@@ -156,13 +155,13 @@ void Chain(std::mt19937& rng) {
       Symmetrize(qp.Q);
       cd.Q = qp.Q;
       ref.set_Q(qp.Q);
-      elastiqp_update_Q(work, cd.Q.data());
+      elastiqp_set_Q(work, cd.Q.data());
     }
     if (tick % 10 == 7) {
       w = VectorXd::Constant(p, 2.0 + tick % 3);
       cd.w = w;
       ref.set_penalty(w);
-      elastiqp_update_penalty(work, cd.w.data());
+      elastiqp_set_penalty(work, cd.w.data());
     }
     if (tick % 15 == 9) {  // explicit warm start from the previous solution
       const VectorXd x = sol.x, y = sol.y, z = sol.z;
@@ -172,7 +171,7 @@ void Chain(std::mt19937& rng) {
     const elastiqp::Solution& r = ref.solve();
     elastiqp_solve(&sol.res, work);
     worst = std::max(worst, Diff(sol, r));
-    solved += sol.res.exitflag == ELASTIQP_SOLVED;
+    solved += sol.res.status == ELASTIQP_SOLVED;
   }
   Check("setup", ret == 0, ret, "ret");
   Check("update chain matches das::Solver (60 ticks)", worst == 0.0, worst,

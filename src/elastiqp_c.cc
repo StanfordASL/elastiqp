@@ -35,7 +35,7 @@ double Seconds(Clock::time_point since) {
   return std::chrono::duration<double>(Clock::now() - since).count();
 }
 
-int ExitFlag(elastiqp::Status s) {
+int StatusCode(elastiqp::Status s) {
   switch (s) {
     case elastiqp::Status::kSolved:
       return ELASTIQP_SOLVED;
@@ -243,32 +243,32 @@ void StagePenalty(VectorXd& dst, const double* w) {
 }
 
 // Clear statistics on API errors.
-int Fail(ElastiQPResult* res, int flag) {
-  res->exitflag = flag;
-  res->iter = res->outer_iter = res->n_active = res->n_saturated = 0;
-  res->fval = res->primal_res = res->dual_res = res->duality_gap = 0.0;
+int Fail(ElastiQPSolution* res, int flag) {
+  res->status = flag;
+  res->iters = res->outer_iters = res->n_active = res->n_saturated = 0;
+  res->primal_obj = res->primal_res = res->dual_res = res->duality_gap = 0.0;
   res->setup_time = res->solve_time = 0.0;
   return flag;
 }
 
-// Fills the caller's buffers from sol; returns the exit flag.
-int Extract(ElastiQPResult* res, const elastiqp::Solution& sol) {
+// Fills the caller's buffers from sol; returns the status code.
+int Extract(ElastiQPSolution* res, const elastiqp::Solution& sol) {
   using Eigen::Map;
   if (res->x) Map<VectorXd>(res->x, sol.x.size()) = sol.x;
   if (res->y) Map<VectorXd>(res->y, sol.y.size()) = sol.y;
   if (res->z) Map<VectorXd>(res->z, sol.z.size()) = sol.z;
   if (res->t) Map<VectorXd>(res->t, sol.t.size()) = sol.t;
   if (res->z_t) Map<VectorXd>(res->z_t, sol.z_t.size()) = sol.z_t;
-  res->exitflag = ExitFlag(sol.status);
-  res->iter = sol.iters;
-  res->outer_iter = sol.outer_iters;
+  res->status = StatusCode(sol.status);
+  res->iters = sol.iters;
+  res->outer_iters = sol.outer_iters;
   res->n_active = sol.n_active;
   res->n_saturated = sol.n_saturated;
-  res->fval = sol.primal_obj;
+  res->primal_obj = sol.primal_obj;
   res->primal_res = sol.primal_res;
   res->dual_res = sol.dual_res;
   res->duality_gap = sol.duality_gap;
-  return res->exitflag;
+  return res->status;
 }
 
 // Runs f, mapping C++ exceptions to error codes.
@@ -328,8 +328,8 @@ void elastiqp_default_settings(ElastiQPSettings* settings) {
   if (settings) *settings = ToC(das::Settings{});
 }
 
-const char* elastiqp_status_name(int exitflag) {
-  switch (exitflag) {
+const char* elastiqp_status_name(int status) {
+  switch (status) {
     case ELASTIQP_SOLVED:
       return "solved";
     case ELASTIQP_UNSOLVED:
@@ -352,8 +352,8 @@ const char* elastiqp_status_name(int exitflag) {
   return "?";
 }
 
-int elastiqp_quadprog(ElastiQPResult* res, const ElastiQPProblem* qp,
-                      const ElastiQPSettings* settings) {
+int elastiqp_solve_once(ElastiQPSolution* res, const ElastiQPProblem* qp,
+                        const ElastiQPSettings* settings) {
   if (res == nullptr) return ELASTIQP_ERR_INVALID_ARG;
   if (!Valid(qp) || (settings && !ValidSettings(*settings))) {
     return Fail(res, ELASTIQP_ERR_INVALID_ARG);
@@ -393,7 +393,7 @@ int elastiqp_setup(ElastiQPWorkspace** work, const ElastiQPProblem* qp,
   return 0;
 }
 
-int elastiqp_solve(ElastiQPResult* res, ElastiQPWorkspace* work) {
+int elastiqp_solve(ElastiQPSolution* res, ElastiQPWorkspace* work) {
   if (res == nullptr) return ELASTIQP_ERR_INVALID_ARG;
   if (work == nullptr) return Fail(res, ELASTIQP_ERR_INVALID_ARG);
   double solve_time = 0.0;
@@ -470,7 +470,7 @@ int elastiqp_option_info(int index, const char** name, int* type,
   return 0;
 }
 
-int elastiqp_update_Q(ElastiQPWorkspace* work, const double* Q) {
+int elastiqp_set_Q(ElastiQPWorkspace* work, const double* Q) {
   if (work == nullptr) return ELASTIQP_ERR_INVALID_ARG;
   StageQ(work->Q, Q, work->solver.n());
   work->solver.set_Q(work->Q);
@@ -478,7 +478,7 @@ int elastiqp_update_Q(ElastiQPWorkspace* work, const double* Q) {
   return 0;
 }
 
-int elastiqp_update_q(ElastiQPWorkspace* work, const double* q) {
+int elastiqp_set_q(ElastiQPWorkspace* work, const double* q) {
   if (work == nullptr) return ELASTIQP_ERR_INVALID_ARG;
   if (q) {
     work->q = VectorMap(q, work->solver.n());
@@ -490,12 +490,12 @@ int elastiqp_update_q(ElastiQPWorkspace* work, const double* q) {
   return 0;
 }
 
-int elastiqp_update_A(ElastiQPWorkspace* work, const double* A) {
+int elastiqp_set_A(ElastiQPWorkspace* work, const double* A) {
   if (work == nullptr) return ELASTIQP_ERR_INVALID_ARG;
-  return elastiqp_update_A_rows(work, 0, work->solver.m(), A);
+  return elastiqp_set_A_rows(work, 0, work->solver.m(), A);
 }
 
-int elastiqp_update_b(ElastiQPWorkspace* work, const double* b) {
+int elastiqp_set_b(ElastiQPWorkspace* work, const double* b) {
   if (work == nullptr) return ELASTIQP_ERR_INVALID_ARG;
   const int m = work->solver.m();
   if (m == 0) return 0;
@@ -506,12 +506,12 @@ int elastiqp_update_b(ElastiQPWorkspace* work, const double* b) {
   return 0;
 }
 
-int elastiqp_update_G(ElastiQPWorkspace* work, const double* G) {
+int elastiqp_set_G(ElastiQPWorkspace* work, const double* G) {
   if (work == nullptr) return ELASTIQP_ERR_INVALID_ARG;
-  return elastiqp_update_G_rows(work, 0, work->solver.p(), G);
+  return elastiqp_set_G_rows(work, 0, work->solver.p(), G);
 }
 
-int elastiqp_update_h(ElastiQPWorkspace* work, const double* h) {
+int elastiqp_set_h(ElastiQPWorkspace* work, const double* h) {
   if (work == nullptr) return ELASTIQP_ERR_INVALID_ARG;
   const int p = work->solver.p();
   if (p == 0) return 0;
@@ -522,7 +522,7 @@ int elastiqp_update_h(ElastiQPWorkspace* work, const double* h) {
   return 0;
 }
 
-int elastiqp_update_penalty(ElastiQPWorkspace* work, const double* penalty) {
+int elastiqp_set_penalty(ElastiQPWorkspace* work, const double* penalty) {
   if (work == nullptr) return ELASTIQP_ERR_INVALID_ARG;
   const int p = work->solver.p();
   if (p == 0) return 0;
@@ -535,8 +535,8 @@ int elastiqp_update_penalty(ElastiQPWorkspace* work, const double* penalty) {
   return 0;
 }
 
-int elastiqp_update_A_rows(ElastiQPWorkspace* work, int first, int count,
-                           const double* rows) {
+int elastiqp_set_A_rows(ElastiQPWorkspace* work, int first, int count,
+                        const double* rows) {
   if (work == nullptr || !ValidRows(first, count, work->solver.m(), rows)) {
     return ELASTIQP_ERR_INVALID_ARG;
   }
@@ -546,8 +546,8 @@ int elastiqp_update_A_rows(ElastiQPWorkspace* work, int first, int count,
   return 0;
 }
 
-int elastiqp_update_G_rows(ElastiQPWorkspace* work, int first, int count,
-                           const double* rows) {
+int elastiqp_set_G_rows(ElastiQPWorkspace* work, int first, int count,
+                        const double* rows) {
   if (work == nullptr || !ValidRows(first, count, work->solver.p(), rows)) {
     return ELASTIQP_ERR_INVALID_ARG;
   }
@@ -576,7 +576,7 @@ int elastiqp_set_warm_start(ElastiQPWorkspace* work, const double* x,
   return 0;
 }
 
-int elastiqp_relax(ElastiQPResult* res, ElastiQPWorkspace* work, double kappa,
+int elastiqp_relax(ElastiQPSolution* res, ElastiQPWorkspace* work, double kappa,
                    double tol, int max_iter) {
   if (res == nullptr) return ELASTIQP_ERR_INVALID_ARG;
   if (work == nullptr || !(kappa > 0.0) || !(tol > 0.0) || max_iter < 0) {
