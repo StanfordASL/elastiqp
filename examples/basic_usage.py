@@ -121,8 +121,7 @@ def main():
     print("\nNote that this speedup can be significant on robot control problems!")
 
     print("\n--- Differentiability ---")
-    print("\nThe 'pdal' and 'ipm' backends can relax() a solution to the")
-    print("kappa-smoothed differentiation point; see the JAX and PyTorch examples")
+    print("For smooth derivative evaluation, see the JAX and PyTorch examples")
 
 
 if __name__ == "__main__":
