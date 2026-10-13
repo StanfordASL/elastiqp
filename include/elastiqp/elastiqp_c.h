@@ -7,8 +7,8 @@
  *   subject to  A x = b
  *               G x - t <= h,  t >= 0
  *
- * Dense row-major matrices: M(i, j) = M[i * cols + j].
- * Q is symmetric; only its upper triangle is read.
+ * Dense column-major matrices: M(i, j) = M[i + j * rows].
+ * Q is symmetric; only its upper triangle (i <= j) is read.
  * Two-sided constraints and variable bounds use two rows of G (g and -g).
  * Penalties must be > 0; values >= ELASTIQP_INF make the row hard (t = 0).
  * Solver status codes match elastiqp::Status (0-4); API errors are < 0.
@@ -62,9 +62,9 @@ typedef struct {
 
   const double* Q;       /* n x n, upper triangle read; NULL: zero (LP) */
   const double* q;       /* n; NULL: zero */
-  const double* A;       /* m x n, row-major */
+  const double* A;       /* m x n, column-major */
   const double* b;       /* m */
-  const double* G;       /* p x n, row-major */
+  const double* G;       /* p x n, column-major */
   const double* h;       /* p */
   const double* penalty; /* p, > 0; >= ELASTIQP_INF: hard row */
 } ElastiQPProblem;
@@ -210,7 +210,7 @@ ELASTIQP_C_API int elastiqp_set_penalty(ElastiQPWorkspace* work,
                                         const double* penalty);
 
 /*
- * Replace rows [first, first + count) with a count x n row-major block.
+ * Replace rows [first, first + count) with a count x n column-major block.
  * Cost: O(count * n).
  */
 ELASTIQP_C_API int elastiqp_set_A_rows(ElastiQPWorkspace* work, int first,
