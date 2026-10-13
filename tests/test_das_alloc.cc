@@ -305,6 +305,42 @@ void ExplicitWarm(std::mt19937& rng) {
   r.Report("explicit warm start");
 }
 
+// Updates through Eigen::Map over caller buffers (as in the C interface) bind
+// to the setters' Ref arguments without a copy.
+void MappedUpdates(std::mt19937& rng) {
+  QPData qp = problem_gen::InfeasibleEq(rng, 20, 4, 40, 4);
+  VectorXd w = VectorXd::Constant(40, 10.0);
+  using MatMap = Eigen::Map<const MatrixXd>;
+  using VecMap = Eigen::Map<const VectorXd>;
+  const int n = 20, m = 4, p = 40;
+  Run r;
+  r.s.setup(qp.Q, qp.q, qp.A, qp.b, qp.G, qp.h, w);
+  r.Solve();
+  for (int tick = 0; tick < 6; ++tick) {
+    Perturb(rng, qp.q, 0.05);
+    Perturb(rng, qp.h, 0.05);
+    Perturb(rng, qp.b, 0.01);
+    Perturb(rng, qp.A, 0.01);
+    Perturb(rng, qp.G, 0.05);
+    w *= 1.1;
+    const elastiqp::Solution& prev = r.s.solution();
+    r.Update([&] {
+      r.s.set_q(VecMap(qp.q.data(), n));
+      r.s.set_b(VecMap(qp.b.data(), m));
+      r.s.set_h(VecMap(qp.h.data(), p));
+      r.s.set_A(MatMap(qp.A.data(), m, n));
+      r.s.set_G(MatMap(qp.G.data(), p, n));
+      r.s.set_penalty(VecMap(w.data(), p));
+      if (tick % 2 == 1) {
+        r.s.set_warm_start(VecMap(prev.x.data(), n), VecMap(prev.y.data(), m),
+                           VecMap(prev.z.data(), p));
+      }
+    });
+    r.Solve();
+  }
+  r.Report("updates through Eigen::Map");
+}
+
 // relax() sizes its workspace on the first call after setup(); later calls
 // (and the solves in between) are allocation-free.
 void Relax(std::mt19937& rng) {
@@ -351,6 +387,7 @@ int main() {
   Proximal(rng);
   RuizRefresh(rng);
   ExplicitWarm(rng);
+  MappedUpdates(rng);
   Relax(rng);
   Unconstrained(rng);
   for (const auto& [site, k] : alloc_guard::Sites())
