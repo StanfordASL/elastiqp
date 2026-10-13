@@ -292,12 +292,6 @@ int SetupImpl(ElastiQPWorkspace& w, const ElastiQPProblem& qp,
   return 0;
 }
 
-// Validates a [first, first + count) row block of a matrix with `rows` rows.
-bool ValidRows(int first, int count, int rows, const double* data) {
-  return first >= 0 && count >= 0 && first <= rows - count &&
-         (count == 0 || data != nullptr);
-}
-
 }  // namespace
 
 extern "C" {
@@ -462,7 +456,11 @@ int elastiqp_set_q(ElastiQPWorkspace* work, const double* q) {
 
 int elastiqp_set_A(ElastiQPWorkspace* work, const double* A) {
   if (work == nullptr) return ELASTIQP_ERR_INVALID_ARG;
-  return elastiqp_set_A_rows(work, 0, work->solver.m(), A);
+  const int m = work->solver.m();
+  if (m == 0) return 0;
+  if (A == nullptr) return ELASTIQP_ERR_INVALID_ARG;
+  work->solver.set_A(MatrixMap(A, m, work->solver.n()));
+  return 0;
 }
 
 int elastiqp_set_b(ElastiQPWorkspace* work, const double* b) {
@@ -476,7 +474,11 @@ int elastiqp_set_b(ElastiQPWorkspace* work, const double* b) {
 
 int elastiqp_set_G(ElastiQPWorkspace* work, const double* G) {
   if (work == nullptr) return ELASTIQP_ERR_INVALID_ARG;
-  return elastiqp_set_G_rows(work, 0, work->solver.p(), G);
+  const int p = work->solver.p();
+  if (p == 0) return 0;
+  if (G == nullptr) return ELASTIQP_ERR_INVALID_ARG;
+  work->solver.set_G(MatrixMap(G, p, work->solver.n()));
+  return 0;
 }
 
 int elastiqp_set_h(ElastiQPWorkspace* work, const double* h) {
@@ -497,26 +499,6 @@ int elastiqp_set_penalty(ElastiQPWorkspace* work, const double* penalty) {
   }
   StagePenalty(work->penalty, penalty);
   work->solver.set_penalty(work->penalty);
-  return 0;
-}
-
-int elastiqp_set_A_rows(ElastiQPWorkspace* work, int first, int count,
-                        const double* rows) {
-  if (work == nullptr || !ValidRows(first, count, work->solver.m(), rows)) {
-    return ELASTIQP_ERR_INVALID_ARG;
-  }
-  if (count == 0) return 0;
-  work->solver.set_A_rows(first, MatrixMap(rows, count, work->solver.n()));
-  return 0;
-}
-
-int elastiqp_set_G_rows(ElastiQPWorkspace* work, int first, int count,
-                        const double* rows) {
-  if (work == nullptr || !ValidRows(first, count, work->solver.p(), rows)) {
-    return ELASTIQP_ERR_INVALID_ARG;
-  }
-  if (count == 0) return 0;
-  work->solver.set_G_rows(first, MatrixMap(rows, count, work->solver.n()));
   return 0;
 }
 

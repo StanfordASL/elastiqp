@@ -120,7 +120,7 @@ ElastiQPWorkspace* work;
 elastiqp_setup(&work, &qp, NULL);
 while (running) {
   elastiqp_set_q(work, q_k); elastiqp_set_h(work, h_k); elastiqp_set_b(work, b_k);
-  elastiqp_set_G_rows(work, first, count, rows_k);  // changed rows
+  elastiqp_set_G(work, G_k);  // only rows that differ are refreshed
   if (elastiqp_solve(&res, work) != ELASTIQP_SOLVED) { /* ... */ }
 }
 elastiqp_free(work);

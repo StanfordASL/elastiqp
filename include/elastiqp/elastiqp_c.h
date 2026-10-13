@@ -210,15 +210,6 @@ ELASTIQP_C_API int elastiqp_set_penalty(ElastiQPWorkspace* work,
                                         const double* penalty);
 
 /*
- * Replace rows [first, first + count) with a count x n column-major block.
- * Cost: O(count * n).
- */
-ELASTIQP_C_API int elastiqp_set_A_rows(ElastiQPWorkspace* work, int first,
-                                       int count, const double* rows);
-ELASTIQP_C_API int elastiqp_set_G_rows(ElastiQPWorkspace* work, int first,
-                                       int count, const double* rows);
-
-/*
  * Seed the next solve with (x, y, z). Requires x; NULL y or z means zero.
  */
 ELASTIQP_C_API int elastiqp_set_warm_start(ElastiQPWorkspace* work,
