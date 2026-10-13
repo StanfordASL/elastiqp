@@ -54,9 +54,9 @@ class Solver {
  public:
   Settings settings;
 
-  void setup(const MatrixXd& Q, const VectorXd& q, const MatrixXd& A,
-             const VectorXd& b, const MatrixXd& G, const VectorXd& h,
-             const VectorXd& penalty) {
+  void setup(const MatRef& Q, const VecRef& q, const MatRef& A,
+             const VecRef& b, const MatRef& G, const VecRef& h,
+             const VecRef& penalty) {
     n_ = q.size();
     m_ = b.size();
     p_ = h.size();
@@ -138,19 +138,19 @@ class Solver {
     matrix_dirty_ = false;
   }
 
-  void setup(const MatrixXd& Q, const VectorXd& q, const MatrixXd& A,
-             const VectorXd& b, const MatrixXd& G, const VectorXd& h,
+  void setup(const MatRef& Q, const VecRef& q, const MatRef& A,
+             const VecRef& b, const MatRef& G, const VecRef& h,
              double penalty) {
     setup(Q, q, A, b, G, h, VectorXd::Constant(h.size(), penalty));
   }
 
-  void setup(const MatrixXd& Q, const VectorXd& q, const MatrixXd& G,
-             const VectorXd& h, const VectorXd& penalty) {
+  void setup(const MatRef& Q, const VecRef& q, const MatRef& G,
+             const VecRef& h, const VecRef& penalty) {
     setup(Q, q, MatrixXd(0, q.size()), VectorXd(0), G, h, penalty);
   }
 
-  void setup(const MatrixXd& Q, const VectorXd& q, const MatrixXd& G,
-             const VectorXd& h, double penalty) {
+  void setup(const MatRef& Q, const VecRef& q, const MatRef& G,
+             const VecRef& h, double penalty) {
     setup(Q, q, G, h, VectorXd::Constant(h.size(), penalty));
   }
 
@@ -161,34 +161,40 @@ class Solver {
   // Setters store data in the current Ruiz frame; solve() re-equilibrates
   // after a matrix change (every solve is cold, so there is no iterate to
   // carry across the new scaling).
-  void set_Q(const MatrixXd& Q) {
+  void set_Q(const MatRef& Q) {
     Q_ = 0.5 * (Q + Q.transpose());
     if (ruiz_) Q_ = c_s_ * dx_s_.asDiagonal() * Q_ * dx_s_.asDiagonal();
     matrix_dirty_ = true;
   }
-  void set_q(const VectorXd& q) {
-    q_ = ruiz_ ? VectorXd(c_s_ * q.cwiseProduct(dx_s_)) : q;
+  void set_q(const VecRef& q) {
+    q_ = q;
+    if (ruiz_) q_ = c_s_ * q_.cwiseProduct(dx_s_);
   }
-  void set_A(const MatrixXd& A) {
+  void set_A(const MatRef& A) {
     check_eq_A(A);
     check_eq_b(ruiz_ ? VectorXd(b_.cwiseProduct(inv_de_)) : b_);
-    A_ = ruiz_ ? MatrixXd(de_s_.asDiagonal() * A * dx_s_.asDiagonal()) : A;
+    A_ = A;
+    if (ruiz_) A_ = de_s_.asDiagonal() * A_ * dx_s_.asDiagonal();
     compute_AtA();
     matrix_dirty_ = true;
   }
-  void set_b(const VectorXd& b) {
+  void set_b(const VecRef& b) {
     check_eq_b(b);
-    b_ = ruiz_ ? VectorXd(b.cwiseProduct(de_s_)) : b;
+    b_ = b;
+    if (ruiz_) b_ = b_.cwiseProduct(de_s_);
   }
-  void set_G(const MatrixXd& G) {
-    G_ = ruiz_ ? MatrixXd(di_s_.asDiagonal() * G * dx_s_.asDiagonal()) : G;
+  void set_G(const MatRef& G) {
+    G_ = G;
+    if (ruiz_) G_ = di_s_.asDiagonal() * G_ * dx_s_.asDiagonal();
     matrix_dirty_ = true;
   }
-  void set_h(const VectorXd& h) {
-    h_ = ruiz_ ? VectorXd(h.cwiseProduct(di_s_)) : h;
+  void set_h(const VecRef& h) {
+    h_ = h;
+    if (ruiz_) h_ = h_.cwiseProduct(di_s_);
   }
-  void set_penalty(const VectorXd& penalty) {
-    penalty_ = ruiz_ ? VectorXd(c_s_ * penalty.cwiseQuotient(di_s_)) : penalty;
+  void set_penalty(const VecRef& penalty) {
+    penalty_ = penalty;
+    if (ruiz_) penalty_ = c_s_ * penalty_.cwiseQuotient(di_s_);
   }
 
   const Solution& solution() const { return sol_; }
@@ -495,12 +501,12 @@ class Solver {
   }
 
   // Consistency certificate for Ax = b, refreshed whenever A or b changes.
-  void check_eq_A(const MatrixXd& A) {
+  void check_eq_A(const MatRef& A) {
     eq_infeas_lb_ = 0.0;
     if (m_ == 0 || !settings.check_eq_consistency) return;
     eq_cert_.set_A(A);
   }
-  void check_eq_b(const VectorXd& b) {
+  void check_eq_b(const VecRef& b) {
     eq_infeas_lb_ = 0.0;
     if (m_ == 0 || !settings.check_eq_consistency) return;
     eq_infeas_lb_ = eq_cert_.bound(b);

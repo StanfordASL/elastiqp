@@ -16,9 +16,6 @@
 
 namespace elastiqp::das {
 
-using MatRef = Eigen::Ref<const MatrixXd>;
-using VecRef = Eigen::Ref<const VectorXd>;
-
 struct Settings {
   double eps_abs = 1e-6;
   double eps_rel = 0.0;
