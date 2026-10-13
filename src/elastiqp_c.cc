@@ -2,6 +2,7 @@
 
 #include "elastiqp/elastiqp_c.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -16,11 +17,10 @@ using MatrixMap = Eigen::Map<const MatrixXd>;
 using VectorMap = Eigen::Map<const VectorXd>;
 namespace das = elastiqp::das;
 
-// Preallocated staging buffers; A/G rows are read directly from caller data.
 struct ElastiQPWorkspace {
   das::Solver solver;
   MatrixXd Q;
-  VectorXd q, b, h, penalty, x, y, z;
+  VectorXd penalty, zero;
 };
 
 namespace {
@@ -271,34 +271,24 @@ int Guard(F&& f) {
   }
 }
 
+// v, or zeros when v is NULL.
+VectorMap OrZero(const ElastiQPWorkspace& w, const double* v, int size) {
+  return VectorMap(v ? v : w.zero.data(), size);
+}
+
 int SetupImpl(ElastiQPWorkspace& w, const ElastiQPProblem& qp,
               const ElastiQPSettings* settings) {
   const int n = qp.n, m = qp.m, p = qp.p;
   w.Q.resize(n, n);
   StageQ(w.Q, qp.Q, n);
-  if (qp.q) {
-    w.q = VectorMap(qp.q, n);
-  } else {
-    w.q.setZero(n);
-  }
-  MatrixXd A(m, n), G(p, n);
-  w.b.resize(m);
-  if (m > 0) {
-    A = MatrixMap(qp.A, m, n);
-    w.b = VectorMap(qp.b, m);
-  }
-  w.h.resize(p);
   w.penalty.resize(p);
-  if (p > 0) {
-    G = MatrixMap(qp.G, p, n);
-    w.h = VectorMap(qp.h, p);
-    StagePenalty(w.penalty, qp.penalty);
-  }
-  w.x.resize(n);
-  w.y.resize(m);
-  w.z.resize(p);
+  if (p > 0) StagePenalty(w.penalty, qp.penalty);
+  w.zero.setZero(std::max({n, m, p}));
   if (settings) w.solver.settings = ToCpp(*settings);
-  w.solver.setup(w.Q, w.q, A, w.b, G, w.h, w.penalty);
+  // NULL A/G/b/h only occur with m or p zero; Maps of size 0 never read them.
+  w.solver.setup(w.Q, OrZero(w, qp.q, n), MatrixMap(qp.A, m, n),
+                 VectorMap(qp.b, m), MatrixMap(qp.G, p, n), VectorMap(qp.h, p),
+                 w.penalty);
   return 0;
 }
 
@@ -466,12 +456,7 @@ int elastiqp_set_Q(ElastiQPWorkspace* work, const double* Q) {
 
 int elastiqp_set_q(ElastiQPWorkspace* work, const double* q) {
   if (work == nullptr) return ELASTIQP_ERR_INVALID_ARG;
-  if (q) {
-    work->q = VectorMap(q, work->solver.n());
-  } else {
-    work->q.setZero();
-  }
-  work->solver.set_q(work->q);
+  work->solver.set_q(OrZero(*work, q, work->solver.n()));
   return 0;
 }
 
@@ -485,8 +470,7 @@ int elastiqp_set_b(ElastiQPWorkspace* work, const double* b) {
   const int m = work->solver.m();
   if (m == 0) return 0;
   if (b == nullptr) return ELASTIQP_ERR_INVALID_ARG;
-  work->b = VectorMap(b, m);
-  work->solver.set_b(work->b);
+  work->solver.set_b(VectorMap(b, m));
   return 0;
 }
 
@@ -500,8 +484,7 @@ int elastiqp_set_h(ElastiQPWorkspace* work, const double* h) {
   const int p = work->solver.p();
   if (p == 0) return 0;
   if (h == nullptr) return ELASTIQP_ERR_INVALID_ARG;
-  work->h = VectorMap(h, p);
-  work->solver.set_h(work->h);
+  work->solver.set_h(VectorMap(h, p));
   return 0;
 }
 
@@ -540,19 +523,9 @@ int elastiqp_set_G_rows(ElastiQPWorkspace* work, int first, int count,
 int elastiqp_set_warm_start(ElastiQPWorkspace* work, const double* x,
                             const double* y, const double* z) {
   if (work == nullptr || x == nullptr) return ELASTIQP_ERR_INVALID_ARG;
-  const int n = work->solver.n(), m = work->solver.m(), p = work->solver.p();
-  work->x = VectorMap(x, n);
-  if (y) {
-    work->y = VectorMap(y, m);
-  } else {
-    work->y.setZero();
-  }
-  if (z) {
-    work->z = VectorMap(z, p);
-  } else {
-    work->z.setZero();
-  }
-  work->solver.set_warm_start(work->x, work->y, work->z);
+  work->solver.set_warm_start(VectorMap(x, work->solver.n()),
+                              OrZero(*work, y, work->solver.m()),
+                              OrZero(*work, z, work->solver.p()));
   return 0;
 }
 

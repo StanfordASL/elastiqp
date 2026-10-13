@@ -16,6 +16,9 @@
 
 namespace elastiqp::das {
 
+using MatRef = Eigen::Ref<const MatrixXd>;
+using VecRef = Eigen::Ref<const VectorXd>;
+
 struct Settings {
   double eps_abs = 1e-6;
   double eps_rel = 0.0;
@@ -76,9 +79,9 @@ class Solver {
     kDropped
   };
 
-  void setup(const MatrixXd& Q, const VectorXd& q, const MatrixXd& A,
-             const VectorXd& b, const MatrixXd& G, const VectorXd& h,
-             const VectorXd& penalty) {
+  void setup(const MatRef& Q, const VecRef& q, const MatRef& A,
+             const VecRef& b, const MatRef& G, const VecRef& h,
+             const VecRef& penalty) {
     n_ = static_cast<int>(q.size());
     m_ = static_cast<int>(b.size());
     p_ = static_cast<int>(h.size());
@@ -158,17 +161,17 @@ class Solver {
     sol_.status = Status::kUnsolved;
     rw_.ready = false;
   }
-  void setup(const MatrixXd& Q, const VectorXd& q, const MatrixXd& A,
-             const VectorXd& b, const MatrixXd& G, const VectorXd& h,
+  void setup(const MatRef& Q, const VecRef& q, const MatRef& A,
+             const VecRef& b, const MatRef& G, const VecRef& h,
              double penalty) {
     setup(Q, q, A, b, G, h, VectorXd::Constant(h.size(), penalty));
   }
-  void setup(const MatrixXd& Q, const VectorXd& q, const MatrixXd& G,
-             const VectorXd& h, const VectorXd& penalty) {
+  void setup(const MatRef& Q, const VecRef& q, const MatRef& G,
+             const VecRef& h, const VecRef& penalty) {
     setup(Q, q, MatrixXd(0, q.size()), VectorXd(0), G, h, penalty);
   }
-  void setup(const MatrixXd& Q, const VectorXd& q, const MatrixXd& G,
-             const VectorXd& h, double penalty) {
+  void setup(const MatRef& Q, const VecRef& q, const MatRef& G,
+             const VecRef& h, double penalty) {
     setup(Q, q, G, h, VectorXd::Constant(h.size(), penalty));
   }
 
@@ -176,20 +179,20 @@ class Solver {
   int m() const { return m_; }
   int p() const { return p_; }
 
-  void set_Q(const MatrixXd& Q) {
+  void set_Q(const MatRef& Q) {
     Q_ = 0.5 * (Q + Q.transpose());
     Q_dirty_ = true;
   }
-  void set_q(const VectorXd& q) {
+  void set_q(const VecRef& q) {
     q_ = q;
     rhs_dirty_ = true;
   }
-  void set_A(const MatrixXd& A) { set_rows(A, 0); }
-  void set_b(const VectorXd& b) {
+  void set_A(const MatRef& A) { set_rows(A, 0); }
+  void set_b(const VecRef& b) {
     rhs_.head(m_) = b;
     rhs_dirty_ = true;
   }
-  void set_G(const MatrixXd& G) { set_rows(G, m_); }
+  void set_G(const MatRef& G) { set_rows(G, m_); }
   // Replace rows [first, first + R.rows()); read R in place.
   template <class Derived>
   void set_A_rows(int first, const Eigen::MatrixBase<Derived>& R) {
@@ -199,11 +202,11 @@ class Solver {
   void set_G_rows(int first, const Eigen::MatrixBase<Derived>& R) {
     set_rows(R, m_ + first);
   }
-  void set_h(const VectorXd& h) {
+  void set_h(const VecRef& h) {
     rhs_.tail(p_) = h;
     rhs_dirty_ = true;
   }
-  void set_penalty(const VectorXd& penalty) {
+  void set_penalty(const VecRef& penalty) {
     penalty_ = penalty;
     penalty_dirty_ = true;
   }
@@ -212,7 +215,7 @@ class Solver {
 
   // Seeds states and multipliers from (x, y, z) on the next solve(), replacing
   // the internal warm start.
-  void set_warm_start(const VectorXd& x, const VectorXd& y, const VectorXd& z) {
+  void set_warm_start(const VecRef& x, const VecRef& y, const VecRef& z) {
     warm_x_ = x;
     warm_y_ = y;
     warm_z_ = z;
