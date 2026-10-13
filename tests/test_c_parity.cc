@@ -18,12 +18,9 @@ namespace das = elastiqp::das;
 
 namespace {
 
-using RowMajor =
-    Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
-
-// Row-major copies of the problem data, kept alive for the C calls.
+// Copies of the problem data, kept alive for the C calls.
 struct CData {
-  RowMajor Q, A, G;
+  MatrixXd Q, A, G;
   VectorXd q, b, h, w;
   ElastiQPProblem Problem() const {
     return {static_cast<int>(q.size()),
@@ -145,9 +142,10 @@ void Chain(std::mt19937& rng) {
     if (tick % 4 == 3) {  // a block of G rows, through set_G_rows
       const int first = tick % (p - 3);
       qp.G.middleRows(first, 3) += 0.1 * problem_gen::Randn(rng, 3, n);
+      const MatrixXd block = qp.G.middleRows(first, 3);
       cd.G = qp.G;
       ref.set_G(qp.G);
-      elastiqp_set_G_rows(work, first, 3, cd.G.row(first).data());
+      elastiqp_set_G_rows(work, first, 3, block.data());
     }
     if (tick % 10 == 3) {
       const MatrixXd dQ = 0.05 * problem_gen::Randn(rng, n, n);

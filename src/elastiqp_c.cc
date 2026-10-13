@@ -12,9 +12,7 @@
 
 using Eigen::MatrixXd;
 using Eigen::VectorXd;
-using RowMajor = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic,
-                               Eigen::RowMajor>;
-using RowMajorMap = Eigen::Map<const RowMajor>;
+using MatrixMap = Eigen::Map<const MatrixXd>;
 using VectorMap = Eigen::Map<const VectorXd>;
 namespace das = elastiqp::das;
 
@@ -215,10 +213,10 @@ bool Valid(const ElastiQPProblem* qp) {
   return true;
 }
 
-// Upper triangle of the row-major Q, mirrored; zero for NULL.
+// Upper triangle of the column-major Q, mirrored; zero for NULL.
 void StageQ(MatrixXd& dst, const double* Q, int n) {
   if (Q) {
-    dst = RowMajorMap(Q, n, n).selfadjointView<Eigen::Upper>();
+    dst = MatrixMap(Q, n, n).selfadjointView<Eigen::Upper>();
   } else {
     dst.setZero();
   }
@@ -286,13 +284,13 @@ int SetupImpl(ElastiQPWorkspace& w, const ElastiQPProblem& qp,
   MatrixXd A(m, n), G(p, n);
   w.b.resize(m);
   if (m > 0) {
-    A = RowMajorMap(qp.A, m, n);
+    A = MatrixMap(qp.A, m, n);
     w.b = VectorMap(qp.b, m);
   }
   w.h.resize(p);
   w.penalty.resize(p);
   if (p > 0) {
-    G = RowMajorMap(qp.G, p, n);
+    G = MatrixMap(qp.G, p, n);
     w.h = VectorMap(qp.h, p);
     StagePenalty(w.penalty, qp.penalty);
   }
@@ -525,7 +523,7 @@ int elastiqp_set_A_rows(ElastiQPWorkspace* work, int first, int count,
     return ELASTIQP_ERR_INVALID_ARG;
   }
   if (count == 0) return 0;
-  work->solver.set_A_rows(first, RowMajorMap(rows, count, work->solver.n()));
+  work->solver.set_A_rows(first, MatrixMap(rows, count, work->solver.n()));
   return 0;
 }
 
@@ -535,7 +533,7 @@ int elastiqp_set_G_rows(ElastiQPWorkspace* work, int first, int count,
     return ELASTIQP_ERR_INVALID_ARG;
   }
   if (count == 0) return 0;
-  work->solver.set_G_rows(first, RowMajorMap(rows, count, work->solver.n()));
+  work->solver.set_G_rows(first, MatrixMap(rows, count, work->solver.n()));
   return 0;
 }
 

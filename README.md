@@ -106,8 +106,6 @@ while (running) {
 
 ### C
 
-The C interface uses the active-set backend. Build `elastiqp_c` with `-DELASTIQP_BUILD_C=ON` (default for top-level builds); add `-DBUILD_SHARED_LIBS=ON` for a shared library. Matrices are dense row-major; only the upper triangle of `Q` is read. Status codes match `elastiqp::Status` (`ELASTIQP_SOLVED`, `ELASTIQP_MAX_ITER`, ...); API errors are negative. See [`elastiqp_c.h`](include/elastiqp/elastiqp_c.h) for the API.
-
 ```c
 #include "elastiqp/elastiqp_c.h"
 

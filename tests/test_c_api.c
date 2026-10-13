@@ -157,13 +157,13 @@ static void workspace(void) {
 }
 
 /*
- * Row-major layout: G is 2 x 3. min 0.5|x|^2 + q'x with
+ * Column-major layout: G is 2 x 3. min 0.5|x|^2 + q'x with
  * G = [[1, 2, 3], [0, 0, 1]], h = [0, 10] (second row inactive). The
  * minimizer of 0.5|x - c|^2 over g'x <= 0 is c - (g'c / g'g) g.
  */
-static void row_major(void) {
+static void column_major(void) {
   const double Q[] = {1, 0, 0, 0, 1, 0, 0, 0, 1}, q[] = {-1, -1, -1};
-  const double G[] = {1, 2, 3, 0, 0, 1}, h[] = {0, 10}, w[] = {100, 100};
+  const double G[] = {1, 0, 2, 0, 3, 1}, h[] = {0, 10}, w[] = {100, 100};
   /* c = (1,1,1), g'c = 6, g'g = 14 */
   const double x_ref[] = {1 - 6.0 / 14, 1 - 12.0 / 14, 1 - 18.0 / 14};
   double x[3];
@@ -171,13 +171,16 @@ static void row_major(void) {
   ElastiQPSolution res = {x, NULL, NULL, NULL};
   ElastiQPSettings s = tight();
   elastiqp_solve_once(&res, &qp, &s);
-  check("row-major G",
+  check("column-major G",
         res.status == ELASTIQP_SOLVED && near(x, x_ref, 3, 1e-8));
 }
 
-/* Only the upper triangle of Q is read: full and upper-only Q agree. */
+/*
+ * Only the upper triangle of Q is read: full and upper-only Q agree. Column-
+ * major, Q(0, 1) is Q[2]; reading the lower triangle would pick up the -99.
+ */
 static void q_upper_triangle(void) {
-  const double Qfull[] = {2, 1, 1, 2}, Qupper[] = {2, 1, -99, 2};
+  const double Qfull[] = {2, 1, 1, 2}, Qupper[] = {2, -99, 1, 2};
   const double q[] = {-1, 0};
   double x1[2], x2[2];
   ElastiQPProblem qp = {2, 0, 0, Qfull, q, NULL, NULL, NULL, NULL, NULL};
@@ -204,12 +207,15 @@ static void inf_convention(void) {
             fabs(t[1]) < 1e-12 && isinf(z_t[1]));
 }
 
-/* Rows of a 3 x 2 G replaced in blocks, against fresh one-shot solves. */
+/*
+ * Rows of a 3 x 2 G replaced in blocks, against fresh one-shot solves.
+ * G = [[1, 0], [0, 1], [1, 1]]; rows 1..2 become [[0.5, 1], [2, 0.5]].
+ */
 static void row_updates(void) {
   const double Q[] = {1, 0, 0, 1}, q[] = {-2, -2}, h[] = {1, 1, 1};
   const double w[] = {10, 10, 10};
-  double G[] = {1, 0, 0, 1, 1, 1};
-  const double rows[] = {0.5, 1, 2, 0.5};
+  double G[] = {1, 0, 1, 0, 1, 1};
+  const double rows[] = {0.5, 2, 1, 0.5};
   double x[2], x_ref[2];
   ElastiQPProblem qp = {2, 0, 3, Q, q, NULL, NULL, G, h, w};
   ElastiQPSolution res = {x}, ref = {x_ref};
@@ -217,7 +223,7 @@ static void row_updates(void) {
   elastiqp_setup(&work, &qp, NULL);
   elastiqp_solve(&res, work);
   check("set_G_rows: rows 1..2", elastiqp_set_G_rows(work, 1, 2, rows) == 0);
-  G[2] = 0.5, G[3] = 1, G[4] = 2, G[5] = 0.5;
+  G[1] = 0.5, G[2] = 2, G[4] = 1, G[5] = 0.5;
   elastiqp_solve(&res, work);
   elastiqp_solve_once(&ref, &qp, NULL);
   check("set_G_rows: matches a fresh solve",
@@ -412,7 +418,7 @@ int main(void) {
   one_shot();
   elastic_and_hard();
   workspace();
-  row_major();
+  column_major();
   q_upper_triangle();
   inf_convention();
   row_updates();
