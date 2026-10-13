@@ -139,14 +139,6 @@ void Chain(std::mt19937& rng) {
       elastiqp_set_G(work, cd.G.data());
       elastiqp_set_A(work, cd.A.data());
     }
-    if (tick % 4 == 3) {  // a block of G rows, through set_G_rows
-      const int first = tick % (p - 3);
-      qp.G.middleRows(first, 3) += 0.1 * problem_gen::Randn(rng, 3, n);
-      const MatrixXd block = qp.G.middleRows(first, 3);
-      cd.G = qp.G;
-      ref.set_G(qp.G);
-      elastiqp_set_G_rows(work, first, 3, block.data());
-    }
     if (tick % 10 == 3) {
       const MatrixXd dQ = 0.05 * problem_gen::Randn(rng, n, n);
       qp.Q += dQ * dQ.transpose();

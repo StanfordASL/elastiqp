@@ -208,33 +208,28 @@ static void inf_convention(void) {
 }
 
 /*
- * Rows of a 3 x 2 G replaced in blocks, against fresh one-shot solves.
- * G = [[1, 0], [0, 1], [1, 1]]; rows 1..2 become [[0.5, 1], [2, 0.5]].
+ * set_G with one changed row, against a fresh one-shot solve.
+ * G = [[1, 0], [0, 1], [1, 1]]; row 1 becomes [2, 0.5].
  */
-static void row_updates(void) {
+static void set_G_partial(void) {
   const double Q[] = {1, 0, 0, 1}, q[] = {-2, -2}, h[] = {1, 1, 1};
   const double w[] = {10, 10, 10};
   double G[] = {1, 0, 1, 0, 1, 1};
-  const double rows[] = {0.5, 2, 1, 0.5};
   double x[2], x_ref[2];
   ElastiQPProblem qp = {2, 0, 3, Q, q, NULL, NULL, G, h, w};
   ElastiQPSolution res = {x}, ref = {x_ref};
   ElastiQPWorkspace* work = NULL;
   elastiqp_setup(&work, &qp, NULL);
   elastiqp_solve(&res, work);
-  check("set_G_rows: rows 1..2", elastiqp_set_G_rows(work, 1, 2, rows) == 0);
-  G[1] = 0.5, G[2] = 2, G[4] = 1, G[5] = 0.5;
+  G[1] = 2, G[4] = 0.5;
+  check("set_G: one row changed", elastiqp_set_G(work, G) == 0);
   elastiqp_solve(&res, work);
   elastiqp_solve_once(&ref, &qp, NULL);
-  check("set_G_rows: matches a fresh solve",
+  check("set_G: matches a fresh solve",
         res.status == ELASTIQP_SOLVED && near(x, x_ref, 2, 1e-8));
-  check(
-      "set_G_rows: out of range rejected",
-      elastiqp_set_G_rows(work, 2, 2, rows) == ELASTIQP_ERR_INVALID_ARG &&
-          elastiqp_set_G_rows(work, -1, 1, rows) == ELASTIQP_ERR_INVALID_ARG &&
-          elastiqp_set_A_rows(work, 0, 1, rows) == ELASTIQP_ERR_INVALID_ARG);
-  check("set_G_rows: count 0 is a no-op",
-        elastiqp_set_G_rows(work, 3, 0, NULL) == 0);
+  check("set_G: NULL rejected",
+        elastiqp_set_G(work, NULL) == ELASTIQP_ERR_INVALID_ARG);
+  check("set_A: m = 0 is a no-op", elastiqp_set_A(work, NULL) == 0);
   elastiqp_free(work);
 }
 
@@ -421,7 +416,7 @@ int main(void) {
   column_major();
   q_upper_triangle();
   inf_convention();
-  row_updates();
+  set_G_partial();
   relax();
   options();
   invalid_args();
