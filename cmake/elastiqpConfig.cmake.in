@@ -5,4 +5,14 @@ find_dependency(Eigen3)
 
 include("${CMAKE_CURRENT_LIST_DIR}/elastiqpTargets.cmake")
 
+# The static C interface requires the C++ linker and runtime.
+if(TARGET elastiqp::elastiqp_c)
+  get_target_property(_elastiqp_c_type elastiqp::elastiqp_c TYPE)
+  get_property(_elastiqp_languages GLOBAL PROPERTY ENABLED_LANGUAGES)
+  if(_elastiqp_c_type STREQUAL "STATIC_LIBRARY"
+     AND NOT "CXX" IN_LIST _elastiqp_languages)
+    enable_language(CXX)
+  endif()
+endif()
+
 check_required_components(elastiqp)

@@ -76,9 +76,9 @@ class Solver {
     kDropped
   };
 
-  void setup(const MatrixXd& Q, const VectorXd& q, const MatrixXd& A,
-             const VectorXd& b, const MatrixXd& G, const VectorXd& h,
-             const VectorXd& penalty) {
+  void setup(const MatRef& Q, const VecRef& q, const MatRef& A,
+             const VecRef& b, const MatRef& G, const VecRef& h,
+             const VecRef& penalty) {
     n_ = static_cast<int>(q.size());
     m_ = static_cast<int>(b.size());
     p_ = static_cast<int>(h.size());
@@ -158,17 +158,17 @@ class Solver {
     sol_.status = Status::kUnsolved;
     rw_.ready = false;
   }
-  void setup(const MatrixXd& Q, const VectorXd& q, const MatrixXd& A,
-             const VectorXd& b, const MatrixXd& G, const VectorXd& h,
+  void setup(const MatRef& Q, const VecRef& q, const MatRef& A,
+             const VecRef& b, const MatRef& G, const VecRef& h,
              double penalty) {
     setup(Q, q, A, b, G, h, VectorXd::Constant(h.size(), penalty));
   }
-  void setup(const MatrixXd& Q, const VectorXd& q, const MatrixXd& G,
-             const VectorXd& h, const VectorXd& penalty) {
+  void setup(const MatRef& Q, const VecRef& q, const MatRef& G,
+             const VecRef& h, const VecRef& penalty) {
     setup(Q, q, MatrixXd(0, q.size()), VectorXd(0), G, h, penalty);
   }
-  void setup(const MatrixXd& Q, const VectorXd& q, const MatrixXd& G,
-             const VectorXd& h, double penalty) {
+  void setup(const MatRef& Q, const VecRef& q, const MatRef& G,
+             const VecRef& h, double penalty) {
     setup(Q, q, G, h, VectorXd::Constant(h.size(), penalty));
   }
 
@@ -176,25 +176,25 @@ class Solver {
   int m() const { return m_; }
   int p() const { return p_; }
 
-  void set_Q(const MatrixXd& Q) {
+  void set_Q(const MatRef& Q) {
     Q_ = 0.5 * (Q + Q.transpose());
     Q_dirty_ = true;
   }
-  void set_q(const VectorXd& q) {
+  void set_q(const VecRef& q) {
     q_ = q;
     rhs_dirty_ = true;
   }
-  void set_A(const MatrixXd& A) { set_rows(A, 0); }
-  void set_b(const VectorXd& b) {
+  void set_A(const MatRef& A) { set_rows(A, 0); }
+  void set_b(const VecRef& b) {
     rhs_.head(m_) = b;
     rhs_dirty_ = true;
   }
-  void set_G(const MatrixXd& G) { set_rows(G, m_); }
-  void set_h(const VectorXd& h) {
+  void set_G(const MatRef& G) { set_rows(G, m_); }
+  void set_h(const VecRef& h) {
     rhs_.tail(p_) = h;
     rhs_dirty_ = true;
   }
-  void set_penalty(const VectorXd& penalty) {
+  void set_penalty(const VecRef& penalty) {
     penalty_ = penalty;
     penalty_dirty_ = true;
   }
@@ -203,11 +203,22 @@ class Solver {
 
   // Seeds states and multipliers from (x, y, z) on the next solve(), replacing
   // the internal warm start.
-  void set_warm_start(const VectorXd& x, const VectorXd& y, const VectorXd& z) {
+  void set_warm_start(const VecRef& x, const VecRef& y, const VecRef& z) {
     warm_x_ = x;
     warm_y_ = y;
     warm_z_ = z;
     explicit_warm_ = true;
+  }
+
+  // Can relax/differentiate if the last solve succeeded and no data changed
+  bool can_relax() const {
+    if (!have_solution_ || Q_dirty_ || penalty_dirty_ || rhs_dirty_) {
+      return false;
+    }
+    for (char c : col_dirty_) {
+      if (c != 0) return false;
+    }
+    return true;
   }
 
   RowState row_state(int i) const {
@@ -346,13 +357,13 @@ class Solver {
   // start untouched. The first call after setup() allocates its workspace.
   const Solution& relax(double kappa, double tol = 1e-6, int max_iter = 50) {
     if (p_ == 0 || kappa <= 0.0) return sol_;
-    bool stale = Q_dirty_ || penalty_dirty_ || rhs_dirty_;
-    for (char c : col_dirty_) stale |= c != 0;
-    if (stale && have_solution_) {
-      sol_.status = Status::kUnsolved;
-      sol_.converged = 0;
+    if (!can_relax()) {
+      if (have_solution_) {  // data changed since the solve
+        sol_.status = Status::kUnsolved;
+        sol_.converged = 0;
+      }
+      return sol_;
     }
-    if (stale || !have_solution_) return sol_;
     if (!rw_.ready) relax_alloc();
     RelaxWork& w = rw_;
     const double kappa_s = c_ * kappa;
@@ -670,7 +681,7 @@ class Solver {
   }
 
   // Marks only rows that actually changed.
-  void set_rows(const MatrixXd& R, int offset) {
+  void set_rows(const MatRef& R, int offset) {
     for (int i = 0; i < R.rows(); ++i) {
       bool same = true;
       for (int k = 0; k < n_ && same; ++k) same = Ct_(k, offset + i) == R(i, k);

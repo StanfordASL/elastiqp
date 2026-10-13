@@ -94,7 +94,7 @@ Note: if using UV, you can directly replace the above `pip` commands with `uv pi
 elastiqp::Solution sol = elastiqp::Solve(Q, q, A, b, G, h, penalty);
 // or without equalities: elastiqp::Solve(Q, q, G, h, penalty)
 
-// If you are solving multiple times in a control loop:
+// Repeated solves
 elastiqp::Solver solver;
 solver.setup(Q, q, A, b, G, h, penalty);
 while (running) {
@@ -103,6 +103,32 @@ while (running) {
   const elastiqp::Solution& sol = solver.solve();
 }
 ```
+
+### C
+
+```c
+#include "elastiqp/elastiqp_c.h"
+
+// One-shot solve; penalty >= ELASTIQP_INF makes a row hard.
+ElastiQPProblem qp = {.n = n, .m = m, .p = p, .Q = Q, .q = q, .A = A, .b = b,
+                      .G = G, .h = h, .penalty = penalty};
+ElastiQPSolution res = {.x = x, .z = z};  // caller-owned outputs; NULL ones are skipped
+elastiqp_solve_once(&res, &qp, NULL);     // NULL: default settings
+
+// Repeated solves
+ElastiQPWorkspace* work;
+elastiqp_setup(&work, &qp, NULL);
+while (running) {
+  elastiqp_set_q(work, q_k); elastiqp_set_h(work, h_k); elastiqp_set_b(work, b_k);
+  elastiqp_set_G(work, G_k);  // only rows that differ are refreshed
+  if (elastiqp_solve(&res, work) != ELASTIQP_SOLVED) { /* ... */ }
+}
+elastiqp_free(work);
+```
+
+Pass settings as an `ElastiQPSettings` struct or set them by name: `elastiqp_set_option(work, "eps_abs", 1e-8)`. Use `elastiqp_num_options` and `elastiqp_option_info` to list names, types, defaults, ranges, and descriptions.
+
+With CMake: `find_package(elastiqp)` and link `elastiqp::elastiqp_c`.
 
 ### Python
 

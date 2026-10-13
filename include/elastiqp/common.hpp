@@ -12,6 +12,9 @@ namespace elastiqp {
 using Eigen::MatrixXd;
 using Eigen::VectorXd;
 
+using MatRef = Eigen::Ref<const MatrixXd>;
+using VecRef = Eigen::Ref<const VectorXd>;
+
 enum class Status {
   kUnsolved = 0,
   kSolved = 1,
@@ -103,7 +106,7 @@ inline double ruiz_cost_gamma(const MatrixXd& Q) {
 // the reachable residual; nonzero only when A is rank-deficient.
 class EqCertificate {
  public:
-  void set_A(const MatrixXd& A) {
+  void set_A(const MatRef& A) {
     m_ = A.rows();
     n_ = A.cols();
     rank_deficient_ = false;
@@ -127,7 +130,7 @@ class EqCertificate {
   }
   bool rank_deficient() const { return rank_deficient_; }
 
-  double bound(const VectorXd& b) const {
+  double bound(const VecRef& b) const {
     if (!rank_deficient_ || m_ == 0) return 0.0;
     const VectorXd xls = qr_.solve(b);
     return (A_ * xls - b).norm() / std::sqrt(static_cast<double>(m_));

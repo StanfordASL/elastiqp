@@ -3,7 +3,14 @@ include(CMakePackageConfigHelpers)
 
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
-install(TARGETS elastiqp EXPORT elastiqpTargets)
+set(_elastiqp_install_targets elastiqp)
+if(ELASTIQP_BUILD_C)
+  list(APPEND _elastiqp_install_targets elastiqp_c)
+endif()
+install(TARGETS ${_elastiqp_install_targets} EXPORT elastiqpTargets
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(EXPORT elastiqpTargets
   NAMESPACE elastiqp::
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/elastiqp)
