@@ -14,7 +14,6 @@ Notes:
 """
 
 import ctypes
-import os
 from functools import partial
 from pathlib import Path
 from typing import NamedTuple
@@ -34,7 +33,7 @@ from jax import Array
 import jax.numpy as jnp
 import numpy as np
 
-from elastiqp import _DEFAULT_MAX_ITER
+from elastiqp import _DEFAULT_MAX_ITER, _core
 
 __all__ = ["solve", "Result", "METHODS"]
 
@@ -43,31 +42,23 @@ _METHOD_ID = {"das": 0, "pdal": 1, "ipm": 2}
 
 
 def _find_library():
-    # Search order mirrors elastiqp._core (see _import_core): an explicit
-    # ELASTIQP_BUILD_DIR first, so a source checkout tests the build it just
-    # made rather than an installed copy; then next to this file (installed
-    # wheel); then <repo>/build for an un-configured checkout.
-    candidates = []
-    env_dir = os.environ.get("ELASTIQP_BUILD_DIR")
-    if env_dir:
-        candidates.append(Path(env_dir))
-    candidates.append(Path(__file__).resolve().parent)
-    candidates.append(Path(__file__).resolve().parents[2] / "build")
-    for directory in candidates:
-        for name in (
-            "libelastiqp_jax_ffi.so",
-            "elastiqp_jax_ffi.so",
-            "elastiqp_jax_ffi.dll",
-            "libelastiqp_jax_ffi.dylib",
-        ):
-            path = directory / name
-            if path.exists():
-                return path
+    # The FFI library is built and installed next to the compiled core, so
+    # look wherever elastiqp._core was found (installed wheel, editable
+    # install, ELASTIQP_BUILD_DIR, or <repo>/build).
+    directory = Path(_core.__file__).resolve().parent
+    for name in (
+        "libelastiqp_jax_ffi.so",
+        "elastiqp_jax_ffi.so",
+        "elastiqp_jax_ffi.dll",
+        "libelastiqp_jax_ffi.dylib",
+    ):
+        path = directory / name
+        if path.exists():
+            return path
     raise ImportError(
-        "elastiqp_jax_ffi shared library not found (searched "
-        f"{[str(c) for c in candidates]}). Reinstall the package, or for "
-        "source checkouts build it first (cmake --build build), optionally "
-        "pointing ELASTIQP_BUILD_DIR at the build directory."
+        f"elastiqp_jax_ffi shared library not found in {directory} (next to "
+        "elastiqp._core). Reinstall the package, or for source checkouts "
+        "build it first (cmake --build build)."
     )
 
 
