@@ -116,7 +116,7 @@ endif()
 # Python bindings and JAX FFI
 if(ELASTIQP_BUILD_PYTHON)
   add_library(elastiqp_jax_ffi SHARED bindings/jax_ffi.cc)
-  target_include_directories(elastiqp_jax_ffi PRIVATE
+  target_include_directories(elastiqp_jax_ffi SYSTEM PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/xla_ffi)
   target_link_libraries(elastiqp_jax_ffi PRIVATE elastiqp::elastiqp)
   if(SKBUILD)
