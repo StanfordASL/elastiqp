@@ -1,6 +1,7 @@
 # Build manylinux, macOS, and Windows wheels and an sdist, then publish to PyPI on a version tag.
 #
-# Manual runs (workflow_dispatch) build everything and publish to TestPyPI.
+# Manual runs (workflow_dispatch) build everything, and publish to TestPyPI
+# only if the "publish" box is ticked.
 # Tag pushes matching v* publish to PyPI.
 #
 # Both publish jobs use PyPI trusted publishing (no API token): register this
@@ -17,6 +18,11 @@ on:
       - "pyproject.toml"
       - "CMakeLists.txt"
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish to TestPyPI"
+        type: boolean
+        default: false
 
 jobs:
   build_wheels:
@@ -71,7 +77,7 @@ jobs:
 
   publish_testpypi:
     name: publish to TestPyPI
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
     needs: [build_wheels, build_sdist]
     runs-on: ubuntu-latest
     environment: testpypi
