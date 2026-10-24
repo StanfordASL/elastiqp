@@ -104,32 +104,6 @@ while (running) {
 }
 ```
 
-### C
-
-```c
-#include "elastiqp/elastiqp_c.h"
-
-// One-shot solve; penalty >= ELASTIQP_INF makes a row hard.
-ElastiQPProblem qp = {.n = n, .m = m, .p = p, .Q = Q, .q = q, .A = A, .b = b,
-                      .G = G, .h = h, .penalty = penalty};
-ElastiQPSolution res = {.x = x, .z = z};  // caller-owned outputs; NULL ones are skipped
-elastiqp_solve_once(&res, &qp, NULL);     // NULL: default settings
-
-// Repeated solves
-ElastiQPWorkspace* work;
-elastiqp_setup(&work, &qp, NULL);
-while (running) {
-  elastiqp_set_q(work, q_k); elastiqp_set_h(work, h_k); elastiqp_set_b(work, b_k);
-  elastiqp_set_G(work, G_k);  // only rows that differ are refreshed
-  if (elastiqp_solve(&res, work) != ELASTIQP_SOLVED) { /* ... */ }
-}
-elastiqp_free(work);
-```
-
-Pass settings as an `ElastiQPSettings` struct or set them by name: `elastiqp_set_option(work, "eps_abs", 1e-8)`. Use `elastiqp_num_options` and `elastiqp_option_info` to list names, types, defaults, ranges, and descriptions.
-
-With CMake: `find_package(elastiqp)` and link `elastiqp::elastiqp_c`.
-
 ### Python
 
 ```python
@@ -149,9 +123,6 @@ sol = solver.solve()
 ```
 
 ### JAX / PyTorch
-
-> [!WARNING]  
-> Differentiability support is still in beta
 
 ```python
 import jax
@@ -186,6 +157,29 @@ _, xs = jax.lax.scan(step, init, qs)
 ```
 
 For runnable Python/JAX/PyTorch examples, see the `examples` folder
+
+### C
+
+A new experimental C wrapper has recently been added for compatibility with libraries like [CasADi](https://github.com/casadi/casadi)
+
+```c
+#include "elastiqp/elastiqp_c.h"
+
+ElastiQPProblem qp = {.n = n, .m = m, .p = p, .Q = Q, .q = q, .A = A, .b = b,
+                      .G = G, .h = h, .penalty = penalty};
+ElastiQPSolution res = {.x = x, .z = z};
+elastiqp_solve_once(&res, &qp, NULL);  // NULL: default settings
+
+// Repeated solves
+ElastiQPWorkspace* work;
+elastiqp_setup(&work, &qp, NULL);
+while (running) {
+  elastiqp_set_q(work, q_k); elastiqp_set_h(work, h_k); elastiqp_set_b(work, b_k);
+  elastiqp_set_G(work, G_k);
+  if (elastiqp_solve(&res, work) != ELASTIQP_SOLVED) { /* ... */ }
+}
+elastiqp_free(work);
+```
 
 ## Benchmarks
 
