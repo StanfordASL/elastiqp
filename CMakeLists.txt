@@ -119,8 +119,13 @@ if(ELASTIQP_BUILD_PYTHON)
   target_include_directories(elastiqp_jax_ffi SYSTEM PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/xla_ffi)
   target_link_libraries(elastiqp_jax_ffi PRIVATE elastiqp::elastiqp)
+  # The XLA FFI handler symbols carry no dllexport; export them for ctypes.
+  set_target_properties(elastiqp_jax_ffi PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
   if(SKBUILD)
-    install(TARGETS elastiqp_jax_ffi LIBRARY DESTINATION elastiqp)
+    # A Windows DLL is a RUNTIME artifact, not a LIBRARY one.
+    install(TARGETS elastiqp_jax_ffi
+      LIBRARY DESTINATION elastiqp
+      RUNTIME DESTINATION elastiqp)
   endif()
 
   find_package(Python 3.8 COMPONENTS Interpreter Development.Module QUIET)

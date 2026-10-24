@@ -1,4 +1,4 @@
-# Build manylinux + macOS wheels and an sdist, then publish to PyPI on a version tag.
+# Build manylinux, macOS, and Windows wheels and an sdist, then publish to PyPI on a version tag.
 #
 # Manual runs (workflow_dispatch) build everything and publish to TestPyPI.
 # Tag pushes matching v* publish to PyPI.
@@ -25,7 +25,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, windows-latest]
     steps:
       - uses: actions/checkout@v5
 
@@ -33,6 +33,7 @@ jobs:
         env:
           CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-* cp313-*"
           CIBW_SKIP: "*-musllinux_* *_i686"
+          CIBW_ARCHS_WINDOWS: AMD64
           # AlmaLinux 8 based image: glibc 2.28, broad compatibility.
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
@@ -40,6 +41,9 @@ jobs:
           CIBW_BEFORE_ALL_LINUX: dnf install -y epel-release && dnf install -y eigen3-devel
           CIBW_BEFORE_ALL_MACOS: brew install eigen
           CIBW_ENVIRONMENT_MACOS: MACOSX_DEPLOYMENT_TARGET=11.0
+          # vcpkg is preinstalled at C:\vcpkg on GitHub's Windows runners.
+          CIBW_BEFORE_ALL_WINDOWS: vcpkg install eigen3:x64-windows
+          CIBW_ENVIRONMENT_WINDOWS: CMAKE_PREFIX_PATH=C:/vcpkg/installed/x64-windows
           # Smoke-test each wheel from a clean venv (no ELASTIQP_BUILD_DIR set,
           # so the test imports the installed elastiqp._core).
           CIBW_TEST_COMMAND: python {project}/tests/test_bindings.py
