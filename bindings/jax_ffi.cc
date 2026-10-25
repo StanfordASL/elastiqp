@@ -1,13 +1,12 @@
 // XLA FFI handlers for ElastiQP. Every call builds a fresh solver (XLA
 // assumes purity), so warm starting is an explicit argument.
 //
-//   ElastiqpSolve:     (Q, q, A, b, G, h, penalty)
-//                        -> (x, t, y, z_t, z, xr, tr, yr, z_t_r, z_r, info)
-//   ElastiqpSolveWarm: (Q, q, A, b, G, h, penalty, x0, y0, z0)
-//                        -> (x, t, y, z_t, z, xr, tr, yr, z_t_r, z_r, info)
-//                        (das and pdal only)
+//   ElastiqpSolve: (Q, q, A, b, G, h, penalty, x0, y0, z0)
+//                    -> (x, t, y, z_t, z, xr, tr, yr, z_t_r, z_r, info)
 //
 // method: 0 = das, 1 = pdal, 2 = ipm. max_iter is the backend's outer budget.
+// warm != 0 seeds the solve from (x0, y0, z0) (das and pdal only); otherwise
+// they are ignored.
 // The *r block is the kappa-relaxed point the Python wrappers differentiate
 // at; it copies the tight solution when target_kappa <= 0. info = [converged,
 // iters, relax_converged]. A has 0 rows and b 0 entries when there are no
@@ -135,9 +134,11 @@ void write_solution(const elastiqp::Solution& sol, int64_t n, int64_t m,
 
 ffi::Error ElastiqpSolveImpl(
     double eps_abs, int64_t max_iter, int64_t ruiz, double target_kappa,
-    int64_t method, ffi::Buffer<ffi::F64> Q, ffi::Buffer<ffi::F64> q,
-    ffi::Buffer<ffi::F64> A, ffi::Buffer<ffi::F64> b, ffi::Buffer<ffi::F64> G,
-    ffi::Buffer<ffi::F64> h, ffi::Buffer<ffi::F64> penalty,
+    int64_t warm, int64_t method, ffi::Buffer<ffi::F64> Q,
+    ffi::Buffer<ffi::F64> q, ffi::Buffer<ffi::F64> A, ffi::Buffer<ffi::F64> b,
+    ffi::Buffer<ffi::F64> G, ffi::Buffer<ffi::F64> h,
+    ffi::Buffer<ffi::F64> penalty, ffi::Buffer<ffi::F64> x0,
+    ffi::Buffer<ffi::F64> y0, ffi::Buffer<ffi::F64> z0,
     ffi::ResultBuffer<ffi::F64> x, ffi::ResultBuffer<ffi::F64> t,
     ffi::ResultBuffer<ffi::F64> y, ffi::ResultBuffer<ffi::F64> z_t,
     ffi::ResultBuffer<ffi::F64> z, ffi::ResultBuffer<ffi::F64> xr,
@@ -147,40 +148,9 @@ ffi::Error ElastiqpSolveImpl(
   const int64_t n = q.dimensions()[0];
   const int64_t m = b.dimensions()[0];
   const int64_t p = h.dimensions()[0];
-
-  elastiqp::Solution sol, rsol;
-  ffi::Error err =
-      dispatch(method, eps_abs, max_iter, ruiz, target_kappa, n, m, p,
-               Q.typed_data(), q.typed_data(), A.typed_data(), b.typed_data(),
-               G.typed_data(), h.typed_data(), penalty.typed_data(), nullptr,
-               nullptr, nullptr, sol, rsol);
-  if (err.failure()) return err;
-
-  write_solution(sol, n, m, p, x, t, y, z_t, z);
-  write_solution(rsol, n, m, p, xr, tr, yr, z_t_r, z_r);
-  info->typed_data()[0] = static_cast<double>(sol.converged);
-  info->typed_data()[1] = static_cast<double>(sol.iters);
-  info->typed_data()[2] = static_cast<double>(rsol.converged);
-  return ffi::Error::Success();
-}
-
-ffi::Error ElastiqpSolveWarmImpl(
-    double eps_abs, int64_t max_iter, int64_t ruiz, double target_kappa,
-    int64_t method, ffi::Buffer<ffi::F64> Q, ffi::Buffer<ffi::F64> q,
-    ffi::Buffer<ffi::F64> A, ffi::Buffer<ffi::F64> b, ffi::Buffer<ffi::F64> G,
-    ffi::Buffer<ffi::F64> h, ffi::Buffer<ffi::F64> penalty,
-    ffi::Buffer<ffi::F64> x0, ffi::Buffer<ffi::F64> y0,
-    ffi::Buffer<ffi::F64> z0, ffi::ResultBuffer<ffi::F64> x,
-    ffi::ResultBuffer<ffi::F64> t, ffi::ResultBuffer<ffi::F64> y,
-    ffi::ResultBuffer<ffi::F64> z_t, ffi::ResultBuffer<ffi::F64> z,
-    ffi::ResultBuffer<ffi::F64> xr, ffi::ResultBuffer<ffi::F64> tr,
-    ffi::ResultBuffer<ffi::F64> yr, ffi::ResultBuffer<ffi::F64> z_t_r,
-    ffi::ResultBuffer<ffi::F64> z_r, ffi::ResultBuffer<ffi::F64> info) {
-  const int64_t n = q.dimensions()[0];
-  const int64_t m = b.dimensions()[0];
-  const int64_t p = h.dimensions()[0];
-  if (x0.dimensions()[0] != n || y0.dimensions()[0] != m ||
-      z0.dimensions()[0] != p) {
+  const bool w = warm != 0;
+  if (w && (x0.dimensions()[0] != n || y0.dimensions()[0] != m ||
+            z0.dimensions()[0] != p)) {
     return ffi::Error(ffi::ErrorCode::kInvalidArgument,
                       "warm start (x0, y0, z0) must have shapes (n,), (m,), "
                       "(p,) matching (q, b, h)");
@@ -191,7 +161,8 @@ ffi::Error ElastiqpSolveWarmImpl(
       dispatch(method, eps_abs, max_iter, ruiz, target_kappa, n, m, p,
                Q.typed_data(), q.typed_data(), A.typed_data(), b.typed_data(),
                G.typed_data(), h.typed_data(), penalty.typed_data(),
-               x0.typed_data(), y0.typed_data(), z0.typed_data(), sol, rsol);
+               w ? x0.typed_data() : nullptr, w ? y0.typed_data() : nullptr,
+               w ? z0.typed_data() : nullptr, sol, rsol);
   if (err.failure()) return err;
 
   write_solution(sol, n, m, p, x, t, y, z_t, z);
@@ -210,33 +181,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(ElastiqpSolve, ElastiqpSolveImpl,
                                   .Attr<int64_t>("max_iter")
                                   .Attr<int64_t>("ruiz")
                                   .Attr<double>("target_kappa")
-                                  .Attr<int64_t>("method")
-                                  .Arg<ffi::Buffer<ffi::F64>>()  // Q
-                                  .Arg<ffi::Buffer<ffi::F64>>()  // q
-                                  .Arg<ffi::Buffer<ffi::F64>>()  // A
-                                  .Arg<ffi::Buffer<ffi::F64>>()  // b
-                                  .Arg<ffi::Buffer<ffi::F64>>()  // G
-                                  .Arg<ffi::Buffer<ffi::F64>>()  // h
-                                  .Arg<ffi::Buffer<ffi::F64>>()  // penalty
-                                  .Ret<ffi::Buffer<ffi::F64>>()  // x
-                                  .Ret<ffi::Buffer<ffi::F64>>()  // t
-                                  .Ret<ffi::Buffer<ffi::F64>>()  // y
-                                  .Ret<ffi::Buffer<ffi::F64>>()  // z_t
-                                  .Ret<ffi::Buffer<ffi::F64>>()  // z
-                                  .Ret<ffi::Buffer<ffi::F64>>()  // xr
-                                  .Ret<ffi::Buffer<ffi::F64>>()  // tr
-                                  .Ret<ffi::Buffer<ffi::F64>>()  // yr
-                                  .Ret<ffi::Buffer<ffi::F64>>()  // z_t_r
-                                  .Ret<ffi::Buffer<ffi::F64>>()  // z_r
-                                  .Ret<ffi::Buffer<ffi::F64>>()  // info
-);
-
-XLA_FFI_DEFINE_HANDLER_SYMBOL(ElastiqpSolveWarm, ElastiqpSolveWarmImpl,
-                              ffi::Ffi::Bind()
-                                  .Attr<double>("eps_abs")
-                                  .Attr<int64_t>("max_iter")
-                                  .Attr<int64_t>("ruiz")
-                                  .Attr<double>("target_kappa")
+                                  .Attr<int64_t>("warm")
                                   .Attr<int64_t>("method")
                                   .Arg<ffi::Buffer<ffi::F64>>()  // Q
                                   .Arg<ffi::Buffer<ffi::F64>>()  // q

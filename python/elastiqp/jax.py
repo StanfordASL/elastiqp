@@ -66,11 +66,6 @@ _lib = ctypes.cdll.LoadLibrary(str(_find_library()))
 jax.ffi.register_ffi_target(
     "elastiqp_solve", jax.ffi.pycapsule(_lib.ElastiqpSolve), platform="cpu"
 )
-jax.ffi.register_ffi_target(
-    "elastiqp_solve_warm",
-    jax.ffi.pycapsule(_lib.ElastiqpSolveWarm),
-    platform="cpu",
-)
 
 
 class Result(NamedTuple):
@@ -91,10 +86,14 @@ def _ffi_solve(
     G,
     h,
     penalty,
+    x0,
+    y0,
+    z0,
     eps_abs,
     max_iter,
     ruiz,
     target_kappa,
+    warm,
     method,
 ):
     n = Q.shape[-1]
@@ -105,19 +104,8 @@ def _ffi_solve(
     # (x, t, y, z_t, z) tight solution, then the kappa-relaxed central
     # point (identical to the tight block when target_kappa <= 0), then
     # info = [converged, iters, relax_converged].
-    out_types = [
-        vec(n),
-        vec(p),
-        vec(m),
-        vec(p),
-        vec(p),
-        vec(n),
-        vec(p),
-        vec(m),
-        vec(p),
-        vec(p),
-        vec(3),
-    ]
+    sol = [vec(n), vec(p), vec(m), vec(p), vec(p)]
+    out_types = sol + sol + [vec(3)]
     call = jax.ffi.ffi_call("elastiqp_solve", out_types, vmap_method="sequential")
     return call(
         Q,
@@ -127,60 +115,6 @@ def _ffi_solve(
         G,
         h,
         penalty,
-        eps_abs=np.float64(eps_abs),
-        max_iter=np.int64(max_iter),
-        ruiz=np.int64(bool(ruiz)),
-        target_kappa=np.float64(target_kappa),
-        method=np.int64(_METHOD_ID[method]),
-    )
-
-
-def _ffi_solve_warm(
-    Q,
-    q,
-    A,
-    b,
-    G,
-    h,
-    penalty,
-    x0,
-    y0,
-    z0,
-    eps_abs,
-    max_iter,
-    ruiz,
-    target_kappa,
-    method,
-):
-    n = Q.shape[-1]
-    m = b.shape[-1]
-    p = h.shape[-1]
-    batch = Q.shape[:-2]
-    vec = lambda d: jax.ShapeDtypeStruct(batch + (d,), jnp.float64)
-    # As _ffi_solve: the tight solution, the kappa-relaxed point, then
-    # info = [converged, iters, relax_converged].
-    out_types = [
-        vec(n),
-        vec(p),
-        vec(m),
-        vec(p),
-        vec(p),
-        vec(n),
-        vec(p),
-        vec(m),
-        vec(p),
-        vec(p),
-        vec(3),
-    ]
-    call = jax.ffi.ffi_call("elastiqp_solve_warm", out_types, vmap_method="sequential")
-    return call(
-        Q,
-        q,
-        A,
-        b,
-        G,
-        h,
-        penalty,
         x0,
         y0,
         z0,
@@ -188,101 +122,9 @@ def _ffi_solve_warm(
         max_iter=np.int64(max_iter),
         ruiz=np.int64(bool(ruiz)),
         target_kappa=np.float64(target_kappa),
+        warm=np.int64(bool(warm)),
         method=np.int64(_METHOD_ID[method]),
     )
-
-
-@partial(jax.custom_vjp, nondiff_argnums=(10, 11, 12, 13, 14))
-def _solve_warm(
-    Q,
-    q,
-    A,
-    b,
-    G,
-    h,
-    penalty,
-    x0,
-    y0,
-    z0,
-    eps_abs,
-    max_iter,
-    ruiz,
-    target_kappa,
-    method,
-):
-    # Tight solution when not differentiating
-    out = _ffi_solve_warm(
-        Q,
-        q,
-        A,
-        b,
-        G,
-        h,
-        penalty,
-        x0,
-        y0,
-        z0,
-        eps_abs,
-        max_iter,
-        ruiz,
-        0.0,
-        method,
-    )
-    return tuple(out[:5]) + (out[10],)  # solution + info
-
-
-def _solve_warm_fwd(
-    Q,
-    q,
-    A,
-    b,
-    G,
-    h,
-    penalty,
-    x0,
-    y0,
-    z0,
-    eps_abs,
-    max_iter,
-    ruiz,
-    target_kappa,
-    method,
-):
-    if not target_kappa > 0:
-        raise TypeError(
-            "elastiqp.jax.solve is not differentiable with target_kappa=0: "
-            "Set target_kappa > 0  (e.g. 1e-3) for smoothed gradients"
-        )
-    out = _ffi_solve_warm(
-        Q,
-        q,
-        A,
-        b,
-        G,
-        h,
-        penalty,
-        x0,
-        y0,
-        z0,
-        eps_abs,
-        max_iter,
-        ruiz,
-        target_kappa,
-        method,
-    )
-    x, t, y, z_t, z, xr, tr, yr, z_t_r, z_r, info = out
-    res = (Q, A, G, h, xr, tr, yr, z_t_r, z_r), (x0, y0, z0)
-    return (x, t, y, z_t, z, info), res
-
-
-def _solve_warm_bwd(eps_abs, max_iter, ruiz, target_kappa, method, res, ct):
-    # The solution of the (strictly convex) QP does not depend on where the
-    # solver starts, so the warm start gets a zero cotangent
-    kkt_res, warm = res
-    return _kkt_bwd(kkt_res, ct) + tuple(jnp.zeros_like(w) for w in warm)
-
-
-_solve_warm.defvjp(_solve_warm_fwd, _solve_warm_bwd)
 
 
 def _outer(a, b):
@@ -337,7 +179,9 @@ def _kkt_bwd(res, ct):
     return Qb, qb, Ab, bb, Gb, hb, penalty_b
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11))
+# target_kappa is only used by _solve_fwd; custom_vjp needs the primal and
+# fwd signatures to match. (x0, y0, z0) are ignored unless warm.
+@partial(jax.custom_vjp, nondiff_argnums=(10, 11, 12, 13, 14, 15))
 def _solve(
     Q,
     q,
@@ -346,10 +190,14 @@ def _solve(
     G,
     h,
     penalty,
+    x0,
+    y0,
+    z0,
     eps_abs,
     max_iter,
     ruiz,
     target_kappa,
+    warm,
     method,
 ):
     # Tight solution when not differentiating
@@ -361,10 +209,14 @@ def _solve(
         G,
         h,
         penalty,
+        x0,
+        y0,
+        z0,
         eps_abs,
         max_iter,
         ruiz,
         0.0,
+        warm,
         method,
     )
     return tuple(out[:5]) + (out[10],)  # solution + info
@@ -378,10 +230,14 @@ def _solve_fwd(
     G,
     h,
     penalty,
+    x0,
+    y0,
+    z0,
     eps_abs,
     max_iter,
     ruiz,
     target_kappa,
+    warm,
     method,
 ):
     if not target_kappa > 0:
@@ -397,18 +253,27 @@ def _solve_fwd(
         G,
         h,
         penalty,
+        x0,
+        y0,
+        z0,
         eps_abs,
         max_iter,
         ruiz,
         target_kappa,
+        warm,
         method,
     )
     x, t, y, z_t, z, xr, tr, yr, z_t_r, z_r, info = out
     return (x, t, y, z_t, z, info), (Q, A, G, h, xr, tr, yr, z_t_r, z_r)
 
 
-def _solve_bwd(eps_abs, max_iter, ruiz, target_kappa, method, res, ct):
-    return _kkt_bwd(res, ct)
+def _solve_bwd(eps_abs, max_iter, ruiz, target_kappa, warm, method, res, ct):
+    # Zero cotangent for the warm start: a converged solve of a QP with a
+    # unique solution does not depend on where the solver starts. The
+    # (x, y, z) cotangents share the (x0, y0, z0) shapes.
+    xb, _, yb, _, zb, _ = ct
+    zeros = (jnp.zeros_like(xb), jnp.zeros_like(yb), jnp.zeros_like(zb))
+    return _kkt_bwd(res, ct) + zeros
 
 
 _solve.defvjp(_solve_fwd, _solve_bwd)
@@ -459,7 +324,8 @@ def solve(
         warm_start (tuple | Result, optional): Explicit warm start, either a
             previous Result or a (x, y, z) tuple, (das and pdal only).
             Differentiable: the gradients are the cold solve's, and the warm
-            start itself gets a zero gradient. Defaults to None.
+            start itself gets a zero gradient (exact when the QP has a unique
+            solution and the solve converges). Defaults to None.
 
     Returns:
         Result: Solution to the elastic QP
@@ -510,38 +376,29 @@ def solve(
                 f"{q.shape}, {b.shape}, {h.shape}; got "
                 f"{x0.shape}, {y0.shape}, {z0.shape}"
             )
-        x, t, y, z_t, z, info = _solve_warm(
-            Q,
-            q,
-            A,
-            b,
-            G,
-            h,
-            penalty,
-            x0,
-            y0,
-            z0,
-            float(eps_abs),
-            int(max_iter),
-            bool(ruiz),
-            float(target_kappa),
-            method,
-        )
     else:
-        x, t, y, z_t, z, info = _solve(
-            Q,
-            q,
-            A,
-            b,
-            G,
-            h,
-            penalty,
-            float(eps_abs),
-            int(max_iter),
-            bool(ruiz),
-            float(target_kappa),
-            method,
-        )
+        # Ignored by the solver (warm=False)
+        x0 = jnp.zeros(q.shape, jnp.float64)
+        y0 = jnp.zeros(b.shape, jnp.float64)
+        z0 = jnp.zeros(h.shape, jnp.float64)
+    x, t, y, z_t, z, info = _solve(
+        Q,
+        q,
+        A,
+        b,
+        G,
+        h,
+        penalty,
+        x0,
+        y0,
+        z0,
+        float(eps_abs),
+        int(max_iter),
+        bool(ruiz),
+        float(target_kappa),
+        warm_start is not None,
+        method,
+    )
     # Recall: info = [converged, iters, relax_converged]. The converged
     # flag here considers both forward and backward (relax)
     converged = jnp.minimum(info[..., 0], info[..., 2])

@@ -14,6 +14,29 @@ import numpy as np
 RESULTS = []
 
 
+def ffi_solve_cold(
+    Q, q, A, b, G, h, penalty, eps_abs, max_iter, ruiz, target_kappa, method
+):
+    # Raw FFI call without a warm start (x0, y0, z0 are ignored placeholders)
+    zeros = (jnp.zeros_like(q), jnp.zeros_like(b), jnp.zeros_like(h))
+    return elastiqp.jax._ffi_solve(
+        Q,
+        q,
+        A,
+        b,
+        G,
+        h,
+        penalty,
+        *zeros,
+        eps_abs,
+        max_iter,
+        ruiz,
+        target_kappa,
+        False,
+        method,
+    )
+
+
 def check(name, ok, detail=""):
     RESULTS.append(ok)
     print(f"  {name:<52s} {detail:<24s} {'OK' if ok else 'FAIL'}")
@@ -198,7 +221,7 @@ def main():
         return w_loss @ s.x + w_t @ s.t
 
     def loss_relaxed(Q_, q_, A_, b_, G_, h_, penalty_, kap=kappa, method="das"):
-        out = elastiqp.jax._ffi_solve(
+        out = ffi_solve_cold(
             Q_,
             q_,
             A_,
@@ -317,7 +340,7 @@ def main():
     # relaxation would otherwise mean silently wrong gradients). s_t = t and
     # s_in = h + t - Gx are the slacks of t >= 0 and Gx - t <= h; s_in is
     # reconstructed from x, so it carries the O(tol) primal residual.
-    out = elastiqp.jax._ffi_solve(*args, 1e-11, 300, False, kappa, "das")
+    out = ffi_solve_cold(*args, 1e-11, 300, False, kappa, "das")
     xr, tr, z_t_r, z_r, info = out[5], out[6], out[8], out[9], out[10]
     s_in_r = args[5] + tr - args[4] @ xr
     comp = max(
@@ -334,7 +357,7 @@ def main():
     # silently: an absurd kappa converges the solve (info[0]) but stalls the
     # relaxation (info[2]), and solve() folds that into converged on the
     # differentiated path.
-    out = elastiqp.jax._ffi_solve(*args, 1e-11, 300, False, 1e8, "das")
+    out = ffi_solve_cold(*args, 1e-11, 300, False, 1e8, "das")
     tight_ok, relax_bad = float(out[10][0]) == 1.0, float(out[10][2]) == 0.0
 
     def conv_smooth(q_):
@@ -468,9 +491,7 @@ def main():
     try:
         jax.grad(
             lambda q_: jnp.sum(
-                elastiqp.jax.solve(
-                    Qx, q_, Gx, hx, 10.0, A=Ax, b=bx, target_kappa=0.0
-                ).x
+                elastiqp.jax.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx, target_kappa=0.0).x
             )
         )(qx)
         msg = None
@@ -517,7 +538,7 @@ def main():
         for m in elastiqp.jax.METHODS
     }
     relaxed = {
-        m: elastiqp.jax._ffi_solve(*args, 1e-11, 300, False, kappa, m)
+        m: ffi_solve_cold(*args, 1e-11, 300, False, kappa, m)
         for m in elastiqp.jax.METHODS
     }
     for m in ("pdal", "ipm"):
@@ -566,9 +587,9 @@ def main():
         int(a_sol.converged) == 1 and da < FFI_NB_TOL,
         f"|dx|={da:.1e}",
     )
-    a_jit = jax.jit(
-        lambda q_: elastiqp.jax.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx).x
-    )(qx)
+    a_jit = jax.jit(lambda q_: elastiqp.jax.solve(Qx, q_, Gx, hx, 10.0, A=Ax, b=bx).x)(
+        qx
+    )
     check("das under jit", float(jnp.abs(a_jit - a_sol.x).max()) == 0.0, "")
     # Hard rows (penalty = inf, das only): finite gradients, none w.r.t. the
     # hard row's penalty, close to a stiff elastic penalty in its place.
@@ -671,8 +692,15 @@ def main():
     check("warm sequence has working-set changes", ws_changed > 0, f"{ws_changed}")
     try:
         elastiqp.jax.solve(
-            Qw, drift[0][0], Gw, drift[0][1], 10.0, A=Aw, b=drift[0][2],
-            method="ipm", warm_start=prev,
+            Qw,
+            drift[0][0],
+            Gw,
+            drift[0][1],
+            10.0,
+            A=Aw,
+            b=drift[0][2],
+            method="ipm",
+            warm_start=prev,
         )
         ipm_raised = False
     except ValueError:
@@ -776,14 +804,25 @@ def main():
             float(jnp.abs(a - b).max()) for a, b in zip(g_cold, g_warm, strict=True)
         )
         g0 = max(float(jnp.abs(g).max()) for g in g_start)
-        check(f"grad with warm_start ({method}) == cold", dg < 1e-8 and g0 == 0.0,
-              f"|dgrad|={dg:.1e} |grad warm start|={g0:.1e}")
+        check(
+            f"grad with warm_start ({method}) == cold",
+            dg < 1e-8 and g0 == 0.0,
+            f"|dgrad|={dg:.1e} |grad warm start|={g0:.1e}",
+        )
 
-    # Gradients through a warm-started lax.scan carry match the cold scan's
+    # Warm-started lax.scan works under jit + grad and matches the cold scan.
+    # The carry's cotangent is zero by construction, so this is a smoke test
+    # of the warm path, not an independent check of the gradient through it
     def scan_loss(q_, warm_carry):
         def body(carry, h_):
             s = elastiqp.jax.solve(
-                Qw, q_, Gw, h_, 10.0, A=Aw, b=b_k,
+                Qw,
+                q_,
+                Gw,
+                h_,
+                10.0,
+                A=Aw,
+                b=b_k,
                 warm_start=carry if warm_carry else None,
             )
             return (s.x, s.y, s.z), jnp.sum(s.x**2)
@@ -849,8 +888,15 @@ def main():
 
     def x0_of_h0(h0, method):
         return elastiqp.jax.solve(
-            Qb, qb, Gb, hb.at[0].set(h0), 10.0, A=Ab, b=bb,
-            method=method, target_kappa=1e-9,
+            Qb,
+            qb,
+            Gb,
+            hb.at[0].set(h0),
+            10.0,
+            A=Ab,
+            b=bb,
+            method=method,
+            target_kappa=1e-9,
         ).x[0]
 
     for method in ["das", "pdal", "ipm"]:
