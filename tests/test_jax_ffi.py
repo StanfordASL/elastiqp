@@ -755,22 +755,46 @@ def main():
         f"|dx|={dxv:.1e} max iters={int(v_warm.iters.max())}",
     )
 
-    try:
-        jax.grad(
-            lambda q_: jnp.sum(
-                elastiqp.jax.solve(
-                    Qw, q_, Gw, h_k, 10.0, A=Aw, b=b_k, warm_start=p_sol
-                ).x
+    # A warm-started solve has the cold solve's gradients (the solution does
+    # not depend on the start), and a zero gradient for the warm start itself
+    def loss_w(Q_, q_, G_, h_, pen_, warm, method):
+        s = elastiqp.jax.solve(
+            Q_, q_, G_, h_, pen_, A=Aw, b=b_k, method=method, warm_start=warm
+        )
+        return jnp.sum(s.x**2) + jnp.sum(jnp.sin(s.x))
+
+    pen_k = jnp.full(h_k.shape, 10.0)
+    warm = (p_sol.x, p_sol.y, p_sol.z)
+    for method in ("das", "pdal"):
+        g_cold = jax.grad(loss_w, argnums=(0, 1, 2, 3, 4))(
+            Qw, q_k, Gw, h_k, pen_k, None, method
+        )
+        *g_warm, g_start = jax.grad(loss_w, argnums=(0, 1, 2, 3, 4, 5))(
+            Qw, q_k, Gw, h_k, pen_k, warm, method
+        )
+        dg = max(
+            float(jnp.abs(a - b).max()) for a, b in zip(g_cold, g_warm, strict=True)
+        )
+        g0 = max(float(jnp.abs(g).max()) for g in g_start)
+        check(f"grad with warm_start ({method}) == cold", dg < 1e-8 and g0 == 0.0,
+              f"|dgrad|={dg:.1e} |grad warm start|={g0:.1e}")
+
+    # Gradients through a warm-started lax.scan carry match the cold scan's
+    def scan_loss(q_, warm_carry):
+        def body(carry, h_):
+            s = elastiqp.jax.solve(
+                Qw, q_, Gw, h_, 10.0, A=Aw, b=b_k,
+                warm_start=carry if warm_carry else None,
             )
-        )(q_k)
-        msg = None
-    except TypeError as e:
-        msg = str(e)
-    check(
-        "grad with warm_start raises",
-        msg is not None and "warm_start" in msg and "not differentiable" in msg,
-        "",
-    )
+            return (s.x, s.y, s.z), jnp.sum(s.x**2)
+
+        _, losses = jax.lax.scan(body, warm, hs)
+        return jnp.sum(losses)
+
+    g_cold = jax.jit(jax.grad(scan_loss), static_argnums=1)(q_k, False)
+    g_warm = jax.jit(jax.grad(scan_loss), static_argnums=1)(q_k, True)
+    dgs = float(jnp.abs(g_cold - g_warm).max())
+    check("grad through a warm-started lax.scan", dgs < 1e-8, f"|dgrad|={dgs:.1e}")
     try:
         elastiqp.jax.solve(
             Qw,
