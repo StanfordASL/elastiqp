@@ -21,8 +21,12 @@ struct Settings {
   double eps_rel = 0.0;
   // Working-set LDL^T pivot below this = dependent row.
   double sing_tol = 3.7e-11;
-  // Min/max Cholesky pivot ratio accepted for Q_s before adding a prox shift.
+  // Min/max eigenvalue ratio accepted for Q_s before adding a prox shift,
+  // judged from the Cholesky pivots (see cond_iters).
   double zero_tol = 1e-11;
+  // Inverse-iteration steps confirming the smallest eigenvalue of Q_s against
+  // zero_tol when the pivot ratio is below sqrt(zero_tol); 0 = pivots only.
+  int cond_iters = 3;
   // Initial prox shift (x max|diag Q_s|) when Q_s is not PD; 0 disables.
   double eps_prox = 1e-6;
   // Outer-loop tolerance on eps*|x - xc|_inf; 0 -> eps_abs.
@@ -109,6 +113,7 @@ class Solver {
     fx_.resize(n_);
     fr_.resize(mp_);
     xu_.resize(n_);
+    eig_work_.resize(n_);
     changed_.reserve(static_cast<size_t>(mp_));
     changed_cols_.resize(n_, mp_);
     warm_x_.setZero(n_);
@@ -305,16 +310,23 @@ class Solver {
       int inner = 0;
       st = ldp(inner);
       sol_.iters += inner;
-      if (st == Status::kNumerics && eps_ > 0 &&
+      if (st == Status::kNumerics && settings.eps_prox > 0 &&
           escalations < settings.prox_escalations) {
         // Inner loop broke down: recenter at the current x, grow the prox shift
-        // 100x, restart.
+        // 100x (or turn it on), restart.
         escalations++;
         prox_escalated_ = true;
         for (int i = 0; i < static_cast<int>(W_.size()); ++i)
           lam_full_[W_[static_cast<size_t>(i)]] = lam_[i];
-        xc_ = llt_.matrixU().solve(u_ - v_);
-        if (!factor(100.0 * eps_)) return finish(Status::kNumerics);
+        double eps_next = 100.0 * eps_;
+        if (eps_ > 0) {
+          xc_ = llt_.matrixU().solve(u_ - v_);
+        } else {
+          xc_ = x_;
+          eps_next = settings.eps_prox *
+                     std::max(1.0, Qs_.diagonal().cwiseAbs().maxCoeff());
+        }
+        if (!factor(eps_next)) return finish(Status::kNumerics);
         for (int i = 0; i < mp_; ++i)
           tol_[i] = (settings.eps_abs + settings.eps_rel * std::abs(rhs_[i])) *
                     scale_[i] * dr_[i];
@@ -653,6 +665,9 @@ class Solver {
           pmax = std::max(pmax, piv * piv);
         }
         ok = pmin > settings.zero_tol * pmax && pmin > 0;
+        if (ok && settings.cond_iters > 0 &&
+            pmin < std::sqrt(settings.zero_tol) * pmax)
+          ok = min_eig_estimate() > settings.zero_tol * (scale + eps_);
       }
       if (ok) break;
       if (settings.eps_prox <= 0) return false;
@@ -666,6 +681,18 @@ class Solver {
     refactored_ = true;
     rhs_dirty_ = true;
     return true;
+  }
+  // Upper estimate of the smallest eigenvalue of the factored matrix
+  double min_eig_estimate() {
+    for (int i = 0; i < n_; ++i)
+      eig_work_[i] = 1.0 + static_cast<double>(i) / n_;
+    double est = std::numeric_limits<double>::infinity();
+    for (int it = 0; it < settings.cond_iters; ++it) {
+      eig_work_ /= eig_work_.norm();
+      llt_.solveInPlace(eig_work_);
+      est = 1.0 / eig_work_.norm();
+    }
+    return est;
   }
   void normalize_row(int i) {
     const double nrm = Mt_.col(i).norm();
@@ -1322,9 +1349,10 @@ class Solver {
   double eps_ = 0.0;
   MatrixXd Mt_;
   VectorXd scale_, hi_, d_, v_, u_, uS_, mu_, x_, xc_, lam_full_;
-  // Scratch: Ruiz factors, a user-frame / unscaled n-vector, the columns
-  // update_rows re-solves, and the rows refactor_working_set re-adds.
-  VectorXd fx_, fr_, xu_;
+  // Scratch: Ruiz factors, a user-frame / unscaled n-vector, the inverse
+  // iteration vector, the columns update_rows re-solves, and the rows
+  // refactor_working_set re-adds.
+  VectorXd fx_, fr_, xu_, eig_work_;
   MatrixXd changed_cols_;
   std::vector<int> changed_, rows_;
   std::vector<RowState> state_;

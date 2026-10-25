@@ -74,7 +74,8 @@ typedef struct {
  * elastiqp_option_info() gives their ranges. Out-of-range values are rejected.
  *
  * Tolerances and iteration limits apply on the next solve. Scaling and
- * factorization options (ruiz*, zero_tol, eps_prox, reuse_factorization)
+ * factorization options (ruiz*, zero_tol, cond_iters, eps_prox,
+ * reuse_factorization)
  * apply on refactorization; updating Q forces it. Disabling ruiz retains
  * existing scaling. Explicit warm starts apply even with warm_start = 0.
  */
@@ -105,6 +106,8 @@ typedef struct {
 
   double relax_reg;
   int relax_factor_retries;
+
+  int cond_iters; /* appended to keep the struct layout of earlier fields */
 } ElastiQPSettings;
 
 /*

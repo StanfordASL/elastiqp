@@ -14,9 +14,10 @@
 // 3. Robustness: a badly scaled parametrization with and without Ruiz;
 //    dependent / inconsistent equalities (certificate before iterating);
 //    every inequality row duplicated (dependent working sets, the cycle
-//    guard's regime, refactors()); the drift-gated Ruiz refresh through a
-//    row exploding past the limit_scaling clamp and a row decaying to the
-//    noise floor.
+//    guard's regime, refactors()); a near-singular Q the Cholesky pivots
+//    hide (the eigenvalue check, and the prox fallback without it); the
+//    drift-gated Ruiz refresh through a row exploding past the
+//    limit_scaling clamp and a row decaying to the noise floor.
 // 4. Factorization reuse: constant Q, a fifth of G changing per tick,
 //    same answers as a full refactorization and only those rows re-solved.
 // 5. The pinch/release ticks of test_gap_creep: saturated -> active ->
@@ -294,6 +295,58 @@ void ProxLoop(std::mt19937& rng) {
         "status");
 }
 
+// Near-singular Q whose null direction is small on the trailing coordinates
+// (as in diff IK, J'J + 1e-12 I with 6 task rows on 7 DOF): the Cholesky
+// pivots overstate its smallest eigenvalue, so only the inverse-iteration
+// check turns the prox shift on up front. Without it (cond_iters = 0), the
+// inner loop can break down and must recover through the prox fallback.
+void NearSingularQ(std::mt19937& rng) {
+  const int n = 7, p = 14, cases = 20;
+  int solved = 0, prox = 0, escalated = 0;
+  int solved_off = 0, escalated_off = 0;
+  double worst = 0.0;
+  for (int k = 0; k < cases; ++k) {
+    VectorXd v = problem_gen::Randn(rng, n, 1);
+    v.tail(2) *= 0.05;
+    v.normalize();
+    const MatrixXd J = problem_gen::Randn(rng, n - 1, n) *
+                       (MatrixXd::Identity(n, n) - v * v.transpose());
+    const MatrixXd Q = J.transpose() * J + 1e-12 * MatrixXd::Identity(n, n);
+    const VectorXd q = -J.transpose() * problem_gen::Randn(rng, n - 1, 1);
+    MatrixXd G(p, n);
+    G << MatrixXd::Identity(n, n), -MatrixXd::Identity(n, n);
+    const VectorXd h = VectorXd::Constant(p, 0.5) +
+                       0.1 * problem_gen::Randn(rng, p, 1);
+    const VectorXd w = VectorXd::Constant(p, 1e3);
+    das::Solver s;
+    s.setup(Q, q, G, h, w);
+    const elastiqp::Solution sol = s.solve();
+    solved += sol.converged;
+    prox += s.proximal();
+    escalated += s.prox_escalated();
+    QPData qp;
+    qp.Q = Q;
+    qp.q = q;
+    qp.A = MatrixXd(0, n);
+    qp.b = VectorXd(0);
+    qp.G = G;
+    qp.h = h;
+    worst = std::max(worst, Kkt(qp, w, sol));
+    das::Solver off;
+    off.settings.cond_iters = 0;
+    off.setup(Q, q, G, h, w);
+    solved_off += off.solve().converged;
+    escalated_off += off.prox_escalated();
+  }
+  Check("near-singular Q: solved, prox on up front",
+        solved == cases && prox == cases && escalated == 0,
+        static_cast<double>(solved), "solved");
+  Check("near-singular Q: elastic KKT residual", worst <= 1e-6, worst, "kkt");
+  Check("near-singular Q, cond_iters = 0: solved via the prox fallback",
+        solved_off == cases && escalated_off > 0,
+        static_cast<double>(escalated_off), "escalated");
+}
+
 // Drift-gated Ruiz refresh through the update path: a row exploding past
 // the 1e4 clamp in one tick (rescaled() fires, drift back to O(1)) and a
 // row decaying to the noise floor (left alone, solved as if absent).
@@ -470,6 +523,7 @@ void RandomSuite() {
   EqualityCases(rng);
   DegenerateCase(rng);
   ProxLoop(rng);
+  NearSingularQ(rng);
   RuizRefresh(rng);
   ReuseBench();
 }

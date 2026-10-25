@@ -286,7 +286,7 @@ static void options(void) {
   int i, j, type = -1, ok = 1, unique = 1, n_opt = elastiqp_num_options();
 
   elastiqp_setup(&work, &qp, NULL);
-  check("options: 22 listed", n_opt == 22);
+  check("options: 23 listed", n_opt == 23);
   for (i = 0; i < n_opt; ++i) {
     ok &= elastiqp_option_info(i, &name, &type, &def, &lo, &hi, &desc) == 0;
     ok &= name != NULL && desc != NULL && desc[0] != '\0';

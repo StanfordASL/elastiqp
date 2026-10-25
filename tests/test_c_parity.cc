@@ -215,6 +215,7 @@ void SettingsTable() {
   FIELD(refactor_tol);
   FIELD(relax_reg);
   FIELD(relax_factor_retries);
+  FIELD(cond_iters);
 #undef FIELD
   elastiqp_free(work);
   Check("option table covers every settings field",

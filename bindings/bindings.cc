@@ -285,6 +285,7 @@ NB_MODULE(_core, m) {
         .def_rw("eps_rel", &S::eps_rel)
         .def_rw("sing_tol", &S::sing_tol)
         .def_rw("zero_tol", &S::zero_tol)
+        .def_rw("cond_iters", &S::cond_iters)
         .def_rw("eps_prox", &S::eps_prox)
         .def_rw("eta_prox", &S::eta_prox)
         .def_rw("prox_relaxation", &S::prox_relaxation)

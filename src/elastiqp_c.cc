@@ -120,8 +120,8 @@ constexpr Option kOptions[] = {
     ELASTIQP_D(sing_tol, 0.0,
                "Working-set LDL' pivot below this = dependent row."),
     ELASTIQP_D(zero_tol, 0.0,
-               "Min/max Cholesky pivot ratio of Q_s accepted before adding "
-               "a prox shift."),
+               "Min/max eigenvalue ratio of Q_s (from its Cholesky pivots, "
+               "see cond_iters) accepted before adding a prox shift."),
     ELASTIQP_D(eps_prox, 0.0,
                "Initial prox shift (x max|diag Q_s|) when Q_s is not PD; 0 "
                "disables."),
@@ -159,6 +159,10 @@ constexpr Option kOptions[] = {
     ELASTIQP_I(relax_factor_retries,
                "relax(): x100 regularization retries on a failed "
                "factorization."),
+    ELASTIQP_I(cond_iters,
+               "Inverse-iteration steps confirming the smallest eigenvalue "
+               "of Q_s against zero_tol when the pivots look small; 0: "
+               "pivots only."),
 };
 
 #undef ELASTIQP_D
