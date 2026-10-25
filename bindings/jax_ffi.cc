@@ -11,10 +11,19 @@
 // at; it copies the tight solution when target_kappa <= 0. info = [converged,
 // iters, relax_converged]. A has 0 rows and b 0 entries when there are no
 // equalities.
+//
+// Batched: every buffer may carry the same leading batch dimensions (vmap
+// with vmap_method="broadcast_all"); the problems are solved independently.
+// Serial by default (the common case is a single control problem, where one
+// thread is best); ELASTIQP_NUM_THREADS=k splits a batch across k threads,
+// 0 = hardware concurrency.
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
+#include <thread>
 #include <type_traits>
+#include <vector>
 
 #include "elastiqp/elastiqp.hpp"
 #include "xla/ffi/api/c_api.h"
@@ -120,16 +129,52 @@ ffi::Error dispatch(int64_t method, double eps_abs, int64_t max_iter,
 }
 
 void write_solution(const elastiqp::Solution& sol, int64_t n, int64_t m,
-                    int64_t p, ffi::ResultBuffer<ffi::F64>& x,
-                    ffi::ResultBuffer<ffi::F64>& t,
-                    ffi::ResultBuffer<ffi::F64>& y,
-                    ffi::ResultBuffer<ffi::F64>& z_t,
-                    ffi::ResultBuffer<ffi::F64>& z) {
-  Eigen::Map<VectorXd>(x->typed_data(), n) = sol.x;
-  Eigen::Map<VectorXd>(t->typed_data(), p) = sol.t;
-  Eigen::Map<VectorXd>(y->typed_data(), m) = sol.y;
-  Eigen::Map<VectorXd>(z_t->typed_data(), p) = sol.z_t;
-  Eigen::Map<VectorXd>(z->typed_data(), p) = sol.z;
+                    int64_t p, double* x, double* t, double* y, double* z_t,
+                    double* z) {
+  Eigen::Map<VectorXd>(x, n) = sol.x;
+  Eigen::Map<VectorXd>(t, p) = sol.t;
+  Eigen::Map<VectorXd>(y, m) = sol.y;
+  Eigen::Map<VectorXd>(z_t, p) = sol.z_t;
+  Eigen::Map<VectorXd>(z, p) = sol.z;
+}
+
+int max_threads() {
+  const char* env = std::getenv("ELASTIQP_NUM_THREADS");
+  if (env == nullptr || *env == '\0') return 1;
+  const int k = std::atoi(env);
+  if (k == 0) return std::max(1u, std::thread::hardware_concurrency());
+  return std::max(k, 1);
+}
+
+// Runs body(i) for i in [0, count), in contiguous chunks across threads. Fewer
+// than kMinPerThread problems per thread is not worth a thread.
+template <typename Body>
+void parallel_for(int64_t count, const Body& body) {
+  constexpr int64_t kMinPerThread = 4;
+  const int64_t workers =
+      std::min<int64_t>(max_threads(), count / kMinPerThread);
+  if (workers <= 1) {
+    for (int64_t i = 0; i < count; ++i) body(i);
+    return;
+  }
+  const auto chunk = [&](int64_t w) {
+    for (int64_t i = count * w / workers; i < count * (w + 1) / workers; ++i)
+      body(i);
+  };
+  std::vector<std::thread> threads;
+  threads.reserve(static_cast<size_t>(workers - 1));
+  for (int64_t w = 1; w < workers; ++w) threads.emplace_back(chunk, w);
+  chunk(0);
+  for (std::thread& th : threads) th.join();
+}
+
+// Product of the leading (batch) dimensions of a buffer whose trailing
+// `trailing` dimensions are per-problem.
+int64_t batch_size(ffi::Buffer<ffi::F64>& buf, size_t trailing) {
+  const auto dims = buf.dimensions();
+  int64_t count = 1;
+  for (size_t i = 0; i + trailing < dims.size(); ++i) count *= dims[i];
+  return count;
 }
 
 ffi::Error ElastiqpSolveImpl(
@@ -145,31 +190,63 @@ ffi::Error ElastiqpSolveImpl(
     ffi::ResultBuffer<ffi::F64> tr, ffi::ResultBuffer<ffi::F64> yr,
     ffi::ResultBuffer<ffi::F64> z_t_r, ffi::ResultBuffer<ffi::F64> z_r,
     ffi::ResultBuffer<ffi::F64> info) {
-  const int64_t n = q.dimensions()[0];
-  const int64_t m = b.dimensions()[0];
-  const int64_t p = h.dimensions()[0];
+  const auto last = [](ffi::Buffer<ffi::F64>& buf) {
+    return buf.dimensions().back();
+  };
+  const int64_t n = last(q);
+  const int64_t m = last(b);
+  const int64_t p = last(h);
+  const int64_t batch = batch_size(q, 1);
+  for (ffi::Buffer<ffi::F64>* buf : {&q, &b, &h, &penalty, &x0, &y0, &z0}) {
+    if (batch_size(*buf, 1) != batch) {
+      return ffi::Error(ffi::ErrorCode::kInvalidArgument,
+                        "all arguments must share the same batch dimensions");
+    }
+  }
+  for (ffi::Buffer<ffi::F64>* buf : {&Q, &A, &G}) {
+    if (batch_size(*buf, 2) != batch) {
+      return ffi::Error(ffi::ErrorCode::kInvalidArgument,
+                        "all arguments must share the same batch dimensions");
+    }
+  }
   const bool w = warm != 0;
-  if (w && (x0.dimensions()[0] != n || y0.dimensions()[0] != m ||
-            z0.dimensions()[0] != p)) {
+  if (w && (last(x0) != n || last(y0) != m || last(z0) != p)) {
     return ffi::Error(ffi::ErrorCode::kInvalidArgument,
                       "warm start (x0, y0, z0) must have shapes (n,), (m,), "
                       "(p,) matching (q, b, h)");
   }
+  if (method < 0 || method > 2) {
+    return ffi::Error(ffi::ErrorCode::kInvalidArgument,
+                      "method must be 0 (das), 1 (pdal) or 2 (ipm)");
+  }
+  if (method == 2 && w) {
+    return ffi::Error(ffi::ErrorCode::kInvalidArgument,
+                      "method='ipm' has no warm start; use method='das' "
+                      "or 'pdal'");
+  }
 
-  elastiqp::Solution sol, rsol;
-  ffi::Error err =
-      dispatch(method, eps_abs, max_iter, ruiz, target_kappa, n, m, p,
-               Q.typed_data(), q.typed_data(), A.typed_data(), b.typed_data(),
-               G.typed_data(), h.typed_data(), penalty.typed_data(),
-               w ? x0.typed_data() : nullptr, w ? y0.typed_data() : nullptr,
-               w ? z0.typed_data() : nullptr, sol, rsol);
-  if (err.failure()) return err;
-
-  write_solution(sol, n, m, p, x, t, y, z_t, z);
-  write_solution(rsol, n, m, p, xr, tr, yr, z_t_r, z_r);
-  info->typed_data()[0] = static_cast<double>(sol.converged);
-  info->typed_data()[1] = static_cast<double>(sol.iters);
-  info->typed_data()[2] = static_cast<double>(rsol.converged);
+  parallel_for(batch, [&](int64_t i) {
+    elastiqp::Solution sol, rsol;
+    // Validated above, so dispatch cannot fail.
+    (void)dispatch(method, eps_abs, max_iter, ruiz, target_kappa, n, m, p,
+             Q.typed_data() + i * n * n, q.typed_data() + i * n,
+             A.typed_data() + i * m * n, b.typed_data() + i * m,
+             G.typed_data() + i * p * n, h.typed_data() + i * p,
+             penalty.typed_data() + i * p,
+             w ? x0.typed_data() + i * n : nullptr,
+             w ? y0.typed_data() + i * m : nullptr,
+             w ? z0.typed_data() + i * p : nullptr, sol, rsol);
+    write_solution(sol, n, m, p, x->typed_data() + i * n,
+                   t->typed_data() + i * p, y->typed_data() + i * m,
+                   z_t->typed_data() + i * p, z->typed_data() + i * p);
+    write_solution(rsol, n, m, p, xr->typed_data() + i * n,
+                   tr->typed_data() + i * p, yr->typed_data() + i * m,
+                   z_t_r->typed_data() + i * p, z_r->typed_data() + i * p);
+    double* inf = info->typed_data() + i * 3;
+    inf[0] = static_cast<double>(sol.converged);
+    inf[1] = static_cast<double>(sol.iters);
+    inf[2] = static_cast<double>(rsol.converged);
+  });
   return ffi::Error::Success();
 }
 

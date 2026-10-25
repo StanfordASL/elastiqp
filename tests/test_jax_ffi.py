@@ -1,5 +1,6 @@
 """ElastiQP JAX FFI test cases"""
 
+import os
 import sys
 
 import jax
@@ -146,7 +147,7 @@ def main():
         f"{int(loose(jnp.asarray(q)))} <= {int(sol.iters)}",
     )
 
-    print("Under vmap (sequential)")
+    print("Under vmap (batched)")
     rng = np.random.default_rng(5)
     batch_q = jnp.asarray(q + 0.05 * rng.standard_normal((8, len(q))))
     vsolve = jax.vmap(lambda q_k: elastiqp.jax.solve(Q, q_k, G2, h2, 10.0, A=A, b=b).x)
@@ -162,6 +163,34 @@ def main():
         "batch of 8 matches per-problem solves",
         xs.shape == (8, 14) and dx < FFI_NB_TOL,
         f"|dx|={dx:.1e}",
+    )
+
+    # Nested vmap with every argument batched: a (4, 16) batch, split across
+    # threads. Same code per problem, so bitwise equal.
+    probs = [random_qp(100 + k, 6, 2, 9) for k in range(64)]
+    stack = lambda j: jnp.asarray(np.stack([pr[j] for pr in probs]).reshape(
+        (4, 16) + probs[0][j].shape))
+    Qb, qb, Ab, bb, Gb, hb = (stack(j) for j in range(6))
+    pen = jnp.full(hb.shape, 10.0)
+
+    def one(Q_, q_, A_, b_, G_, h_, pen_):
+        return elastiqp.jax.solve(Q_, q_, G_, h_, pen_, A=A_, b=b_).x
+
+    os.environ["ELASTIQP_NUM_THREADS"] = "4"
+    xs2 = jax.vmap(jax.vmap(one))(Qb, qb, Ab, bb, Gb, hb, pen)
+    del os.environ["ELASTIQP_NUM_THREADS"]
+    ref2 = np.stack(
+        [
+            np.asarray(one(*(arr[i, j] for arr in (Qb, qb, Ab, bb, Gb, hb, pen))))
+            for i in range(4)
+            for j in range(16)
+        ]
+    ).reshape(4, 16, 6)
+    dx2 = np.abs(np.asarray(xs2) - ref2).max()
+    check(
+        "nested vmap (4, 16) matches per-problem",
+        xs2.shape == (4, 16, 6) and dx2 == 0.0,
+        f"|dx|={dx2:.1e}",
     )
 
     print("Composability: FFI output feeds jnp computation inside jit")

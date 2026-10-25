@@ -6,7 +6,8 @@ Supported:
 - grad
 
 Notes:
-- vmap is sequential mode
+- vmap batches into a single FFI call, solved serially by default; set
+  ELASTIQP_NUM_THREADS=k to split a batch across k threads (0 = all cores)
 - Requires float64
 - Warm-starting is differentiable (the warm start itself gets a zero gradient)
 - Warm-starting requires explicit passing of the previous result
@@ -106,7 +107,7 @@ def _ffi_solve(
     # info = [converged, iters, relax_converged].
     sol = [vec(n), vec(p), vec(m), vec(p), vec(p)]
     out_types = sol + sol + [vec(3)]
-    call = jax.ffi.ffi_call("elastiqp_solve", out_types, vmap_method="sequential")
+    call = jax.ffi.ffi_call("elastiqp_solve", out_types, vmap_method="broadcast_all")
     return call(
         Q,
         q,
